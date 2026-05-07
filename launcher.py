@@ -25,6 +25,7 @@ import re
 import time
 import webbrowser
 import random
+from datetime import datetime
 
 # ── Config ────────────────────────────────────────────────────
 
@@ -90,6 +91,7 @@ DEFAULT_CONFIG = {
     "region": "na1",
     "routing": "americas",
     "players": [],
+    "last_run": {},  # maps mode key -> "YYYY-MM-DD HH:MM"
 }
 
 # ── LoL Colors (Cinematic palette — v1.1) ────────────────────
@@ -251,6 +253,9 @@ class App(tk.Tk):
         # Thread-safe queue: background thread puts (line, tag) here;
         # _poll_output drains it on the main thread every 50 ms.
         self._output_q = queue.Queue()
+
+        # Track which mode is currently running so we can update timestamps
+        self._current_mode = None
 
         self.build_ui()
 
@@ -1189,20 +1194,36 @@ class App(tk.Tk):
         self._btn(btn_row, "Save", self.save_cfg,
                   w=8, s="accent").pack(side="right")
 
+        # Last-run timestamp labels — keyed by mode string
+        self._last_run_labels = {}
+        _last_run_cfg = self.config.get("last_run", {})
+
+        def _make_ts_label(parent, mode_key):
+            ts = _last_run_cfg.get(mode_key, "")
+            lbl = tk.Label(parent, text=f"Last updated: {ts}" if ts else "",
+                           bg=C["bg"], fg=C["txt_dim"], font=("Segoe UI", 8))
+            lbl.pack(fill="x", padx=4)
+            self._last_run_labels[mode_key] = lbl
+
         # Buttons
         self._section(inner, "RANK & ANALYTICS")
         self._btn(inner, "Update Ranks & Analytics",
                  lambda: self.run("update")).pack(fill="x", pady=2)
+        _make_ts_label(inner, "update")
         self._btn(inner, "Update (Skip Matches)",
                  lambda: self.run("update_fast"), s="dim").pack(fill="x", pady=2)
+        _make_ts_label(inner, "update_fast")
 
         self._section(inner, "SCOUTING REPORTS")
         self._btn(inner, "Full Scout + Ranks",
                  lambda: self.run("scout"), s="accent").pack(fill="x", pady=2)
+        _make_ts_label(inner, "scout")
         self._btn(inner, "Scout Only",
                  lambda: self.run("scout_only")).pack(fill="x", pady=2)
+        _make_ts_label(inner, "scout_only")
         self._btn(inner, "Scout New Players",
                  lambda: self.run("scout_new")).pack(fill="x", pady=2)
+        _make_ts_label(inner, "scout_new")
 
         # Re-scout single player row
         rs_row = tk.Frame(inner, bg=C["bg"])
@@ -1224,14 +1245,17 @@ class App(tk.Tk):
 
         self._btn(rs_row, "Re-scout",
                   lambda: self._run_rescount_player(), s="dim").pack(side="left")
+        _make_ts_label(inner, "scout_player")
 
         self._section(inner, "DRAFT TOOL")
         self._btn(inner, "Setup Draft Sheet",
                  lambda: self.run("setup_draft")).pack(fill="x", pady=2)
+        _make_ts_label(inner, "setup_draft")
 
         self._section(inner, "IN-HOUSE")
         self._btn(inner, "Log Custom Games",
                  lambda: self.run("inhouse"), s="accent").pack(fill="x", pady=2)
+        _make_ts_label(inner, "inhouse")
 
         tk.Frame(inner, bg=C["bg"], height=8).pack()
         self._btn(inner, "Stop Process", self.stop, s="danger").pack(fill="x", pady=2)
@@ -1264,6 +1288,10 @@ class App(tk.Tk):
                            ("hdr", C["gold"])]:
             self.console.tag_configure(tag, foreground=color,
                 font=("Consolas", 11, "bold") if tag == "hdr" else None)
+
+        # Progress bar — shown below the console output area
+        self.progress_bar = ttk.Progressbar(right, mode="indeterminate")
+        self.progress_bar.pack(fill="x", side="bottom")
 
         # Mousewheel scroll
         def _on_scroll(e):
@@ -5872,6 +5900,9 @@ class App(tk.Tk):
         self.log(f"{'═' * 45}\n\n", "gold")
         self.status.set(f"● {names.get(mode, mode).upper()}")
 
+        self._current_mode = mode
+        self.progress_bar.start(10)
+
         # In the merged frozen exe, _run_fetch_ranks/_run_inhouse are defined at
         # module level and can be called in-process — no pipes, no sys.stdout = None.
         # When running from source (python launcher.py), fall back to subprocess.
@@ -5923,10 +5954,13 @@ class App(tk.Tk):
         else:
             self._output_q.put((f"\nFailed (code {rc})\n", "red"))
             self.after(0, self.status.set, f"● ERROR ({rc})")
+        # Sentinel: signals _poll_output that the run is done
+        self._output_q.put((None, rc))
 
     def _run_bg(self, mode):
         """Subprocess fallback (used when running from source, not frozen)."""
         cmd = self._build_cmd(mode)
+        rc = 1
         try:
             self.proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -5951,12 +5985,30 @@ class App(tk.Tk):
             self.after(0, self.status.set, "● ERROR")
         finally:
             self.proc = None
+            # Sentinel: signals _poll_output that the run is done
+            self._output_q.put((None, rc))
 
     def _poll_output(self):
         """Drain the output queue into the console. Runs on main thread every 50 ms."""
         try:
             for _ in range(50):
                 line, tag = self._output_q.get_nowait()
+                if line is None:
+                    rc = tag  # sentinel: tag holds exit code
+                    self.progress_bar.stop()
+                    if rc != 0:
+                        self.log(f"\n[ERROR] Process exited with code {rc}\n", "red")
+                    else:
+                        mode = self._current_mode
+                        if mode:
+                            ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+                            self.config["last_run"][mode] = ts
+                            save_config(self.config)
+                            lbl = self._last_run_labels.get(mode)
+                            if lbl:
+                                lbl.config(text=f"Last updated: {ts}")
+                    self._current_mode = None
+                    break
                 self.log(line, tag)
         except queue.Empty:
             pass
