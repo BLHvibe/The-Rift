@@ -216,6 +216,39 @@ def load_players_from_sheet():
         return [], {}
 
 
+class JobRunner:
+    def __init__(self, app):
+        self._app = app
+        self._jobs = {}  # name -> (thread, cancel_event)
+
+    def submit(self, name, fn, on_done=None, on_error=None):
+        cancel = threading.Event()
+        def _run():
+            try:
+                fn(cancel)
+            except Exception as e:
+                if on_error:
+                    self._app.after(0, on_error, e)
+                else:
+                    self._app._output_q.put((f"[{name}] ERROR: {e}\n",
+                                             "red"))
+            finally:
+                if on_done:
+                    self._app.after(0, on_done)
+                self._jobs.pop(name, None)
+        t = threading.Thread(target=_run, name=name, daemon=True)
+        self._jobs[name] = (t, cancel)
+        t.start()
+        return cancel
+
+    def shutdown(self, timeout=3):
+        for _name, (_t, cancel) in list(self._jobs.items()):
+            cancel.set()
+        for _name, (t, _cancel) in list(self._jobs.items()):
+            t.join(timeout=timeout)
+        self._jobs.clear()
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -257,18 +290,16 @@ class App(tk.Tk):
         # Track which mode is currently running so we can update timestamps
         self._current_mode = None
 
+        self.jobs = JobRunner(self)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
         self.build_ui()
 
-        # Load players in background
-        threading.Thread(target=self._load_players_bg, daemon=True).start()
-        # Try to load any existing draft analysis from the sheet
-        threading.Thread(target=self._load_initial_draft_bg, daemon=True).start()
-        # Try to load power rankings from the sheet
-        threading.Thread(target=self._load_initial_rankings_bg, daemon=True).start()
-        # Try to load in-house stats from the sheet
-        threading.Thread(target=self._load_initial_inhouse_bg, daemon=True).start()
-        # Auto-update check (only when frozen — see _check_for_updates_bg)
-        threading.Thread(target=self._check_for_updates_bg, daemon=True).start()
+        self.jobs.submit("load_players", lambda c: self._load_players_bg())
+        self.jobs.submit("load_draft", lambda c: self._load_initial_draft_bg())
+        self.jobs.submit("load_rankings", lambda c: self._load_initial_rankings_bg())
+        self.jobs.submit("load_inhouse", lambda c: self._load_initial_inhouse_bg())
+        self.jobs.submit("check_updates", lambda c: self._check_for_updates_bg())
 
     def _load_players_bg(self):
         result = load_players_from_sheet()
@@ -999,7 +1030,7 @@ class App(tk.Tk):
         self._feed_placeholder.pack(pady=40)
 
         # Load feed in background on startup
-        threading.Thread(target=self._feed_load_bg, daemon=True).start()
+        self.jobs.submit("feed_load", lambda c: self._feed_load_bg())
 
     def _feed_load_bg(self):
         try:
@@ -1036,7 +1067,7 @@ class App(tk.Tk):
             text="Refreshing…",
             bg=C["bg"], fg=C["txt_dim"], font=("Segoe UI", 11, "italic"))
         self._feed_placeholder.pack(pady=40)
-        threading.Thread(target=self._feed_load_bg, daemon=True).start()
+        self.jobs.submit("feed_refresh", lambda c: self._feed_load_bg())
 
     def _feed_render(self, events, error=None):
         for w in self.feed_frame.winfo_children():
@@ -1498,8 +1529,8 @@ class App(tk.Tk):
             pass
         self._join_set_status("Adding you to the roster...", C["blue_lt"])
 
-        threading.Thread(target=self._join_tier_list_bg,
-                         args=(name, riot), daemon=True).start()
+        self.jobs.submit("join_tier_list",
+                         lambda c, n=name, r=riot: self._join_tier_list_bg(n, r))
 
     def _join_tier_list_bg(self, name, riot_id):
         """Write a new player into the Players sheet, with full validation."""
@@ -1721,7 +1752,7 @@ class App(tk.Tk):
 
     def _reload_players(self):
         self.log("Refreshing player list...\n", "blue")
-        threading.Thread(target=self._load_players_bg, daemon=True).start()
+        self.jobs.submit("load_players", lambda c: self._load_players_bg())
 
     def run_draft_ui(self):
         """Run draft computation and display results in the UI."""
@@ -1736,8 +1767,8 @@ class App(tk.Tk):
         tk.Label(self.draft_results, text="Computing draft analysis...",
                 bg=C["bg"], fg=C["blue_lt"], font=("Segoe UI", 12)).pack(pady=20)
 
-        # Run the draft command in background and capture output
-        threading.Thread(target=self._run_draft_bg, args=(team1, team2), daemon=True).start()
+        self.jobs.submit("run_draft",
+                         lambda c, t1=team1, t2=team2: self._run_draft_bg(t1, t2))
 
     def _run_draft_bg(self, team1, team2):
         """Write team selections to sheet, run --draft, then parse and display results."""
@@ -2462,8 +2493,8 @@ class App(tk.Tk):
             return
 
         self._show_scout_loading(name)
-        threading.Thread(target=self._load_scout_bg, args=(name,),
-                         daemon=True).start()
+        self.jobs.submit("load_scout",
+                         lambda c, n=name: self._load_scout_bg(n))
 
     def _load_scout_bg(self, player_name):
         """Background fetch of a player's scouting sheet."""
@@ -3786,10 +3817,9 @@ class App(tk.Tk):
         except Exception:
             pass
         self.update_status_var.set("Connecting to GitHub...")
-        threading.Thread(
-            target=self._download_and_install_bg,
-            args=(dialog, download_url, version),
-            daemon=True).start()
+        self.jobs.submit("download_update",
+                         lambda c, d=dialog, u=download_url, v=version:
+                         self._download_and_install_bg(d, u, v))
 
     def _download_and_install_bg(self, dialog, download_url, version):
         """Download the new .exe and trigger the swap-and-restart."""
@@ -4063,7 +4093,7 @@ class App(tk.Tk):
     def _start_rating_flow(self):
         """Kick off the LCU lookup + sheet preload."""
         self._show_rating_loading("Connecting to League client...")
-        threading.Thread(target=self._rating_init_bg, daemon=True).start()
+        self.jobs.submit("rating_init", lambda c: self._rating_init_bg())
 
     def _show_rating_loading(self, msg):
         for w in self.rating_frame.winfo_children():
@@ -4476,10 +4506,9 @@ class App(tk.Tk):
                      text=f"Loading scouting report for {target_name}...",
                      bg=C["bg"], fg=C["txt_dim"],
                      font=("Segoe UI", 10, "italic")).pack(pady=20)
-            threading.Thread(
-                target=self._rating_load_scout_bg,
-                args=(target_name, scout_box),
-                daemon=True).start()
+            self.jobs.submit("rating_load_scout",
+                             lambda c, n=target_name, b=scout_box:
+                             self._rating_load_scout_bg(n, b))
 
         # Rating dropdown card (always visible, even while scouting loads)
         self._render_rating_controls(body, target_name)
@@ -4664,10 +4693,9 @@ class App(tk.Tk):
     def _submit_rating(self, target_name, tier):
         """Write the selected rating to the sheet and advance."""
         self.rating_status_var.set(f"Saving {tier}...")
-        threading.Thread(
-            target=self._submit_rating_bg,
-            args=(target_name, tier),
-            daemon=True).start()
+        self.jobs.submit("submit_rating",
+                         lambda c, n=target_name, t=tier:
+                         self._submit_rating_bg(n, t))
 
     def _submit_rating_bg(self, target_name, tier):
         try:
@@ -5595,7 +5623,7 @@ class App(tk.Tk):
             "Connecting to your League client...",
             color=self._INHOUSE_ACCENT, show_spinner=True)
         self.inhouse_logger_running = True
-        threading.Thread(target=self._inhouse_logger_bg, daemon=True).start()
+        self.jobs.submit("inhouse_logger", lambda c: self._inhouse_logger_bg())
 
     def _inhouse_logger_bg(self):
         """Run the inhouse_tracker.py subprocess and stream output."""
@@ -5628,9 +5656,8 @@ class App(tk.Tk):
                            "Done! Refreshing stats...",
                            "#5fb89a", False)
                 # Re-fetch the sheet to pick up the new games
-                self.after(200, lambda: threading.Thread(
-                    target=self._load_initial_inhouse_bg,
-                    daemon=True).start())
+                self.after(200, lambda: self.jobs.submit(
+                    "reload_inhouse", lambda c: self._load_initial_inhouse_bg()))
                 self.after(2500, self._inhouse_clear_status)
             else:
                 tail = " | ".join(last_lines[-3:]) if last_lines else ""
@@ -5782,7 +5809,7 @@ class App(tk.Tk):
     def _test_connection(self):
         self.notebook.select(self.tab_cmd)
         self.log("\nTesting connection...\n", "blue")
-        threading.Thread(target=self._test_connection_bg, daemon=True).start()
+        self.jobs.submit("test_connection", lambda c: self._test_connection_bg())
 
     def _test_connection_bg(self):
         key    = self.api_var.get().strip()
@@ -5890,6 +5917,10 @@ class App(tk.Tk):
             name = self.rescount_player_var.get().strip()
             return base + ["--scout-player", name]
         return base + flags.get(mode, [])
+
+    def _on_close(self):
+        self.jobs.shutdown(timeout=3)
+        self.destroy()
 
     def _is_running(self):
         if isinstance(self.proc, threading.Thread):
