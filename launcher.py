@@ -1020,7 +1020,7 @@ class App(tk.Tk):
                 rows = []
             data_rows = [r for r in rows
                          if len(r) >= 4 and r[0] != "_ACTIVITY LOG" and r[0]]
-            recent = data_rows[-50:]
+            recent = data_rows[-100:]
             recent.reverse()
             events = [{"ts": r[0], "type": r[1], "player": r[2], "details": r[3]}
                       for r in recent]
@@ -1056,10 +1056,37 @@ class App(tk.Tk):
                      font=("Segoe UI", 11, "italic")).pack(pady=40)
             return
 
-        from datetime import datetime as _dt
+        from datetime import datetime as _dt, date as _date, timedelta as _td
+
         now = _dt.now()
+        today = _date.today()
+        yesterday = today - _td(days=1)
+
+        def _date_label(ts_str):
+            try:
+                event_date = _dt.strptime(ts_str, "%Y-%m-%d %H:%M").date()
+            except ValueError:
+                return ts_str[:10]
+            if event_date == today:
+                return "Today"
+            elif event_date == yesterday:
+                return "Yesterday"
+            else:
+                return event_date.strftime("%b ") + str(event_date.day)
+
+        current_date_group = None
 
         for i, ev in enumerate(events):
+            group = _date_label(ev["ts"])
+            if group != current_date_group:
+                current_date_group = group
+                sep = tk.Frame(self.feed_frame, bg=C["bg"])
+                sep.pack(fill="x", pady=(8, 2))
+                tk.Label(sep, text=group, bg=C["bg"], fg=C["txt_dim"],
+                         font=("Segoe UI", 8, "bold")).pack(side="left", padx=10)
+                tk.Frame(sep, bg=C["rule"], height=1).pack(
+                    side="left", fill="x", expand=True, pady=4)
+
             icon_char, icon_color = self._FEED_ICONS.get(
                 ev["type"], ("●", C["txt_dim"]))
 
