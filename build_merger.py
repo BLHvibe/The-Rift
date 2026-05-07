@@ -272,7 +272,7 @@ LAUNCHER_PATCHES = [
                 cfg = DEFAULT_CONFIG.copy()
                 cfg.update(json.load(f))
                 return cfg
-        except: pass
+        except Exception: pass
     return DEFAULT_CONFIG.copy()''',
 '''def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -286,7 +286,7 @@ LAUNCHER_PATCHES = [
                 if not cfg.get("api_key"):
                     cfg["api_key"] = _EMBEDDED_API_KEY
                 return cfg
-        except: pass
+        except Exception: pass
     # Fresh-install path: also re-materialize in case the file got cleaned
     # between module-load and now.
     cfg = DEFAULT_CONFIG.copy()

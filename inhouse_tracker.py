@@ -174,7 +174,7 @@ def load_existing_game_ids(spreadsheet):
         for row in values[1:]:  # skip header
             if row and row[0]:
                 try: existing.add(int(row[0]))
-                except: existing.add(row[0])
+                except Exception: existing.add(row[0])
         return existing
     except gspread.exceptions.WorksheetNotFound:
         return set()

@@ -158,7 +158,7 @@ def load_config():
                 cfg = DEFAULT_CONFIG.copy()
                 cfg.update(json.load(f))
                 return cfg
-        except: pass
+        except Exception: pass
     return DEFAULT_CONFIG.copy()
 
 
@@ -1760,7 +1760,7 @@ class App(tk.Tk):
             # Write team selections to Draft Tool sheet
             try:
                 ws = ss.worksheet("Draft Tool")
-            except:
+            except Exception:
                 self.after(0, self._show_draft_error,
                           "Draft Tool sheet not found. Run 'Setup Draft Sheet' first.")
                 return
@@ -1802,7 +1802,11 @@ class App(tk.Tk):
                 output_lines.append(line)
                 self.after(0, self.log, line)
 
-            proc.wait()
+            try:
+                proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
 
             if proc.returncode != 0:
                 self.after(0, self._show_draft_error,
@@ -5620,7 +5624,11 @@ class App(tk.Tk):
                     # Also pipe to the admin console (will buffer if closed)
                     self.after(0, self.log, line)
 
-            proc.wait()
+            try:
+                proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
             rc = proc.returncode
 
             if rc == 0:
@@ -5997,7 +6005,11 @@ class App(tk.Tk):
                 env={**os.environ, "PYTHONUNBUFFERED": "1"})
             for line in iter(self.proc.stdout.readline, ""):
                 self._output_q.put((line, self._classify_line(line)))
-            self.proc.wait()
+            try:
+                self.proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait()
             rc = self.proc.returncode
             if rc == 0:
                 self._output_q.put(("\nCompleted.\n", "green"))
