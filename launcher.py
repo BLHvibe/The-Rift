@@ -367,7 +367,26 @@ class App(tk.Tk):
                  font=("Segoe UI", 22, "bold")).pack()
         tk.Label(body, text="Fetching the latest tier list...",
                  bg=C["panel"], fg=C["txt2"],
-                 font=("Segoe UI", 9, "italic")).pack(pady=(6, 22))
+                 font=("Segoe UI", 9, "italic")).pack(pady=(6, 8))
+
+        shimmer_cv = tk.Canvas(body, bg=C["gold_dk"], highlightthickness=0, height=3)
+        shimmer_cv.pack(fill="x", padx=60, pady=(0, 22))
+
+        _sx = [-120]
+        def _tick():
+            if not shimmer_cv.winfo_exists():
+                return
+            shimmer_cv.delete("all")
+            w = shimmer_cv.winfo_width() or 300
+            shimmer_cv.create_rectangle(0, 0, w, 3, fill=C["gold_dk"], outline="")
+            shimmer_cv.create_rectangle(_sx[0], 0, _sx[0] + 120, 3,
+                                        fill=C["gold_lt"], outline="")
+            _sx[0] += 10
+            if _sx[0] > w + 120:
+                _sx[0] = -120
+            shimmer_cv.after(30, _tick)
+        body.after(80, _tick)
+
         tk.Frame(outer, bg=C["gold_dk"], height=1).pack(fill="x")
         tk.Frame(outer, bg=C["gold"], height=1).pack(fill="x", pady=(2, 0))
 
@@ -488,7 +507,20 @@ class App(tk.Tk):
         cell = tk.Frame(parent, bg=C["bg"])
         # Add top padding so 2nd/3rd appear lower than 1st
         top_pad = 0 if is_first else 36
-        cell.grid(row=0, column=col, padx=10, pady=(top_pad, 0), sticky="ew")
+        _DROP = 55
+        cell.grid(row=0, column=col, padx=10, pady=(top_pad + _DROP, 0), sticky="ew")
+
+        # Y-drop entrance: slide up from dropped position over ~200ms
+        def _drop_step(step, _c=cell):
+            if not _c.winfo_exists():
+                return
+            if step >= 14:
+                _c.grid_configure(pady=(top_pad, 0))
+                return
+            ease = 1 - (1 - step / 14) ** 3
+            _c.grid_configure(pady=(top_pad + int(_DROP * (1 - ease)), 0))
+            _c.after(14, lambda: _drop_step(step + 1))
+        cell.after(0, lambda: _drop_step(0))
 
         # Outer wrapper holds the top accent stripe + the body
         outer = tk.Frame(cell, bg=C["bg"])
@@ -569,6 +601,22 @@ class App(tk.Tk):
                  bg=C["panel"], fg=C["txt2"],
                  font=("Segoe UI", 8, "bold")).pack(pady=(4, bottom_pad))
 
+        # Breathing glow on the champion card border
+        if is_first:
+            import math
+            _tick = [0]
+            def _breathe(_card=card):
+                if not _card.winfo_exists():
+                    return
+                b = (math.sin(_tick[0] * 0.07) + 1) / 2
+                r = int(0x3a + (0xd4 - 0x3a) * b)
+                g = int(0x2d + (0xb0 - 0x2d) * b)
+                bl = int(0x12 + (0x6e - 0x12) * b)
+                _card.configure(highlightbackground=f"#{r:02x}{g:02x}{bl:02x}")
+                _tick[0] += 1
+                _card.after(50, _breathe)
+            card.after(500, _breathe)
+
     def _build_rankings_divider(self, parent, title):
         """Cinematic divider: thin rule lines + caps title (no diamonds)."""
         wrap = tk.Frame(parent, bg=C["bg"])
@@ -613,6 +661,20 @@ class App(tk.Tk):
         stripe = tk.Frame(row, bg=rating_color, width=4)
         stripe.pack(side="left", fill="y")
         stripe.pack_propagate(False)
+
+        # Flash stripe bright gold on row appear, then settle to rating color
+        def _stripe_flash(step, _s=stripe):
+            if not _s.winfo_exists():
+                return
+            if step == 0:
+                _s.configure(bg=C["gold_lt"])
+                _s.after(60, lambda: _stripe_flash(1))
+            elif step == 1:
+                _s.configure(bg=C["gold"])
+                _s.after(80, lambda: _stripe_flash(2))
+            else:
+                _s.configure(bg=rating_color)
+        _stripe_flash(0)
 
         # NO.{rank} composite
         pos_box = tk.Frame(row, bg=row_bg, width=80)
