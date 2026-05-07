@@ -1904,7 +1904,7 @@ def run_draft(spreadsheet, all_scouting, rankings, champ_tags_data=None):
         ws = spreadsheet.worksheet("Draft Tool")
     except gspread.exceptions.WorksheetNotFound:
         print("  Draft Tool sheet not found. Run --setup-draft first.")
-        return
+        return [], []
 
     values = ws.get_all_values()
 
@@ -1924,7 +1924,7 @@ def run_draft(spreadsheet, all_scouting, rankings, champ_tags_data=None):
 
     if not team1 and not team2:
         print("  No players selected. Fill in the Draft Tool dropdowns first.")
-        return
+        return [], []
 
     print(f"  Team 1: {', '.join(f'{p} ({r})' for p, r in team1)}")
     print(f"  Team 2: {', '.join(f'{p} ({r})' for p, r in team2)}")
@@ -2222,6 +2222,7 @@ def run_draft(spreadsheet, all_scouting, rankings, champ_tags_data=None):
         sheets_retry(ws.batch_format, batch)
 
     print("\n  Draft Tool updated with bans and comp suggestions!")
+    return team1, team2
 
 
 def append_activity_event(spreadsheet, event_type, player_name, details):
@@ -3135,7 +3136,7 @@ def main():
             write_rater_bias(spreadsheet, rater_bias)
         write_rank_history(spreadsheet, results, ts)
         append_activity_event(spreadsheet, "UPDATE", "",
-                              f"Updated ranks for {len(results)} player(s)")
+                              f"{len(results)} players updated")
     else:
         results = []
 
@@ -3219,7 +3220,7 @@ def main():
         write_scouting_database(spreadsheet, all_scouting, final_rankings)
 
         append_activity_event(spreadsheet, "SCOUT", "",
-                              f"Scouted {len(all_scouting)} player(s)")
+                              f"Full scout: {len(all_scouting)} players updated")
         print(f"\nAll scouting reports generated!")
 
     # Scout new players only (merge into existing _ScoutDB)
@@ -3300,9 +3301,9 @@ def main():
         merged_scouting = {**existing_scouting, **new_scouting}
         merged_rankings = {**existing_rankings, **final_rankings}
         write_scouting_database(spreadsheet, merged_scouting, merged_rankings)
-        append_activity_event(spreadsheet, "SCOUT_NEW",
-                              ", ".join(new_scouting.keys()),
-                              f"Scouted {len(new_scouting)} new player(s)")
+        new_names = ", ".join(new_scouting.keys())
+        append_activity_event(spreadsheet, "SCOUT_NEW", new_names,
+                              f"Added {len(new_scouting)} new player(s): {new_names}")
         print(f"\nScouting complete! Added {len(new_scouting)} new player(s). Database now covers {len(merged_scouting)} players.")
         return
 
@@ -3366,8 +3367,9 @@ def main():
         existing_scouting[player["name"]] = analysis
         existing_rankings.update(final_rankings)
         write_scouting_database(spreadsheet, existing_scouting, existing_rankings)
-        append_activity_event(spreadsheet, "RESCOUTED", player["name"],
-                              f"Re-scouted {player['name']}")
+        rank_str = f" ({rs} {plp} LP)" if rs and rs not in ("Unranked", "") else ""
+        append_activity_event(spreadsheet, "SCOUT", player["name"],
+                              f"Re-scouted {player['name']}{rank_str}")
         print(f"\nDone! {player['name']} has been re-scouted and _ScoutDB updated.")
         return
 
@@ -3394,8 +3396,11 @@ def main():
             final_rankings = get_final_rankings(spreadsheet)
             if final_rankings:
                 db_rankings.update(final_rankings)
-            run_draft(spreadsheet, all_scouting, db_rankings, champ_tags)
-            append_activity_event(spreadsheet, "DRAFT", "", "Draft analysis run")
+            team1, team2 = run_draft(spreadsheet, all_scouting, db_rankings, champ_tags)
+            t1_str = ", ".join(p for p, r in team1) if team1 else "?"
+            t2_str = ", ".join(p for p, r in team2) if team2 else "?"
+            append_activity_event(spreadsheet, "DRAFT", "",
+                                  f"Draft: Team 1 [{t1_str}] vs Team 2 [{t2_str}]")
 
     # In-house stats tracker
     if args.inhouse:
