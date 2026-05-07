@@ -14,12 +14,13 @@ same .exe with --mode=... to run the analytics subprocesses.
 """
 
 from collections import defaultdict
+from datetime import datetime
 from datetime import datetime, timedelta
 from datetime import datetime, timezone
 from google.oauth2.service_account import Credentials
 from tkinter import ttk, scrolledtext
 import argparse
-import argparse, time, sys, os, re, subprocess, urllib3
+import argparse, time, random, sys, os, re, subprocess, urllib3
 import gspread
 import io
 import json
@@ -112,43 +113,24 @@ def _materialize_creds():
 
 # ─── Launcher (GUI) ─────────────────────────────────────────────────
 
-"""
-LoL Power Rankings — Command Center
-=====================================
-Visual control panel with real-time output, integrated draft tool,
-and League of Legends client-style UI.
+"""Config I/O and Google Sheets helpers."""
 
-REQUIREMENTS:
-  pip install requests gspread google-auth
-  (tkinter comes built-in with Python)
-
-USAGE:
-  python launcher.py
-"""
-
-
-# ── Config ────────────────────────────────────────────────────
 
 CONFIG_FILE = os.path.join(_resolve_resource_dir(), "launcher_config.json")
 
-# ── Version & Update Info ─────────────────────────────────────
-# These get overwritten by build_merger.py when the .exe is packaged.
-# When running from source they default to 0.0.0 so the update check
-# is effectively a no-op.
-__version__ = "1.1.1"
-GITHUB_REPO = "BLHvibe/The-Rift"
+DEFAULT_CONFIG = {
+    "api_key": _EMBEDDED_API_KEY,
+    "sheet_url": "https://docs.google.com/spreadsheets/d/1jtScmcfol2YBi0FUSwkXVWkJ4qRBuP9EVIfWSWSDpms/edit",
+    "creds_path": _materialize_creds(),
+    "region": "na1",
+    "routing": "americas",
+    "players": [],
+    "last_run": {},
+}
 
-
-# ── Google Sheets quota helpers ───────────────────────────────────────
 
 def sheets_retry(fn, *args, max_attempts=6, **kwargs):
-    """Call fn(*args, **kwargs) with exponential backoff on quota/server errors.
-
-    Google Sheets API returns 429 (RESOURCE_EXHAUSTED) when the per-minute
-    quota is exceeded. With multiple concurrent users sharing one
-    service-account project these become frequent. Retries up to
-    max_attempts times with jittered exponential backoff (1 s, 2 s, 4 s …).
-    """
+    """Call fn(*args, **kwargs) with exponential backoff on quota/server errors."""
     import gspread
     for attempt in range(max_attempts):
         try:
@@ -160,16 +142,12 @@ def sheets_retry(fn, *args, max_attempts=6, **kwargs):
             else:
                 raise
 
+
 _sheet_read_cache = {}  # {(spreadsheet_id, ws_title): (timestamp, rows)}
 
-def cached_get_all_values(ws, ttl=45):
-    """Return ws.get_all_values() from a process-local cache (TTL = 45 s).
 
-    Multiple users running commands within the same minute often read the
-    same worksheet seconds apart. Caching means only the first caller hits
-    the API; the rest read from memory, cutting read-quota usage under
-    concurrent load.
-    """
+def cached_get_all_values(ws, ttl=45):
+    """Return ws.get_all_values() from a process-local cache (TTL = 45 s)."""
     key = (ws.spreadsheet.id, ws.title)
     entry = _sheet_read_cache.get(key)
     now = time.time()
@@ -179,75 +157,10 @@ def cached_get_all_values(ws, ttl=45):
     _sheet_read_cache[key] = (now, rows)
     return rows
 
+
 def invalidate_sheet_cache(ws):
     """Drop the cached copy for ws so the next read fetches fresh data."""
     _sheet_read_cache.pop((ws.spreadsheet.id, ws.title), None)
-
-
-DEFAULT_CONFIG = {
-    "api_key": _EMBEDDED_API_KEY,
-    "sheet_url": "https://docs.google.com/spreadsheets/d/1jtScmcfol2YBi0FUSwkXVWkJ4qRBuP9EVIfWSWSDpms/edit",
-    "creds_path": _materialize_creds(),
-    "region": "na1",
-    "routing": "americas",
-    "players": [],
-}
-
-# ── LoL Colors (Cinematic palette — v1.1) ────────────────────
-# Restyled per the "Direction A — Cinematic" spec. All key names
-# kept stable so existing widget code continues to work; new keys
-# (rule, panel_2, strip, tile, teal) are additions, not renames.
-
-C = {
-    # Surfaces (deeper, slightly bluer)
-    "bg":       "#06090f",
-    "panel":    "#0c1422",
-    "panel_2":  "#101a2b",   # alternating row bg
-    "card":     "#0a2230",
-    "strip":    "#091324",   # table column-header strip
-    "tile":     "#0d1a2a",   # overview stat tiles
-    "input":    "#13192a",
-    "hover":    "#16314f",
-    "active":   "#0e3a5a",
-
-    # Brand — refined gold (warmer highlights, deeper shadows)
-    "gold":     "#c8a86a",
-    "gold_lt":  "#f3e6c4",
-    "gold_dk":  "#6e5424",
-    "gold_br":  "#d4b06e",
-
-    # `rule` is the warm brown-gold separator color used in place
-    # of the cool grey border. Replaces most uses of `border`.
-    "rule":     "#3a2d12",
-
-    # Status / accents
-    "blue":     "#5fa8c9",
-    "blue_lt":  "#5fb89a",   # repurposed: now matches teal for status text
-    "blue_dk":  "#0e3a5a",
-    "red":      "#c84b31",
-    "red_dk":   "#5a1c12",
-    "teal":     "#5fb89a",   # status indicator, win accent
-
-    # Text
-    "txt":      "#e6dec7",
-    "txt2":     "#9a9078",
-    "txt_dim":  "#564f3e",
-    "txt_dk":   "#06090f",
-
-    # Borders
-    "border":   "#3a2d12",   # remapped to rule
-    "brd_gold": "#463714",
-    "brd_act":  "#c8a86a",
-
-    "green":    "#0ACF83",
-    "purple":   "#9B59B6",
-
-    # Team sides — slightly tweaked for the new bg
-    "team_blue":"#0a223a",
-    "team_red": "#2a0a0a",
-}
-
-ROLES = ["Top", "Jungle", "Mid", "Bot", "Support"]
 
 
 def load_config():
@@ -262,7 +175,7 @@ def load_config():
                 if not cfg.get("api_key"):
                     cfg["api_key"] = _EMBEDDED_API_KEY
                 return cfg
-        except: pass
+        except Exception: pass
     # Fresh-install path: also re-materialize in case the file got cleaned
     # between module-load and now.
     cfg = DEFAULT_CONFIG.copy()
@@ -278,12 +191,10 @@ def save_config(cfg):
 
 
 def load_players_from_sheet():
-    """Try to load player names from the Google Sheet.
+    """Load player names from the Google Sheet.
 
-    Returns (names, riot_to_display) where:
-      - names is a list of display names from column B
-      - riot_to_display maps the Riot **game name** (the part before '#')
-        to the display name, lowercased for case-insensitive matching.
+    Returns (names, riot_to_display) where names is a list of display names
+    and riot_to_display maps lowercase Riot game-name → display name.
     Returns ([], {}) on failure.
     """
     try:
@@ -306,14 +217,10 @@ def load_players_from_sheet():
         for row in vals[2:]:
             if len(row) >= 2 and row[1].strip():
                 display_name = row[1].strip()
-                # Skip placeholder rows
                 if display_name.lower() == "player name":
                     continue
                 names.append(display_name)
-                # Extract Riot game-name (everything before '#')
                 if len(row) >= 3 and row[2].strip():
-                    # Some rows have embedded newlines (e.g. Joaquin's entry).
-                    # Strip them before splitting.
                     riot_id = row[2].replace("\n", "").strip()
                     if "#" in riot_id:
                         game_name = riot_id.split("#", 1)[0].strip()
@@ -324,6 +231,122 @@ def load_players_from_sheet():
         return names, riot_to_display
     except Exception:
         return [], {}
+
+
+"""Visual constants — color palette, roles, animation timings."""
+
+C = {
+    # Surfaces (deeper, slightly bluer)
+    "bg":       "#06090f",
+    "panel":    "#0c1422",
+    "panel_2":  "#101a2b",   # alternating row bg
+    "card":     "#0a2230",
+    "strip":    "#091324",   # table column-header strip
+    "tile":     "#0d1a2a",   # overview stat tiles
+    "input":    "#13192a",
+    "hover":    "#16314f",
+    "active":   "#0e3a5a",
+
+    # Brand — refined gold (warmer highlights, deeper shadows)
+    "gold":     "#c8a86a",
+    "gold_lt":  "#f3e6c4",
+    "gold_dk":  "#6e5424",
+    "gold_br":  "#d4b06e",
+
+    # `rule` is the warm brown-gold separator color used in place
+    # of the cool grey border.
+    "rule":     "#3a2d12",
+
+    # Status / accents
+    "blue":     "#5fa8c9",
+    "blue_lt":  "#5fb89a",
+    "blue_dk":  "#0e3a5a",
+    "red":      "#c84b31",
+    "red_dk":   "#5a1c12",
+    "teal":     "#5fb89a",
+
+    # Text
+    "txt":      "#e6dec7",
+    "txt2":     "#9a9078",
+    "txt_dim":  "#564f3e",
+    "txt_dk":   "#06090f",
+
+    # Borders
+    "border":   "#3a2d12",
+    "brd_gold": "#463714",
+    "brd_act":  "#c8a86a",
+
+    "green":    "#0ACF83",
+    "purple":   "#9B59B6",
+
+    # Team sides
+    "team_blue": "#0a223a",
+    "team_red":  "#2a0a0a",
+}
+
+ROLES = ["Top", "Jungle", "Mid", "Bot", "Support"]
+
+# Rankings animation timings (ms)
+ANIM_ROW_REVEAL_MS = 45
+ANIM_PODIUM_CENTER_MS = 60
+ANIM_PODIUM_SIDES_OFFSET_MS = 360
+ANIM_PODIUM_STAGGER_MS = 220
+
+
+"""
+LoL Power Rankings — Command Center
+=====================================
+Visual control panel with real-time output, integrated draft tool,
+and League of Legends client-style UI.
+
+REQUIREMENTS:
+  pip install requests gspread google-auth
+  (tkinter comes built-in with Python)
+
+USAGE:
+  python launcher.py
+"""
+
+
+
+# ── Version & Update Info ─────────────────────────────────────
+# These get overwritten by build_merger.py when the .exe is packaged.
+__version__ = "1.1.1"
+GITHUB_REPO = "BLHvibe/The-Rift"
+
+
+
+class JobRunner:
+    def __init__(self, app):
+        self._app = app
+        self._jobs = {}  # name -> (thread, cancel_event)
+
+    def submit(self, name, fn, on_done=None, on_error=None):
+        cancel = threading.Event()
+        def _run():
+            try:
+                fn(cancel)
+            except Exception as e:
+                if on_error:
+                    self._app.after(0, on_error, e)
+                else:
+                    self._app._output_q.put((f"[{name}] ERROR: {e}\n",
+                                             "red"))
+            finally:
+                if on_done:
+                    self._app.after(0, on_done)
+                self._jobs.pop(name, None)
+        t = threading.Thread(target=_run, name=name, daemon=True)
+        self._jobs[name] = (t, cancel)
+        t.start()
+        return cancel
+
+    def shutdown(self, timeout=3):
+        for _name, (_t, cancel) in list(self._jobs.items()):
+            cancel.set()
+        for _name, (t, _cancel) in list(self._jobs.items()):
+            t.join(timeout=timeout)
+        self._jobs.clear()
 
 
 class App(tk.Tk):
@@ -364,18 +387,19 @@ class App(tk.Tk):
         # _poll_output drains it on the main thread every 50 ms.
         self._output_q = queue.Queue()
 
+        # Track which mode is currently running so we can update timestamps
+        self._current_mode = None
+
+        self.jobs = JobRunner(self)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
         self.build_ui()
 
-        # Load players in background
-        threading.Thread(target=self._load_players_bg, daemon=True).start()
-        # Try to load any existing draft analysis from the sheet
-        threading.Thread(target=self._load_initial_draft_bg, daemon=True).start()
-        # Try to load power rankings from the sheet
-        threading.Thread(target=self._load_initial_rankings_bg, daemon=True).start()
-        # Try to load in-house stats from the sheet
-        threading.Thread(target=self._load_initial_inhouse_bg, daemon=True).start()
-        # Auto-update check (only when frozen — see _check_for_updates_bg)
-        threading.Thread(target=self._check_for_updates_bg, daemon=True).start()
+        self.jobs.submit("load_players", lambda c: self._load_players_bg())
+        self.jobs.submit("load_draft", lambda c: self._load_initial_draft_bg())
+        self.jobs.submit("load_rankings", lambda c: self._load_initial_rankings_bg())
+        self.jobs.submit("load_inhouse", lambda c: self._load_initial_inhouse_bg())
+        self.jobs.submit("check_updates", lambda c: self._check_for_updates_bg())
 
     def _load_players_bg(self):
         result = load_players_from_sheet()
@@ -1106,7 +1130,7 @@ class App(tk.Tk):
         self._feed_placeholder.pack(pady=40)
 
         # Load feed in background on startup
-        threading.Thread(target=self._feed_load_bg, daemon=True).start()
+        self.jobs.submit("feed_load", lambda c: self._feed_load_bg())
 
     def _feed_load_bg(self):
         try:
@@ -1127,7 +1151,7 @@ class App(tk.Tk):
                 rows = []
             data_rows = [r for r in rows
                          if len(r) >= 4 and r[0] != "_ACTIVITY LOG" and r[0]]
-            recent = data_rows[-50:]
+            recent = data_rows[-100:]
             recent.reverse()
             events = [{"ts": r[0], "type": r[1], "player": r[2], "details": r[3]}
                       for r in recent]
@@ -1143,7 +1167,7 @@ class App(tk.Tk):
             text="Refreshing…",
             bg=C["bg"], fg=C["txt_dim"], font=("Segoe UI", 11, "italic"))
         self._feed_placeholder.pack(pady=40)
-        threading.Thread(target=self._feed_load_bg, daemon=True).start()
+        self.jobs.submit("feed_refresh", lambda c: self._feed_load_bg())
 
     def _feed_render(self, events, error=None):
         for w in self.feed_frame.winfo_children():
@@ -1163,10 +1187,37 @@ class App(tk.Tk):
                      font=("Segoe UI", 11, "italic")).pack(pady=40)
             return
 
-        from datetime import datetime as _dt
+        from datetime import datetime as _dt, date as _date, timedelta as _td
+
         now = _dt.now()
+        today = _date.today()
+        yesterday = today - _td(days=1)
+
+        def _date_label(ts_str):
+            try:
+                event_date = _dt.strptime(ts_str, "%Y-%m-%d %H:%M").date()
+            except ValueError:
+                return ts_str[:10]
+            if event_date == today:
+                return "Today"
+            elif event_date == yesterday:
+                return "Yesterday"
+            else:
+                return event_date.strftime("%b ") + str(event_date.day)
+
+        current_date_group = None
 
         for i, ev in enumerate(events):
+            group = _date_label(ev["ts"])
+            if group != current_date_group:
+                current_date_group = group
+                sep = tk.Frame(self.feed_frame, bg=C["bg"])
+                sep.pack(fill="x", pady=(8, 2))
+                tk.Label(sep, text=group, bg=C["bg"], fg=C["txt_dim"],
+                         font=("Segoe UI", 8, "bold")).pack(side="left", padx=10)
+                tk.Frame(sep, bg=C["rule"], height=1).pack(
+                    side="left", fill="x", expand=True, pady=4)
+
             icon_char, icon_color = self._FEED_ICONS.get(
                 ev["type"], ("●", C["txt_dim"]))
 
@@ -1301,20 +1352,36 @@ class App(tk.Tk):
         self._btn(btn_row, "Save", self.save_cfg,
                   w=8, s="accent").pack(side="right")
 
+        # Last-run timestamp labels — keyed by mode string
+        self._last_run_labels = {}
+        _last_run_cfg = self.config.get("last_run", {})
+
+        def _make_ts_label(parent, mode_key):
+            ts = _last_run_cfg.get(mode_key, "")
+            lbl = tk.Label(parent, text=f"Last updated: {ts}" if ts else "",
+                           bg=C["bg"], fg=C["txt_dim"], font=("Segoe UI", 8))
+            lbl.pack(fill="x", padx=4)
+            self._last_run_labels[mode_key] = lbl
+
         # Buttons
         self._section(inner, "RANK & ANALYTICS")
         self._btn(inner, "Update Ranks & Analytics",
                  lambda: self.run("update")).pack(fill="x", pady=2)
+        _make_ts_label(inner, "update")
         self._btn(inner, "Update (Skip Matches)",
                  lambda: self.run("update_fast"), s="dim").pack(fill="x", pady=2)
+        _make_ts_label(inner, "update_fast")
 
         self._section(inner, "SCOUTING REPORTS")
         self._btn(inner, "Full Scout + Ranks",
                  lambda: self.run("scout"), s="accent").pack(fill="x", pady=2)
+        _make_ts_label(inner, "scout")
         self._btn(inner, "Scout Only",
                  lambda: self.run("scout_only")).pack(fill="x", pady=2)
+        _make_ts_label(inner, "scout_only")
         self._btn(inner, "Scout New Players",
                  lambda: self.run("scout_new")).pack(fill="x", pady=2)
+        _make_ts_label(inner, "scout_new")
 
         # Re-scout single player row
         rs_row = tk.Frame(inner, bg=C["bg"])
@@ -1336,14 +1403,17 @@ class App(tk.Tk):
 
         self._btn(rs_row, "Re-scout",
                   lambda: self._run_rescount_player(), s="dim").pack(side="left")
+        _make_ts_label(inner, "scout_player")
 
         self._section(inner, "DRAFT TOOL")
         self._btn(inner, "Setup Draft Sheet",
                  lambda: self.run("setup_draft")).pack(fill="x", pady=2)
+        _make_ts_label(inner, "setup_draft")
 
         self._section(inner, "IN-HOUSE")
         self._btn(inner, "Log Custom Games",
                  lambda: self.run("inhouse"), s="accent").pack(fill="x", pady=2)
+        _make_ts_label(inner, "inhouse")
 
         tk.Frame(inner, bg=C["bg"], height=8).pack()
         self._btn(inner, "Stop Process", self.stop, s="danger").pack(fill="x", pady=2)
@@ -1376,6 +1446,10 @@ class App(tk.Tk):
                            ("hdr", C["gold"])]:
             self.console.tag_configure(tag, foreground=color,
                 font=("Consolas", 11, "bold") if tag == "hdr" else None)
+
+        # Progress bar — shown below the console output area
+        self.progress_bar = ttk.Progressbar(right, mode="indeterminate")
+        self.progress_bar.pack(fill="x", side="bottom")
 
         # Mousewheel scroll
         def _on_scroll(e):
@@ -1555,8 +1629,8 @@ class App(tk.Tk):
             pass
         self._join_set_status("Adding you to the roster...", C["blue_lt"])
 
-        threading.Thread(target=self._join_tier_list_bg,
-                         args=(name, riot), daemon=True).start()
+        self.jobs.submit("join_tier_list",
+                         lambda c, n=name, r=riot: self._join_tier_list_bg(n, r))
 
     def _join_tier_list_bg(self, name, riot_id):
         """Write a new player into the Players sheet, with full validation."""
@@ -1778,7 +1852,7 @@ class App(tk.Tk):
 
     def _reload_players(self):
         self.log("Refreshing player list...\n", "blue")
-        threading.Thread(target=self._load_players_bg, daemon=True).start()
+        self.jobs.submit("load_players", lambda c: self._load_players_bg())
 
     def run_draft_ui(self):
         """Run draft computation and display results in the UI."""
@@ -1793,8 +1867,8 @@ class App(tk.Tk):
         tk.Label(self.draft_results, text="Computing draft analysis...",
                 bg=C["bg"], fg=C["blue_lt"], font=("Segoe UI", 12)).pack(pady=20)
 
-        # Run the draft command in background and capture output
-        threading.Thread(target=self._run_draft_bg, args=(team1, team2), daemon=True).start()
+        self.jobs.submit("run_draft",
+                         lambda c, t1=team1, t2=team2: self._run_draft_bg(t1, t2))
 
     def _run_draft_bg(self, team1, team2):
         """Write team selections to sheet, run --draft, then parse and display results."""
@@ -1817,7 +1891,7 @@ class App(tk.Tk):
             # Write team selections to Draft Tool sheet
             try:
                 ws = ss.worksheet("Draft Tool")
-            except:
+            except Exception:
                 self.after(0, self._show_draft_error,
                           "Draft Tool sheet not found. Run 'Setup Draft Sheet' first.")
                 return
@@ -1859,7 +1933,11 @@ class App(tk.Tk):
                 output_lines.append(line)
                 self.after(0, self.log, line)
 
-            proc.wait()
+            try:
+                proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
 
             if proc.returncode != 0:
                 self.after(0, self._show_draft_error,
@@ -2519,8 +2597,8 @@ class App(tk.Tk):
             return
 
         self._show_scout_loading(name)
-        threading.Thread(target=self._load_scout_bg, args=(name,),
-                         daemon=True).start()
+        self.jobs.submit("load_scout",
+                         lambda c, n=name: self._load_scout_bg(n))
 
     def _load_scout_bg(self, player_name):
         """Background fetch of a player's scouting sheet."""
@@ -3247,6 +3325,7 @@ class App(tk.Tk):
         # Column headers
         h = tk.Frame(card, bg=C["strip"])
         h.pack(fill="x")
+        tk.Frame(h, width=3, bg=C["strip"]).pack(side="left")
         for txt, w in [("#", 4), ("RESULT", 7), ("CHAMPION", 14), ("ROLE", 6),
                        ("K/D/A", 10), ("KDA", 6), ("CS/M", 6),
                        ("DMG", 9), ("VIS", 5), ("GOLD", 9), ("TIME", 6)]:
@@ -3315,6 +3394,7 @@ class App(tk.Tk):
 
         h = tk.Frame(card, bg=C["strip"])
         h.pack(fill="x")
+        tk.Frame(h, width=3, bg=C["strip"]).pack(side="left")
         for txt, w in [("CHAMPION", 14), ("GAMES", 6), ("WR", 6),
                        ("KDA", 6), ("CS/M", 6), ("DMG", 8),
                        ("THREAT", 11)]:
@@ -3841,10 +3921,9 @@ class App(tk.Tk):
         except Exception:
             pass
         self.update_status_var.set("Connecting to GitHub...")
-        threading.Thread(
-            target=self._download_and_install_bg,
-            args=(dialog, download_url, version),
-            daemon=True).start()
+        self.jobs.submit("download_update",
+                         lambda c, d=dialog, u=download_url, v=version:
+                         self._download_and_install_bg(d, u, v))
 
     def _download_and_install_bg(self, dialog, download_url, version):
         """Download the new .exe and trigger the swap-and-restart."""
@@ -4118,7 +4197,7 @@ class App(tk.Tk):
     def _start_rating_flow(self):
         """Kick off the LCU lookup + sheet preload."""
         self._show_rating_loading("Connecting to League client...")
-        threading.Thread(target=self._rating_init_bg, daemon=True).start()
+        self.jobs.submit("rating_init", lambda c: self._rating_init_bg())
 
     def _show_rating_loading(self, msg):
         for w in self.rating_frame.winfo_children():
@@ -4531,10 +4610,9 @@ class App(tk.Tk):
                      text=f"Loading scouting report for {target_name}...",
                      bg=C["bg"], fg=C["txt_dim"],
                      font=("Segoe UI", 10, "italic")).pack(pady=20)
-            threading.Thread(
-                target=self._rating_load_scout_bg,
-                args=(target_name, scout_box),
-                daemon=True).start()
+            self.jobs.submit("rating_load_scout",
+                             lambda c, n=target_name, b=scout_box:
+                             self._rating_load_scout_bg(n, b))
 
         # Rating dropdown card (always visible, even while scouting loads)
         self._render_rating_controls(body, target_name)
@@ -4719,10 +4797,9 @@ class App(tk.Tk):
     def _submit_rating(self, target_name, tier):
         """Write the selected rating to the sheet and advance."""
         self.rating_status_var.set(f"Saving {tier}...")
-        threading.Thread(
-            target=self._submit_rating_bg,
-            args=(target_name, tier),
-            daemon=True).start()
+        self.jobs.submit("submit_rating",
+                         lambda c, n=target_name, t=tier:
+                         self._submit_rating_bg(n, t))
 
     def _submit_rating_bg(self, target_name, tier):
         try:
@@ -5650,7 +5727,7 @@ class App(tk.Tk):
             "Connecting to your League client...",
             color=self._INHOUSE_ACCENT, show_spinner=True)
         self.inhouse_logger_running = True
-        threading.Thread(target=self._inhouse_logger_bg, daemon=True).start()
+        self.jobs.submit("inhouse_logger", lambda c: self._inhouse_logger_bg())
 
     def _inhouse_logger_bg(self):
         """Run the inhouse_tracker.py subprocess and stream output."""
@@ -5675,7 +5752,11 @@ class App(tk.Tk):
                     # Also pipe to the admin console (will buffer if closed)
                     self.after(0, self.log, line)
 
-            proc.wait()
+            try:
+                proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
             rc = proc.returncode
 
             if rc == 0:
@@ -5683,9 +5764,8 @@ class App(tk.Tk):
                            "Done! Refreshing stats...",
                            "#5fb89a", False)
                 # Re-fetch the sheet to pick up the new games
-                self.after(200, lambda: threading.Thread(
-                    target=self._load_initial_inhouse_bg,
-                    daemon=True).start())
+                self.after(200, lambda: self.jobs.submit(
+                    "reload_inhouse", lambda c: self._load_initial_inhouse_bg()))
                 self.after(2500, self._inhouse_clear_status)
             else:
                 tail = " | ".join(last_lines[-3:]) if last_lines else ""
@@ -5837,7 +5917,7 @@ class App(tk.Tk):
     def _test_connection(self):
         self.notebook.select(self.tab_cmd)
         self.log("\nTesting connection...\n", "blue")
-        threading.Thread(target=self._test_connection_bg, daemon=True).start()
+        self.jobs.submit("test_connection", lambda c: self._test_connection_bg())
 
     def _test_connection_bg(self):
         key    = self.api_var.get().strip()
@@ -5955,6 +6035,10 @@ class App(tk.Tk):
             return base + ["--scout-player", name]
         return base + flags.get(mode, [])
 
+    def _on_close(self):
+        self.jobs.shutdown(timeout=3)
+        self.destroy()
+
     def _is_running(self):
         if isinstance(self.proc, threading.Thread):
             return self.proc.is_alive()
@@ -5992,6 +6076,9 @@ class App(tk.Tk):
         self.log(f"  {names.get(mode, mode)}\n", "hdr")
         self.log(f"{'═' * 45}\n\n", "gold")
         self.status.set(f"● {names.get(mode, mode).upper()}")
+
+        self._current_mode = mode
+        self.progress_bar.start(10)
 
         # In the merged frozen exe, _run_fetch_ranks/_run_inhouse are defined at
         # module level and can be called in-process — no pipes, no sys.stdout = None.
@@ -6044,10 +6131,13 @@ class App(tk.Tk):
         else:
             self._output_q.put((f"\nFailed (code {rc})\n", "red"))
             self.after(0, self.status.set, f"● ERROR ({rc})")
+        # Sentinel: signals _poll_output that the run is done
+        self._output_q.put((None, rc))
 
     def _run_bg(self, mode):
         """Subprocess fallback (used when running from source, not frozen)."""
         cmd = self._build_cmd(mode)
+        rc = 1
         try:
             self.proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -6055,7 +6145,11 @@ class App(tk.Tk):
                 env={**os.environ, "PYTHONUNBUFFERED": "1"})
             for line in iter(self.proc.stdout.readline, ""):
                 self._output_q.put((line, self._classify_line(line)))
-            self.proc.wait()
+            try:
+                self.proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait()
             rc = self.proc.returncode
             if rc == 0:
                 self._output_q.put(("\nCompleted.\n", "green"))
@@ -6072,12 +6166,30 @@ class App(tk.Tk):
             self.after(0, self.status.set, "● ERROR")
         finally:
             self.proc = None
+            # Sentinel: signals _poll_output that the run is done
+            self._output_q.put((None, rc))
 
     def _poll_output(self):
         """Drain the output queue into the console. Runs on main thread every 50 ms."""
         try:
             for _ in range(50):
                 line, tag = self._output_q.get_nowait()
+                if line is None:
+                    rc = tag  # sentinel: tag holds exit code
+                    self.progress_bar.stop()
+                    if rc != 0:
+                        self.log(f"\n[ERROR] Process exited with code {rc}\n", "red")
+                    else:
+                        mode = self._current_mode
+                        if mode:
+                            ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+                            self.config["last_run"][mode] = ts
+                            save_config(self.config)
+                            lbl = self._last_run_labels.get(mode)
+                            if lbl:
+                                lbl.config(text=f"Last updated: {ts}")
+                    self._current_mode = None
+                    break
                 self.log(line, tag)
         except queue.Empty:
             pass
@@ -6159,6 +6271,21 @@ def _run_fetch_ranks(argv):
     NUM_TO_TIER = {6: "S", 5: "A", 4: "B", 3: "C", 2: "D", 1: "F"}
 
 
+    # ── Retry helper ──────────────────────────────────────────────
+
+    def sheets_retry(fn, *args, max_attempts=6, **kwargs):
+        """Call fn(*args, **kwargs) with exponential backoff on quota/server errors."""
+        for attempt in range(max_attempts):
+            try:
+                return fn(*args, **kwargs)
+            except gspread.exceptions.APIError as e:
+                status = getattr(e.response, "status_code", None)
+                if status in (429, 500, 503) and attempt < max_attempts - 1:
+                    time.sleep((2 ** attempt) + random.uniform(0, 1))
+                else:
+                    raise
+
+
     # ── Google Sheets helpers ─────────────────────────────────────
 
     def connect_to_sheet(creds_file, sheet_identifier):
@@ -6176,11 +6303,11 @@ def _run_fetch_ranks(argv):
         try:
             return spreadsheet.worksheet(name)
         except gspread.exceptions.WorksheetNotFound:
-            return spreadsheet.add_worksheet(name, rows=rows, cols=cols)
+            return sheets_retry(spreadsheet.add_worksheet, name, rows=rows, cols=cols)
 
 
     def fmt_title(ws, end_col):
-        ws.format(f"A1:{end_col}1", {
+        sheets_retry(ws.format, f"A1:{end_col}1", {
             "backgroundColor": {"red": 0.11, "green": 0.11, "blue": 0.18},
             "textFormat": {"bold": True, "fontSize": 14,
                            "foregroundColor": {"red": 0.91, "green": 0.72, "blue": 0.29}},
@@ -6189,7 +6316,7 @@ def _run_fetch_ranks(argv):
 
 
     def fmt_header(ws, row, end_col):
-        ws.format(f"A{row}:{end_col}{row}", {
+        sheets_retry(ws.format, f"A{row}:{end_col}{row}", {
             "backgroundColor": {"red": 0.09, "green": 0.14, "blue": 0.28},
             "textFormat": {"bold": True,
                            "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
@@ -6441,11 +6568,11 @@ def _run_fetch_ranks(argv):
                          r["lp"], r["wins"], r["losses"], r["score"],
                          r["normalized"], wr, games, timestamp])
         ws.clear()
-        ws.update(range_name="A1", values=rows)
+        sheets_retry(ws.update, range_name="A1", values=rows)
         fmt_title(ws, "L")
         fmt_header(ws, 2, "L")
         if len(rows) > 2:
-            ws.format(f"A3:L{len(rows)}", {"horizontalAlignment": "CENTER"})
+            sheets_retry(ws.format, f"A3:L{len(rows)}", {"horizontalAlignment": "CENTER"})
         print("  Rank Data updated")
 
 
@@ -6490,11 +6617,11 @@ def _run_fetch_ranks(argv):
             rows.append([r["row"], r["name"], wr, c1, m1, c2, m2, c3, m3,
                          rwl, rwr, kda, ak, ad, aa, hc])
         ws.clear()
-        ws.update(range_name="A1", values=rows)
+        sheets_retry(ws.update, range_name="A1", values=rows)
         fmt_title(ws, "P")
         fmt_header(ws, 2, "P")
         if len(rows) > 2:
-            ws.format(f"A3:P{len(rows)}", {"horizontalAlignment": "CENTER"})
+            sheets_retry(ws.format, f"A3:P{len(rows)}", {"horizontalAlignment": "CENTER"})
         print("  Player Stats updated")
 
 
@@ -6517,11 +6644,11 @@ def _run_fetch_ranks(argv):
             rows.append([i, c["name"], c["avg"], c.get("avg_tier", "?"),
                          c["std"], c["min"], c["max"], c["range"], verdict])
         ws.clear()
-        ws.update(range_name="A1", values=rows)
+        sheets_retry(ws.update, range_name="A1", values=rows)
         fmt_title(ws, "I")
         fmt_header(ws, 2, "I")
         if len(rows) > 2:
-            ws.format(f"A3:I{len(rows)}", {"horizontalAlignment": "CENTER"})
+            sheets_retry(ws.format, f"A3:I{len(rows)}", {"horizontalAlignment": "CENTER"})
         print("  Consensus & Controversy updated")
 
 
@@ -6538,9 +6665,9 @@ def _run_fetch_ranks(argv):
         if not hot_takes:
             rows.append(["", "No hot takes found - everyone agrees!", "", "", "", "", ""])
         ws.clear()
-        ws.update(range_name="A1", values=rows)
+        sheets_retry(ws.update, range_name="A1", values=rows)
         fmt_title(ws, "G")
-        ws.format("A2:G2", {
+        sheets_retry(ws.format, "A2:G2", {
             "backgroundColor": {"red": 0.15, "green": 0.15, "blue": 0.25},
             "textFormat": {"italic": True,
                            "foregroundColor": {"red": 0.7, "green": 0.7, "blue": 0.7}},
@@ -6548,7 +6675,7 @@ def _run_fetch_ranks(argv):
         })
         fmt_header(ws, 3, "G")
         if len(rows) > 3:
-            ws.format(f"A4:G{len(rows)}", {"horizontalAlignment": "CENTER"})
+            sheets_retry(ws.format, f"A4:G{len(rows)}", {"horizontalAlignment": "CENTER"})
         print(f"  Hot Take Detector updated ({len(hot_takes)} hot takes)")
 
 
@@ -6564,11 +6691,11 @@ def _run_fetch_ranks(argv):
             rows.append([i, rb["rater"], rb["avg"], rb["avg_tier"],
                          rb["s_count"], rb["f_count"], rb["std"], ds, rb["label"]])
         ws.clear()
-        ws.update(range_name="A1", values=rows)
+        sheets_retry(ws.update, range_name="A1", values=rows)
         fmt_title(ws, "I")
         fmt_header(ws, 2, "I")
         if len(rows) > 2:
-            ws.format(f"A3:I{len(rows)}", {"horizontalAlignment": "CENTER"})
+            sheets_retry(ws.format, f"A3:I{len(rows)}", {"horizontalAlignment": "CENTER"})
         print("  Rater Bias Report updated")
 
 
@@ -6596,7 +6723,7 @@ def _run_fetch_ranks(argv):
 
             all_rows = [title, header, data_row]
             ws.clear()
-            ws.update(range_name="A1", values=all_rows)
+            sheets_retry(ws.update, range_name="A1", values=all_rows)
             fmt_title(ws, chr(64 + min(num_players + 1, 26)))
 
             ref_labels = [
@@ -6611,7 +6738,7 @@ def _run_fetch_ranks(argv):
                 "Iron I = 4", "Iron IV = 1", "Unranked = 0",
             ]
             for i, label in enumerate(ref_labels):
-                ws.update_cell(i + 1, ref_col, label)
+                sheets_retry(ws.update_cell, i + 1, ref_col, label)
 
             print("  Rank History created (first snapshot)")
         else:
@@ -6626,7 +6753,7 @@ def _run_fetch_ranks(argv):
                 else:
                     data_row.append("")
 
-            ws.update(range_name=f"A{next_row}", values=[data_row])
+            sheets_retry(ws.update, range_name=f"A{next_row}", values=[data_row])
 
             data_points = next_row - 2
             print(f"  Rank History updated ({data_points} data points)")
@@ -6816,11 +6943,11 @@ def _run_fetch_ranks(argv):
         sheet_name = f"Scout - {player_name}"[:30]
         try:
             old = spreadsheet.worksheet(sheet_name)
-            spreadsheet.del_worksheet(old)
+            sheets_retry(spreadsheet.del_worksheet, old)
         except gspread.exceptions.WorksheetNotFound:
             pass
 
-        ws = spreadsheet.add_worksheet(sheet_name, rows=120, cols=12)
+        ws = sheets_retry(spreadsheet.add_worksheet, sheet_name, rows=120, cols=12)
 
         DARK = {"red": 0.11, "green": 0.11, "blue": 0.18}
         HEADER = {"red": 0.09, "green": 0.14, "blue": 0.28}
@@ -7083,11 +7210,11 @@ def _run_fetch_ranks(argv):
                                                     "horizontalAlignment": "CENTER"}))
 
         # ── WRITE + FORMAT ──
-        ws.update(range_name="A1", values=rows)
+        sheets_retry(ws.update, range_name="A1", values=rows)
 
         # Apply all tracked merges
         for m in merges:
-            ws.merge_cells(m)
+            sheets_retry(ws.merge_cells, m)
 
         # Column widths
         col_px = [160, 80, 80, 80, 90, 80, 90, 100, 100, 90, 100, 120]
@@ -7101,19 +7228,18 @@ def _run_fetch_ranks(argv):
             "range": {"sheetId": ws.id, "dimension": "ROWS",
                       "startIndex": 0, "endIndex": 1},
             "properties": {"pixelSize": 50}, "fields": "pixelSize"}})
-        spreadsheet.batch_update({"requests": reqs})
+        sheets_retry(spreadsheet.batch_update, {"requests": reqs})
 
         # Apply formats in batches
         for i in range(0, len(fmts), 15):
             batch = [{"range": r, "format": f} for r, f in fmts[i:i+15]]
-            ws.batch_format(batch)
-            time.sleep(0.3)
+            sheets_retry(ws.batch_format, batch)
 
         # Tab color by form
         tc = ({"red": 0.2, "green": 0.8, "blue": 0.2} if a["form"] == "HOT"
               else {"red": 0.8, "green": 0.2, "blue": 0.2} if a["form"] == "COLD"
               else {"red": 0.3, "green": 0.5, "blue": 0.9})
-        spreadsheet.batch_update({"requests": [{
+        sheets_retry(spreadsheet.batch_update, {"requests": [{
             "updateSheetProperties": {
                 "properties": {"sheetId": ws.id, "tabColor": tc},
                 "fields": "tabColor"}}]})
@@ -7273,9 +7399,11 @@ def _run_fetch_ranks(argv):
                 for name in inhouse:
                     inhouse[name]["champs"].sort(key=lambda x: x["games"], reverse=True)
                 return inhouse
-            except:
+            except Exception as e:
+                print(f"Warning: failed to load inhouse DB fallback: {e}")
                 return {}
-        except Exception:
+        except Exception as e:
+            print(f"Warning: failed to load inhouse data: {e}")
             return {}
 
 
@@ -7319,12 +7447,21 @@ def _run_fetch_ranks(argv):
         },
     }
 
+    ARCHETYPE_CONFLICTS = {
+        "Dive": ["hypercarry", "disengage"],        # hypercarry/peel in dive = bad
+        "Teamfight": ["disengage", "duelist"],       # selfish fighters in TF = bad
+        "Poke / Siege": ["engage", "assassin_or_burst"],  # dive in poke = contradictory
+        "Protect the Carry": ["assassin_or_burst"],  # assassins in protect = bad
+        "Split Push": ["engage", "aoe_damage"],      # AoE teamfight in split = bad
+    }
+
     CHAMP_SUBCLASSES = {
         "engage": {"Malphite","Amumu","Leona","Nautilus","Rakan","Rell","Alistar",
                    "Jarvan IV","Sejuani","Maokai","Ornn","Zac","Sion","Gragas",
                    "Wukong","Diana","Galio","Skarner","Yone","Kennen","Hecarim",
-                   "Vi","Camille","Kled","Nocturne","Rek'Sai","Pantheon"},
-        "aoe_damage": {"Orianna","MissFortune","Kennen","Rumble","Diana","Yone",
+                   "Vi","Camille","Kled","Nocturne","Rek'Sai","Pantheon",
+                   "Ambessa","Aurora"},
+        "aoe_damage": {"Orianna","Miss Fortune","Kennen","Rumble","Diana","Yone",
                        "Yasuo","Gangplank","Samira","Karthus","Brand","Zyra",
                        "Viktor","Cassiopeia","Nilah","Fiddlesticks","Aurora","Katarina",
                        "Vladimir","Lissandra","Wukong","Galio","Lillia","Briar",
@@ -7332,13 +7469,14 @@ def _run_fetch_ranks(argv):
         "frontline": {"Malphite","Maokai","Ornn","Sion","Cho'Gath","Dr. Mundo",
                       "Tahm Kench","Shen","Braum","Taric","Alistar","Leona",
                       "Nautilus","Rell","Sejuani","Amumu","Rammus","Zac",
-                      "Poppy","Skarner","Ksante","Gragas","Volibear","Darius",
-                      "Garen","Sett","Mordekaiser","Illaoi","Urgot","Aatrox"},
+                      "Poppy","Skarner","K'Sante","Gragas","Volibear","Darius",
+                      "Garen","Sett","Mordekaiser","Illaoi","Urgot","Aatrox","Ambessa"},
         "assassin_or_burst": {"Zed","Talon","Qiyana","Akali","LeBlanc","Fizz",
                               "Katarina","Ekko","Kha'Zix","Rengar","Evelynn",
                               "Shaco","Naafiri","Pyke","Syndra","Ahri","Veigar",
                               "Annie","Lux","Neeko","Zoe","Vex","Aurora",
-                              "Nocturne","Diana","Briar","Lee Sin"},
+                              "Nocturne","Diana","Briar","Lee Sin",
+                              "Ambessa","Mel"},
         "cc": {"Thresh","Morgana","Lux","Ahri","Ashe","Jhin","Veigar","Neeko",
                "Twisted Fate","Blitzcrank","Pyke","Elise","Lee Sin","Hwei",
                "Sejuani","Amumu","Leona","Nautilus","Maokai","Zyra","Bard",
@@ -7350,7 +7488,7 @@ def _run_fetch_ranks(argv):
         "waveclear": {"Anivia","Ryze","Malzahar","Viktor","Ziggs","Sivir",
                       "Jinx","Orianna","Xerath","Taliyah","Aurelion Sol","Hwei",
                       "Twisted Fate","Corki","Heimerdinger","Seraphine","Veigar",
-                      "Cassiopeia","Vladimir","Azir"},
+                      "Cassiopeia","Vladimir","Azir","Mel","Smolder"},
         "long_range": {"Xerath","Vel'Koz","Lux","Ziggs","Jayce","Ezreal","Varus",
                        "Kog'Maw","Nidalee","Zoe","Hwei","Caitlyn","Senna",
                        "Seraphine","Karma","Viktor","Corki","Jhin","Ashe"},
@@ -7368,15 +7506,15 @@ def _run_fetch_ranks(argv):
 
 
     ROLE_VALID = {
-        "Top": {"Aatrox","Ambessa","Aurora","Camille","ChoGath","Darius","DrMundo",
+        "Top": {"Aatrox","Ambessa","Aurora","Camille","Cho'Gath","Darius","Dr. Mundo",
                 "Fiora","Gangplank","Garen","Gnar","Gwen","Illaoi","Irelia","Jax",
-                "Jayce","KSante","Kayle","Kennen","Kled","Malphite","Maokai",
+                "Jayce","K'Sante","Kayle","Kennen","Kled","Malphite","Maokai",
                 "Mordekaiser","Nasus","Olaf","Ornn","Pantheon","Poppy","Quinn",
                 "Renekton","Rengar","Riven","Rumble","Sett","Shen","Singed",
                 "Sion","Tahm Kench","Teemo","Trundle","Tryndamere","Urgot",
                 "Vladimir","Volibear","Wukong","Yasuo","Yone","Yorick","Gragas",
                 "Heimerdinger","Akali","Sylas","Warwick","Zac"},
-        "Jungle": {"Amumu","Bel'Veth","Briar","Diana","Ekko","Elise","Evelynn",
+        "Jungle": {"Amumu","Ambessa","Bel'Veth","Briar","Diana","Ekko","Elise","Evelynn",
                    "Fiddlesticks","Gragas","Graves","Hecarim","Ivern","Jarvan IV",
                    "Karthus","Kayn","Kha'Zix","Kindred","Lee Sin","Lillia",
                    "Master Yi","Nidalee","Nocturne","Nunu","Pantheon","Poppy",
@@ -7386,16 +7524,16 @@ def _run_fetch_ranks(argv):
         "Mid": {"Ahri","Akali","Akshan","Anivia","Annie","Aurelion Sol","Azir",
                 "Cassiopeia","Corki","Diana","Ekko","Fizz","Galio","Hwei",
                 "Irelia","Kassadin","Katarina","LeBlanc","Lissandra","Lux",
-                "Malzahar","Naafiri","Neeko","Orianna","Pantheon","Qiyana",
+                "Malzahar","Mel","Naafiri","Neeko","Orianna","Pantheon","Qiyana",
                 "Ryze","Sylas","Syndra","Taliyah","Talon","Tristana","Twisted Fate",
                 "Veigar","Vex","Viktor","Vladimir","Xerath","Yasuo","Yone",
-                "Zed","Zoe","Ziggs","Aurora","Jayce","Rumble","Heimerdinger"},
+                "Zed","Zoe","Ziggs","Aurora","Jayce","Rumble","Heimerdinger","Zyra"},
         "Bot": {"Aphelios","Ashe","Caitlyn","Corki","Draven","Ezreal","Jhin",
                 "Jinx","Kai'Sa","Kalista","Kog'Maw","Lucian","Miss Fortune",
                 "Nilah","Samira","Sivir","Smolder","Tristana","Twitch","Varus",
                 "Vayne","Xayah","Zeri","Ziggs","Senna"},
         "Support": {"Alistar","Bard","Blitzcrank","Braum","Janna","Karma","Leona",
-                    "Lulu","Lux","Milio","Morgana","Nami","Nautilus","Pyke",
+                    "Lulu","Lux","Mel","Milio","Morgana","Nami","Nautilus","Pyke",
                     "Rakan","Rell","Renata Glasc","Senna","Seraphine","Sona",
                     "Soraka","Taric","Thresh","Yuumi","Zilean","Zyra","Xerath",
                     "Vel'Koz","Maokai","Poppy","Tahm Kench","Galio"},
@@ -7403,15 +7541,15 @@ def _run_fetch_ranks(argv):
 
 
     def score_champ_for_archetype(champ_name, archetype, champ_tags_data):
-        """Score how well a champion fits an archetype (0-1)."""
-        arch = COMP_ARCHETYPES[archetype]
-        score = 0
-        matches = 0
-        total_needs = sum(arch["needs"].values())
+        """Score how well a champion fits an archetype (0-1).
 
-        for need, count in arch["needs"].items():
-            if champ_name in CHAMP_SUBCLASSES.get(need, set()):
-                matches += 1
+        Positive score from subclass needs + tag overlap; penalty when champion
+        subclass conflicts with the archetype's style.
+        """
+        arch = COMP_ARCHETYPES[archetype]
+        total_needs = sum(arch["needs"].values())
+        matches = sum(1 for need in arch["needs"]
+                      if champ_name in CHAMP_SUBCLASSES.get(need, set()))
 
         # Tag match bonus
         tags = set(champ_tags_data.get(champ_name, []))
@@ -7419,7 +7557,15 @@ def _run_fetch_ranks(argv):
         tag_overlap = len(tags & ideal)
 
         score = (matches / max(total_needs, 1)) * 0.7 + (tag_overlap / max(len(ideal), 1)) * 0.3
-        return min(score, 1.0)
+
+        # Conflict penalty: subclasses that contradict this archetype subtract 0.2
+        conflicts = ARCHETYPE_CONFLICTS.get(archetype, [])
+        for conflict_class in conflicts:
+            if champ_name in CHAMP_SUBCLASSES.get(conflict_class, set()):
+                score -= 0.2
+                break  # only penalize once even if multiple conflicts
+
+        return max(score, 0.0)
 
 
     def score_team_synergy(picks, champ_tags_data):
@@ -7538,23 +7684,64 @@ def _run_fetch_ranks(argv):
             if b["champion"] not in seen:
                 seen.add(b["champion"]); final.append(b)
             if len(final) >= 10: break
+
+        # Assign phase labels for display
+        for i, ban in enumerate(final):
+            if i < 3:
+                ban["phase"] = 1
+                ban["phase_reason"] = ("Must ban" if ban["is_must_ban"]
+                                       else "High threat flexible pick")
+            else:
+                ban["phase"] = 2
+                ban["phase_reason"] = "Phase 2 — target likely counter-picks"
+
         return final
 
 
     def compute_comp_suggestions(team_players, all_scouting, rankings,
-                                 champ_tags_data=None, inhouse_db=None):
+                                 champ_tags_data=None, inhouse_db=None,
+                                 enemy_team_players=None, enemy_scouting=None):
         """Smart comp engine. Balances player comfort (33%), archetype fit (33%), win condition (33%).
 
         Improvements over v1:
         - Uses module-level ROLE_VALID (shared with ban engine)
         - Role specialist comfort boost (1.25x) for champions played in assigned role
-        - In-house champion boost (1.2x) when player has in-house games on that champion
+        - Scaled in-house boost based on games + WR
+        - In-house-only champions included as synthetic candidates
+        - Enemy context: counter_potential score added per archetype
         - inhouse_db: dict from load_inhouse_db(), keyed by player name
+        - enemy_team_players: list of (name, role) for the opposing team
+        - enemy_scouting: all_scouting dict (used to evaluate enemy champ pools)
         """
         if champ_tags_data is None:
             champ_tags_data = {}
         if inhouse_db is None:
             inhouse_db = {}
+        if enemy_scouting is None:
+            enemy_scouting = all_scouting
+
+        # Pre-compute enemy tendencies for counter scoring
+        enemy_squishy_count = 0
+        enemy_diver_count = 0
+        enemy_frontline_count = 0
+        if enemy_team_players:
+            for e_name, _e_role in enemy_team_players:
+                e_scout = enemy_scouting.get(e_name)
+                if not e_scout:
+                    continue
+                top_champs = [c["name"] for c in e_scout.get("champ_list", [])[:3]]
+                squishy_subs = CHAMP_SUBCLASSES.get("assassin_or_burst", set()) | \
+                               CHAMP_SUBCLASSES.get("hypercarry", set()) | \
+                               CHAMP_SUBCLASSES.get("long_range", set())
+                diver_subs = CHAMP_SUBCLASSES.get("engage", set()) | \
+                             CHAMP_SUBCLASSES.get("assassin_or_burst", set())
+                frontline_subs = CHAMP_SUBCLASSES.get("frontline", set())
+                if any(c in squishy_subs for c in top_champs):
+                    enemy_squishy_count += 1
+                if any(c in diver_subs for c in top_champs):
+                    enemy_diver_count += 1
+                if any(c in frontline_subs for c in top_champs):
+                    enemy_frontline_count += 1
 
         suggestions = {}
 
@@ -7595,11 +7782,20 @@ def _run_fetch_ranks(argv):
                     role_spec = scout.get("role_champs_flat", {})
                     role_spec_boost = 1.25 if (role and cname in role_spec.get(role, set())) else 1.0
 
-                    # In-house boost: player has custom game experience on this champion
+                    # Scaled inhouse boost: more games + higher WR = stronger boost
                     ih = inhouse_db.get(player_name)
                     inhouse_boost = 1.0
-                    if ih and any(c.get("name") == cname for c in ih.get("champs", [])):
-                        inhouse_boost = 1.2
+                    if ih:
+                        ih_champ = next((c for c in ih.get("champs", []) if c.get("name") == cname), None)
+                        if ih_champ:
+                            ih_games = ih_champ.get("games", 0)
+                            ih_wr = ih_champ.get("wr", 0)
+                            if ih_games >= 5 and ih_wr >= 60:
+                                inhouse_boost = 2.5
+                            elif ih_games >= 3:
+                                inhouse_boost = 1.8
+                            else:
+                                inhouse_boost = 1.5
 
                     comfort = min((champ["wr"] / 100) * math.log(champ["games"] + 1) *
                                  min(champ["kda"] / 2.5, 1.5), 3.0) / 3.0
@@ -7625,6 +7821,30 @@ def _run_fetch_ranks(argv):
 
                     total = (comfort * 0.33 + arch_fit * 0.33 + win_cond * 0.33)
                     candidates.append((champ, total, arch_fit))
+
+                # Include in-house-only champions not in ranked data
+                ih = inhouse_db.get(player_name)
+                if ih and ih.get("champs"):
+                    ih_names_in_candidates = {c[0]["name"] for c in candidates if c}
+                    for ih_champ in ih["champs"]:
+                        cname = ih_champ.get("name", "")
+                        if cname in used_champs or cname in ih_names_in_candidates:
+                            continue
+                        if valid_for_role and cname not in valid_for_role:
+                            continue
+                        # Create a synthetic champ entry from in-house data
+                        synth = {"name": cname, "games": ih_champ.get("games", 0),
+                                 "wr": ih_champ.get("wr", 50), "kda": ih_champ.get("kda", 2.0)}
+                        # Apply strong inhouse boost since this is custom-only
+                        inhouse_boost_synth = 2.0 if ih_champ.get("games", 0) >= 3 else 1.5
+                        comfort = min((synth["wr"] / 100) * math.log(synth["games"] + 1) *
+                                     min(synth["kda"] / 2.5, 1.5), 3.0) / 3.0 * inhouse_boost_synth
+                        comfort = min(comfort, 1.0)
+                        arch_fit = score_champ_for_archetype(cname, archetype, champ_tags_data)
+                        # Use conservative win condition since no ranked data
+                        win_cond = 0.5
+                        total = (comfort * 0.33 + arch_fit * 0.33 + win_cond * 0.33)
+                        candidates.append((synth, total, arch_fit))
 
                 candidates.sort(key=lambda x: x[1], reverse=True)
 
@@ -7663,12 +7883,32 @@ def _run_fetch_ranks(argv):
             # Combined viability score
             combined = synergy * 0.5 + avg_comfort * 50 * 0.3 + on_meta * 10 * 0.2
 
+            # Counter potential: bonus score when this comp counters the enemy
+            counter_bonus = 0.0
+            if enemy_team_players:
+                pick_names = [p["champion"].replace(" (off-meta)", "") for p in arch_picks
+                              if p["champion"] != "?"]
+                engage_subs = CHAMP_SUBCLASSES.get("engage", set())
+                frontline_subs = CHAMP_SUBCLASSES.get("frontline", set())
+                long_range_subs = CHAMP_SUBCLASSES.get("long_range", set())
+                poke_subs = CHAMP_SUBCLASSES.get("long_range", set()) | \
+                            CHAMP_SUBCLASSES.get("waveclear", set())
+                if enemy_squishy_count >= 3:
+                    counter_bonus += sum(0.15 for c in pick_names if c in engage_subs)
+                if enemy_diver_count >= 3:
+                    counter_bonus += sum(0.15 for c in pick_names if c in frontline_subs)
+                if enemy_frontline_count >= 3:
+                    counter_bonus += sum(0.15 for c in pick_names
+                                         if c in long_range_subs or c in poke_subs)
+            counter_potential = min(int(counter_bonus * 100), 100)
+
             suggestions[archetype] = {
                 "description": arch_data["description"],
                 "picks": arch_picks,
                 "synergy": synergy,
                 "on_meta_count": on_meta,
                 "combined_score": round(combined, 1),
+                "counter_potential": counter_potential,
                 "viability": ("STRONG" if combined >= 35 else
                               "VIABLE" if combined >= 25 else
                               "WEAK" if combined >= 15 else "NOT RECOMMENDED"),
@@ -7754,11 +7994,11 @@ def _run_fetch_ranks(argv):
         sheet_name = "Draft Tool"
         try:
             old = spreadsheet.worksheet(sheet_name)
-            spreadsheet.del_worksheet(old)
+            sheets_retry(spreadsheet.del_worksheet, old)
         except gspread.exceptions.WorksheetNotFound:
             pass
 
-        ws = spreadsheet.add_worksheet(sheet_name, rows=120, cols=14)
+        ws = sheets_retry(spreadsheet.add_worksheet, sheet_name, rows=120, cols=14)
 
         DARK = {"red": 0.11, "green": 0.11, "blue": 0.18}
         HEADER = {"red": 0.09, "green": 0.14, "blue": 0.28}
@@ -7900,9 +8140,9 @@ def _run_fetch_ranks(argv):
         rows.append(pad(["(Run --draft to generate comp suggestions based on selected players)"]))
 
         # Write all data
-        ws.update(range_name="A1", values=rows)
-        ws.merge_cells("A1:N1")
-        ws.merge_cells("A2:N2")
+        sheets_retry(ws.update, range_name="A1", values=rows)
+        sheets_retry(ws.merge_cells, "A1:N1")
+        sheets_retry(ws.merge_cells, "A2:N2")
 
         # Add data validation dropdowns for player selection
         role_list = "Top,Jungle,Mid,Bot,Support"
@@ -7965,13 +8205,12 @@ def _run_fetch_ranks(argv):
                       "startIndex": 0, "endIndex": 1},
             "properties": {"pixelSize": 50}, "fields": "pixelSize"}})
 
-        spreadsheet.batch_update({"requests": reqs})
+        sheets_retry(spreadsheet.batch_update, {"requests": reqs})
 
         # Apply formats
         for i in range(0, len(fmts), 15):
             batch = [{"range": r, "format": f} for r, f in fmts[i:i+15]]
-            ws.batch_format(batch)
-            time.sleep(0.3)
+            sheets_retry(ws.batch_format, batch)
 
         print("  Draft Tool created with dropdowns")
 
@@ -7982,7 +8221,7 @@ def _run_fetch_ranks(argv):
             ws = spreadsheet.worksheet("Draft Tool")
         except gspread.exceptions.WorksheetNotFound:
             print("  Draft Tool sheet not found. Run --setup-draft first.")
-            return
+            return [], []
 
         values = ws.get_all_values()
 
@@ -8002,7 +8241,7 @@ def _run_fetch_ranks(argv):
 
         if not team1 and not team2:
             print("  No players selected. Fill in the Draft Tool dropdowns first.")
-            return
+            return [], []
 
         print(f"  Team 1: {', '.join(f'{p} ({r})' for p, r in team1)}")
         print(f"  Team 2: {', '.join(f'{p} ({r})' for p, r in team2)}")
@@ -8025,9 +8264,13 @@ def _run_fetch_ranks(argv):
 
         print("  Computing comp suggestions...")
         comps_t1 = compute_comp_suggestions(team1, all_scouting, rankings,
-                                            champ_tags_data, inhouse_db=inhouse_db)
+                                            champ_tags_data, inhouse_db=inhouse_db,
+                                            enemy_team_players=team2,
+                                            enemy_scouting=all_scouting)
         comps_t2 = compute_comp_suggestions(team2, all_scouting, rankings,
-                                            champ_tags_data, inhouse_db=inhouse_db)
+                                            champ_tags_data, inhouse_db=inhouse_db,
+                                            enemy_team_players=team1,
+                                            enemy_scouting=all_scouting)
 
         # Build name-to-riot-name mapping from Players sheet
         riot_name_map = {}
@@ -8037,7 +8280,8 @@ def _run_fetch_ranks(argv):
             for row in pv[2:]:
                 if len(row) >= 3 and "#" in str(row[2]):
                     riot_name_map[row[1].strip()] = row[2].rsplit("#", 1)[0]
-        except: pass
+        except Exception as e:
+            print(f"Warning: riot name map build failed: {e}")
 
         def get_inhouse(player_name):
             ih = inhouse_db.get(player_name)
@@ -8063,9 +8307,9 @@ def _run_fetch_ranks(argv):
 
         # ── Delete and recreate sheet to avoid write limit issues ──
         sheet_id = ws.id
-        spreadsheet.del_worksheet(ws)
-        ws = spreadsheet.add_worksheet("Draft Tool", rows=200, cols=14)
-        time.sleep(1)
+        sheets_retry(spreadsheet.del_worksheet, ws)
+        ws = sheets_retry(spreadsheet.add_worksheet, "Draft Tool", rows=200, cols=14)
+        time.sleep(1)  # needed for the sheet to be available after recreation
 
         DARK = {"red": 0.11, "green": 0.11, "blue": 0.18}
         HEADER = {"red": 0.09, "green": 0.14, "blue": 0.28}
@@ -8236,9 +8480,11 @@ def _run_fetch_ranks(argv):
                     "NOT RECOMMENDED": {"red": 0.5, "green": 0.2, "blue": 0.2},
                 }
 
+                ctr = comp.get("counter_potential", 0)
+                ctr_str = f" | Counter: {ctr}/100" if ctr > 0 else ""
                 rows.append(pad([f"{archetype.upper()} — {comp['description']}",
                                  "", "", "", "", "", "",
-                                 f"{viability} | Synergy: {comp.get('synergy', 0)}/100 | {comp['on_meta_count']}/5 on-meta"]))
+                                 f"{viability} | Synergy: {comp.get('synergy', 0)}/100 | {comp['on_meta_count']}/5 on-meta{ctr_str}"]))
                 merges.append(f"A{rn()}:G{rn()}")
                 merges.append(f"H{rn()}:N{rn()}")
                 fmts.append((f"A{rn()}:N{rn()}", {
@@ -8273,13 +8519,11 @@ def _run_fetch_ranks(argv):
             rows.append(pad([""]))
 
         # ── SINGLE BATCH WRITE ──
-        ws.update(values=rows, range_name="A1")
-        time.sleep(1)
+        sheets_retry(ws.update, values=rows, range_name="A1")
 
         # Apply merges
         for m in merges:
-            ws.merge_cells(m)
-        time.sleep(1)
+            sheets_retry(ws.merge_cells, m)
 
         # Column widths
         col_px = [80, 130, 150, 110, 70, 70, 110, 80, 130, 150, 110, 70, 70, 110]
@@ -8293,16 +8537,15 @@ def _run_fetch_ranks(argv):
             "range": {"sheetId": ws.id, "dimension": "ROWS",
                       "startIndex": 0, "endIndex": 1},
             "properties": {"pixelSize": 50}, "fields": "pixelSize"}})
-        spreadsheet.batch_update({"requests": reqs})
-        time.sleep(0.5)
+        sheets_retry(spreadsheet.batch_update, {"requests": reqs})
 
         # Apply formats in batches
         for i in range(0, len(fmts), 15):
             batch = [{"range": r, "format": f} for r, f in fmts[i:i+15]]
-            ws.batch_format(batch)
-            time.sleep(0.5)
+            sheets_retry(ws.batch_format, batch)
 
         print("\n  Draft Tool updated with bans and comp suggestions!")
+        return team1, team2
 
 
     def append_activity_event(spreadsheet, event_type, player_name, details):
@@ -8312,13 +8555,12 @@ def _run_fetch_ranks(argv):
             ws = get_or_create_sheet(spreadsheet, sheet_name, rows=200, cols=4)
             # Write header row if the sheet is brand new
             if not ws.get_all_values():
-                ws.append_row(["_ACTIVITY LOG", "", "", ""],
-                              value_input_option="RAW")
-            ws.append_row(
-                [datetime.now().strftime("%Y-%m-%d %H:%M"), event_type,
-                 player_name or "", details],
-                value_input_option="RAW",
-            )
+                sheets_retry(ws.append_row, ["_ACTIVITY LOG", "", "", ""],
+                             value_input_option="RAW")
+            sheets_retry(ws.append_row,
+                         [datetime.now().strftime("%Y-%m-%d %H:%M"), event_type,
+                          player_name or "", details],
+                         value_input_option="RAW")
         except Exception as e:
             print(f"  (Activity log write skipped: {e})")
 
@@ -8327,7 +8569,8 @@ def _run_fetch_ranks(argv):
         """Return the most recent `limit` activity events as a list of dicts."""
         try:
             ws = spreadsheet.worksheet("_Activity")
-        except Exception:
+        except Exception as e:
+            print(f"Warning: could not load activity log: {e}")
             return []
         rows = ws.get_all_values()
         # Skip header row; rows are oldest-first
@@ -8345,11 +8588,11 @@ def _run_fetch_ranks(argv):
         sheet_name = "_ScoutDB"
         try:
             old = spreadsheet.worksheet(sheet_name)
-            spreadsheet.del_worksheet(old)
+            sheets_retry(spreadsheet.del_worksheet, old)
         except gspread.exceptions.WorksheetNotFound:
             pass
 
-        ws = spreadsheet.add_worksheet(sheet_name, rows=500, cols=15)
+        ws = sheets_retry(spreadsheet.add_worksheet, sheet_name, rows=500, cols=15)
 
         rows = [["SCOUTING DATABASE - DO NOT EDIT", "", "", "", "", "",
                  datetime.now().strftime("%Y-%m-%d %H:%M")]]
@@ -8376,7 +8619,7 @@ def _run_fetch_ranks(argv):
                     champ["avg_gold"], role_str, rank_pos, rank_score,
                 ])
 
-        ws.update(range_name="A1", values=rows)
+        sheets_retry(ws.update, range_name="A1", values=rows)
         print(f"  Scouting database saved ({len(all_scouting)} players)")
 
 
@@ -8693,11 +8936,11 @@ def _run_fetch_ranks(argv):
         sheet_name = "In-House Stats"
         try:
             old = spreadsheet.worksheet(sheet_name)
-            spreadsheet.del_worksheet(old)
+            sheets_retry(spreadsheet.del_worksheet, old)
         except gspread.exceptions.WorksheetNotFound:
             pass
 
-        ws = spreadsheet.add_worksheet(sheet_name, rows=80, cols=14)
+        ws = sheets_retry(spreadsheet.add_worksheet, sheet_name, rows=80, cols=14)
 
         DARK = {"red": 0.11, "green": 0.11, "blue": 0.18}
         HEADER = {"red": 0.09, "green": 0.14, "blue": 0.28}
@@ -8873,12 +9116,10 @@ def _run_fetch_ranks(argv):
                 "horizontalAlignment": "CENTER"}))
 
         # Write everything in one batch
-        ws.update(values=rows, range_name="A1")
-        time.sleep(1)
+        sheets_retry(ws.update, values=rows, range_name="A1")
 
         for m in merges:
-            ws.merge_cells(m)
-        time.sleep(1)
+            sheets_retry(ws.merge_cells, m)
 
         col_px = [50, 120, 65, 60, 65, 75, 60, 75, 80, 80, 80, 100, 80, 100]
         reqs = []
@@ -8891,13 +9132,11 @@ def _run_fetch_ranks(argv):
             "range": {"sheetId": ws.id, "dimension": "ROWS",
                       "startIndex": 0, "endIndex": 1},
             "properties": {"pixelSize": 50}, "fields": "pixelSize"}})
-        spreadsheet.batch_update({"requests": reqs})
-        time.sleep(0.5)
+        sheets_retry(spreadsheet.batch_update, {"requests": reqs})
 
         for i in range(0, len(fmts), 15):
             batch = [{"range": r, "format": f} for r, f in fmts[i:i+15]]
-            ws.batch_format(batch)
-            time.sleep(0.5)
+            sheets_retry(ws.batch_format, batch)
 
         print("  In-House Stats overview written")
 
@@ -8907,7 +9146,7 @@ def _run_fetch_ranks(argv):
         sheet_name = "In-House Head-to-Head"
         try:
             old = spreadsheet.worksheet(sheet_name)
-            spreadsheet.del_worksheet(old)
+            sheets_retry(spreadsheet.del_worksheet, old)
         except gspread.exceptions.WorksheetNotFound:
             pass
 
@@ -8916,7 +9155,7 @@ def _run_fetch_ranks(argv):
         active.sort()
         n = len(active)
 
-        ws = spreadsheet.add_worksheet(sheet_name, rows=n * 2 + 10, cols=n + 3)
+        ws = sheets_retry(spreadsheet.add_worksheet, sheet_name, rows=n * 2 + 10, cols=n + 3)
 
         DARK = {"red": 0.11, "green": 0.11, "blue": 0.18}
         HEADER = {"red": 0.09, "green": 0.14, "blue": 0.28}
@@ -9017,8 +9256,7 @@ def _run_fetch_ranks(argv):
                 "textFormat": {"bold": True, "fontSize": 9, "foregroundColor": WHITE}}))
 
         # Write
-        ws.update(values=rows, range_name="A1")
-        time.sleep(1)
+        sheets_retry(ws.update, values=rows, range_name="A1")
 
         # Column widths
         reqs = [{"updateDimensionProperties": {
@@ -9034,13 +9272,11 @@ def _run_fetch_ranks(argv):
             "range": {"sheetId": ws.id, "dimension": "ROWS",
                       "startIndex": 0, "endIndex": 1},
             "properties": {"pixelSize": 45}, "fields": "pixelSize"}})
-        spreadsheet.batch_update({"requests": reqs})
-        time.sleep(0.5)
+        sheets_retry(spreadsheet.batch_update, {"requests": reqs})
 
         for i in range(0, len(fmts), 15):
             batch = [{"range": r, "format": f} for r, f in fmts[i:i+15]]
-            ws.batch_format(batch)
-            time.sleep(0.5)
+            sheets_retry(ws.batch_format, batch)
 
         print("  In-House Head-to-Head matrix written")
 
@@ -9215,20 +9451,15 @@ def _run_fetch_ranks(argv):
             ts = datetime.now().strftime("%Y-%m-%d %H:%M")
 
             write_rank_data(spreadsheet, results, ts)
-            time.sleep(1)
             write_player_stats(spreadsheet, results, champ_map)
-            time.sleep(1)
             if consensus:
                 write_consensus(spreadsheet, consensus)
-                time.sleep(1)
             write_hot_takes(spreadsheet, hot_takes)
-            time.sleep(1)
             if rater_bias:
                 write_rater_bias(spreadsheet, rater_bias)
-                time.sleep(1)
             write_rank_history(spreadsheet, results, ts)
             append_activity_event(spreadsheet, "UPDATE", "",
-                                  f"Updated ranks for {len(results)} player(s)")
+                                  f"{len(results)} players updated")
         else:
             results = []
 
@@ -9301,7 +9532,6 @@ def _run_fetch_ranks(argv):
                     player_inhouse = inhouse_db.get(riot_name)
 
                 write_scouting_sheet(spreadsheet, player["name"], rs, plp, analysis, ranking_info, player_inhouse)
-                time.sleep(1)
 
             # Create Draft Tool sheet with dropdowns
             print(f"\nCreating Draft Tool...")
@@ -9313,7 +9543,7 @@ def _run_fetch_ranks(argv):
             write_scouting_database(spreadsheet, all_scouting, final_rankings)
 
             append_activity_event(spreadsheet, "SCOUT", "",
-                                  f"Scouted {len(all_scouting)} player(s)")
+                                  f"Full scout: {len(all_scouting)} players updated")
             print(f"\nAll scouting reports generated!")
 
         # Scout new players only (merge into existing _ScoutDB)
@@ -9385,7 +9615,6 @@ def _run_fetch_ranks(argv):
                     player_inhouse = inhouse_db.get(riot_name)
 
                 write_scouting_sheet(spreadsheet, player["name"], rs, plp, analysis, ranking_info, player_inhouse)
-                time.sleep(1)
 
             if not new_scouting:
                 print("\nNo new players could be scouted.")
@@ -9395,9 +9624,9 @@ def _run_fetch_ranks(argv):
             merged_scouting = {**existing_scouting, **new_scouting}
             merged_rankings = {**existing_rankings, **final_rankings}
             write_scouting_database(spreadsheet, merged_scouting, merged_rankings)
-            append_activity_event(spreadsheet, "SCOUT_NEW",
-                                  ", ".join(new_scouting.keys()),
-                                  f"Scouted {len(new_scouting)} new player(s)")
+            new_names = ", ".join(new_scouting.keys())
+            append_activity_event(spreadsheet, "SCOUT_NEW", new_names,
+                                  f"Added {len(new_scouting)} new player(s): {new_names}")
             print(f"\nScouting complete! Added {len(new_scouting)} new player(s). Database now covers {len(merged_scouting)} players.")
             return
 
@@ -9461,8 +9690,9 @@ def _run_fetch_ranks(argv):
             existing_scouting[player["name"]] = analysis
             existing_rankings.update(final_rankings)
             write_scouting_database(spreadsheet, existing_scouting, existing_rankings)
-            append_activity_event(spreadsheet, "RESCOUTED", player["name"],
-                                  f"Re-scouted {player['name']}")
+            rank_str = f" ({rs} {plp} LP)" if rs and rs not in ("Unranked", "") else ""
+            append_activity_event(spreadsheet, "SCOUT", player["name"],
+                                  f"Re-scouted {player['name']}{rank_str}")
             print(f"\nDone! {player['name']} has been re-scouted and _ScoutDB updated.")
             return
 
@@ -9489,8 +9719,11 @@ def _run_fetch_ranks(argv):
                 final_rankings = get_final_rankings(spreadsheet)
                 if final_rankings:
                     db_rankings.update(final_rankings)
-                run_draft(spreadsheet, all_scouting, db_rankings, champ_tags)
-                append_activity_event(spreadsheet, "DRAFT", "", "Draft analysis run")
+                team1, team2 = run_draft(spreadsheet, all_scouting, db_rankings, champ_tags)
+                t1_str = ", ".join(p for p, r in team1) if team1 else "?"
+                t2_str = ", ".join(p for p, r in team2) if team2 else "?"
+                append_activity_event(spreadsheet, "DRAFT", "",
+                                      f"Draft: Team 1 [{t1_str}] vs Team 2 [{t2_str}]")
 
         # In-house stats tracker
         if args.inhouse:
@@ -9530,7 +9763,6 @@ def _run_fetch_ranks(argv):
                 print(f"{'='*60}\n")
 
                 write_inhouse_overview(spreadsheet, player_stats, len(inhouse_matches))
-                time.sleep(1)
                 write_inhouse_h2h(spreadsheet, h2h, player_stats)
 
                 # Print summary
@@ -9620,6 +9852,21 @@ def _run_inhouse(argv):
               "https://www.googleapis.com/auth/drive"]
 
 
+    # ── Sheets Retry Helper ───────────────────────────────────────
+
+    def sheets_retry(fn, *args, max_attempts=6, **kwargs):
+        """Call fn(*args, **kwargs) with exponential backoff on quota/server errors."""
+        for attempt in range(max_attempts):
+            try:
+                return fn(*args, **kwargs)
+            except gspread.exceptions.APIError as e:
+                status = getattr(e.response, "status_code", None)
+                if status in (429, 500, 503) and attempt < max_attempts - 1:
+                    time.sleep((2 ** attempt) + random.uniform(0, 1))
+                else:
+                    raise
+
+
     # ── LCU Connection ───────────────────────────────────────────
 
     def find_lockfile():
@@ -9642,7 +9889,8 @@ def _run_inhouse(argv):
                 if m:
                     lf = os.path.join(os.path.dirname(m.group(1)), "lockfile")
                     if os.path.exists(lf): return lf
-            except: pass
+            except Exception as e:
+                print(f"Warning: lockfile lookup failed: {e}")
         return None
 
 
@@ -9666,7 +9914,8 @@ def _run_inhouse(argv):
                 print(f"  Connected as: {name}")
                 return base, auth
             print(f"  LCU error: {r.status_code}"); return None, None
-        except:
+        except Exception as e:
+            print(f"  LCU connection attempt failed: {e}")
             print("  Can't connect to League client"); return None, None
 
 
@@ -9702,7 +9951,9 @@ def _run_inhouse(argv):
                         if gid and gid not in seen_ids:
                             seen_ids.add(gid); all_games.append(g); new += 1
                     if new == 0: break
-                except: break
+                except Exception as e:
+                    print(f"Warning: match page fetch failed: {e}")
+                    break
         return all_games
 
 
@@ -9711,7 +9962,8 @@ def _run_inhouse(argv):
             r = requests.get(f"{base_url}/lol-match-history/v1/games/{game_id}",
                             auth=auth, verify=False, timeout=15)
             if r.status_code == 200: return r.json()
-        except: pass
+        except Exception as e:
+            print(f"Warning: game detail fetch failed: {e}")
         return None
 
 
@@ -9720,7 +9972,9 @@ def _run_inhouse(argv):
             v = requests.get("https://ddragon.leagueoflegends.com/api/versions.json", timeout=10).json()
             data = requests.get(f"https://ddragon.leagueoflegends.com/cdn/{v[0]}/data/en_US/champion.json", timeout=10).json()
             return {int(d["key"]): d["name"] for d in data["data"].values()}
-        except: return {}
+        except Exception as e:
+            print(f"Warning: failed to load champion map from DDragon: {e}")
+            return {}
 
 
     def connect_sheet(creds, sheet):
@@ -9741,27 +9995,26 @@ def _run_inhouse(argv):
             for row in values[1:]:  # skip header
                 if row and row[0]:
                     try: existing.add(int(row[0]))
-                    except: existing.add(row[0])
+                    except Exception: existing.add(row[0])
             return existing
         except gspread.exceptions.WorksheetNotFound:
             return set()
 
 
-    def append_game_log(spreadsheet, new_records):
+    def append_game_log(spreadsheet, new_records, logged_by="Unknown"):
         """Append new game records to the _InhouseGameLog sheet. Creates if needed."""
         try:
             ws = spreadsheet.worksheet("_InhouseGameLog")
         except gspread.exceptions.WorksheetNotFound:
-            ws = spreadsheet.add_worksheet("_InhouseGameLog", rows=5000, cols=16)
+            ws = sheets_retry(spreadsheet.add_worksheet, "_InhouseGameLog", rows=5000, cols=16)
             header = ["gameId", "timestamp", "player", "champion", "teamId",
                       "win", "kills", "deaths", "assists", "cs", "damage",
                       "gold", "vision", "role", "duration", "logged_by"]
-            ws.update(values=[header], range_name="A1")
-            ws.format("A1:P1", {
+            sheets_retry(ws.update, values=[header], range_name="A1")
+            sheets_retry(ws.format, "A1:P1", {
                 "backgroundColor": {"red": 0.09, "green": 0.14, "blue": 0.28},
                 "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
                 "horizontalAlignment": "CENTER"})
-            time.sleep(0.5)
 
         if not new_records:
             return
@@ -9783,10 +10036,11 @@ def _run_inhouse(argv):
         # Write in chunks of 500 to avoid API limits
         for i in range(0, len(rows), 500):
             chunk = rows[i:i+500]
-            ws.update(values=chunk, range_name=f"A{next_row + i}")
-            time.sleep(1)
+            sheets_retry(ws.update, values=chunk, range_name=f"A{next_row + i}")
 
         print(f"  Appended {len(rows)} new records to game log")
+        _log_activity(spreadsheet, "INHOUSE", logged_by,
+                      f"Logged {len(rows)} new games ({next_row - 1 + len(rows)} total)")
 
 
     def load_full_game_log(spreadsheet):
@@ -9814,7 +10068,8 @@ def _run_inhouse(argv):
                     })
                 except (ValueError, IndexError): continue
             return records
-        except:
+        except Exception as e:
+            print(f"Warning: failed to load game log: {e}")
             return []
 
 
@@ -9827,7 +10082,11 @@ def _run_inhouse(argv):
                                             "deaths": 0, "assists": 0, "damage": 0}),
             "roles": defaultdict(lambda: {"games": 0, "wins": 0}),
             "champ_roles": defaultdict(lambda: defaultdict(int)),
+            "win_streak": 0, "best_streak": 0, "mvp_count": 0,
+            "recent_wr": None,
         })
+        # Keyed by player name; holds (timestamp, win) tuples for post-processing
+        game_results: dict[str, list] = defaultdict(list)
 
         h2h = defaultdict(lambda: defaultdict(lambda: {
             "same_team": 0, "same_wins": 0, "vs": 0, "vs_wins": 0}))
@@ -9842,6 +10101,8 @@ def _run_inhouse(argv):
             if len(players) != 10: continue
             total_games += 1
 
+            mvp_name = None
+            mvp_score = None
             for p in players:
                 name = p["player"]
                 ps = player_stats[name]
@@ -9853,6 +10114,8 @@ def _run_inhouse(argv):
                 ps["cs"] += p["cs"]
                 ps["damage"] += p["damage"]
                 ps["gold"] += p["gold"]
+
+                game_results[name].append((p["timestamp"], p["win"]))
 
                 ce = ps["champs"][p["champion"]]
                 ce["games"] += 1
@@ -9868,6 +10131,15 @@ def _run_inhouse(argv):
                 rs["wins"] += 1 if p["win"] else 0
 
                 ps["champ_roles"][p["champion"]][role] += 1
+
+                # MVP: player with highest kills*3 + assists - deaths + damage/1000
+                score = p["kills"] * 3 + p["assists"] - p["deaths"] + p["damage"] / 1000
+                if mvp_score is None or score > mvp_score:
+                    mvp_score = score
+                    mvp_name = name
+
+            if mvp_name:
+                player_stats[mvp_name]["mvp_count"] += 1
 
             # Head-to-head
             t100 = [p for p in players if p["teamId"] == 100]
@@ -9893,7 +10165,46 @@ def _run_inhouse(argv):
                     else:
                         h2h[b][a]["vs_wins"] += 1
 
+        # Post-process streaks and recent WR for each player
+        for name, ps in player_stats.items():
+            outcomes = [win for _, win in sorted(game_results[name], key=lambda x: x[0])]
+
+            streak = 0
+            for win in reversed(outcomes):
+                if win:
+                    streak += 1
+                else:
+                    break
+            ps["win_streak"] = streak
+
+            best = cur = 0
+            for win in outcomes:
+                cur = cur + 1 if win else 0
+                best = max(best, cur)
+            ps["best_streak"] = best
+
+            recent = outcomes[-10:]
+            ps["recent_wr"] = round(sum(recent) / len(recent) * 100, 1) if len(recent) >= 3 else None
+
         return dict(player_stats), dict(h2h), total_games
+
+
+    # ── Activity Log ─────────────────────────────────────────────
+
+    def _log_activity(spreadsheet, event_type, player_name, details):
+        """Write one row to the _Activity sheet for cross-user feed visibility."""
+        try:
+            sheet_name = "_Activity"
+            try:
+                ws = spreadsheet.worksheet(sheet_name)
+            except gspread.exceptions.WorksheetNotFound:
+                ws = sheets_retry(spreadsheet.add_worksheet, sheet_name, rows=500, cols=4)
+                sheets_retry(ws.append_row, ["_ACTIVITY LOG", "", "", ""], value_input_option="RAW")
+            sheets_retry(ws.append_row,
+                [datetime.now().strftime("%Y-%m-%d %H:%M"), event_type, player_name or "", details],
+                value_input_option="RAW")
+        except Exception as e:
+            print(f"  (Activity log write skipped: {e})")
 
 
     # ── Main ─────────────────────────────────────────────────────
@@ -9931,7 +10242,8 @@ def _run_inhouse(argv):
             r = requests.get(f"{base_url}/lol-summoner/v1/current-summoner",
                             auth=auth, verify=False, timeout=5)
             logged_by = r.json().get("gameName", "Unknown") if r.status_code == 200 else "Unknown"
-        except:
+        except Exception as e:
+            print(f"Warning: could not fetch summoner name: {e}")
             logged_by = "Unknown"
 
         # Connect to Google Sheets early to check existing games
@@ -9940,7 +10252,9 @@ def _run_inhouse(argv):
             spreadsheet = connect_sheet(args.creds, args.sheet)
             print(f"  Connected to: {spreadsheet.title}")
         except Exception as e:
-            print(f"  Error: {e}"); sys.exit(1)
+            print(f"Error: Could not connect to Google Sheets. Check your credentials file and sheet name.")
+            print(f"  Detail: {e}")
+            sys.exit(1)
 
         # Load existing game IDs to skip duplicates
         print("\nChecking for existing game data...")
@@ -10041,7 +10355,7 @@ def _run_inhouse(argv):
             if new_records:
                 print(f"\n  {valid_count} new 5v5 games, {len(new_records)} player records")
                 print(f"\nSaving to game log...")
-                append_game_log(spreadsheet, new_records)
+                append_game_log(spreadsheet, new_records, logged_by)
             else:
                 print(f"\n  No new valid 5v5 games found")
         else:
@@ -10065,9 +10379,7 @@ def _run_inhouse(argv):
         print(f"{'='*60}\n")
 
         write_overview(spreadsheet, player_stats, total_games, champ_map)
-        time.sleep(1)
         write_h2h(spreadsheet, h2h, player_stats)
-        time.sleep(1)
         write_inhouse_db(spreadsheet, player_stats)
 
         # Summary
@@ -10092,9 +10404,11 @@ def _run_inhouse(argv):
     # ── Inhouse Database (for scouting/draft integration) ────────
 
     def write_inhouse_db(spreadsheet, player_stats):
-        try: spreadsheet.del_worksheet(spreadsheet.worksheet("_InhouseDB"))
-        except: pass
-        ws = spreadsheet.add_worksheet("_InhouseDB", rows=500, cols=13)
+        try:
+            spreadsheet.del_worksheet(spreadsheet.worksheet("_InhouseDB"))
+        except gspread.exceptions.WorksheetNotFound:
+            pass  # sheet doesn't exist yet, that's fine
+        ws = sheets_retry(spreadsheet.add_worksheet, "_InhouseDB", rows=500, cols=13)
         rows = [["INHOUSE DATABASE - DO NOT EDIT", "", "", "", "", "",
                  datetime.now().strftime("%Y-%m-%d %H:%M")],
                 ["player", "champion", "games", "wins", "wr", "kda",
@@ -10114,7 +10428,7 @@ def _run_inhouse(argv):
                              round(cs["kills"]/cg, 1), round(cs["deaths"]/cg, 1),
                              round(cs["assists"]/cg, 1), round(cs["damage"]/cg),
                              g, total_wr, role_str])
-        ws.update(values=rows, range_name="A1")
+        sheets_retry(ws.update, values=rows, range_name="A1")
         print("  Inhouse DB saved (for scouting/draft)")
 
 
@@ -10129,45 +10443,55 @@ def _run_inhouse(argv):
     LG = {"red":0.85,"green":0.95,"blue":0.85}
 
     def write_overview(spreadsheet, player_stats, total, champ_map):
-        try: spreadsheet.del_worksheet(spreadsheet.worksheet("In-House Stats"))
-        except: pass
-        ws = spreadsheet.add_worksheet("In-House Stats", rows=300, cols=14)
+        try:
+            spreadsheet.del_worksheet(spreadsheet.worksheet("In-House Stats"))
+        except gspread.exceptions.WorksheetNotFound:
+            pass  # sheet doesn't exist yet, that's fine
+        ws = sheets_retry(spreadsheet.add_worksheet, "In-House Stats", rows=300, cols=17)
         rows=[]; fmts=[]; merges=[]
-        pad=lambda d,n=14: d+[""]*(n-len(d))
+        # 17 columns: # Player Games Wins Losses WinRate Last10 KDA AvgK AvgD AvgA AvgCS AvgDmg AvgGold CurStreak BestStreak MVPs
+        NCOLS = 17
+        pad=lambda d,n=NCOLS: d+[""]*(n-len(d))
         rn=lambda: len(rows)
 
-        rows.append(pad(["IN-HOUSE 5v5 STATS"])); merges.append(f"A{rn()}:N{rn()}")
-        fmts.append((f"A{rn()}:N{rn()}", {"backgroundColor":DARK,"textFormat":{"bold":True,"fontSize":18,"foregroundColor":GOLD},"horizontalAlignment":"CENTER"}))
+        last_col = chr(64 + NCOLS)  # 'Q'
+
+        rows.append(pad(["IN-HOUSE 5v5 STATS"])); merges.append(f"A{rn()}:{last_col}{rn()}")
+        fmts.append((f"A{rn()}:{last_col}{rn()}", {"backgroundColor":DARK,"textFormat":{"bold":True,"fontSize":18,"foregroundColor":GOLD},"horizontalAlignment":"CENTER"}))
         ts=datetime.now().strftime("%Y-%m-%d %H:%M")
-        rows.append(pad([f"{total} custom 5v5 games (all contributors combined)  |  Updated: {ts}"])); merges.append(f"A{rn()}:N{rn()}")
-        fmts.append((f"A{rn()}:N{rn()}", {"backgroundColor":DARK,"textFormat":{"fontSize":11,"foregroundColor":WHITE},"horizontalAlignment":"CENTER"}))
+        rows.append(pad([f"{total} custom 5v5 games (all contributors combined)  |  Updated: {ts}"])); merges.append(f"A{rn()}:{last_col}{rn()}")
+        fmts.append((f"A{rn()}:{last_col}{rn()}", {"backgroundColor":DARK,"textFormat":{"fontSize":11,"foregroundColor":WHITE},"horizontalAlignment":"CENTER"}))
         rows.append(pad([""]))
 
-        rows.append(pad(["IN-HOUSE LEADERBOARD"])); merges.append(f"A{rn()}:N{rn()}")
-        fmts.append((f"A{rn()}:N{rn()}", {"backgroundColor":SECTION,"textFormat":{"bold":True,"fontSize":14,"foregroundColor":GOLD},"horizontalAlignment":"CENTER"}))
-        rows.append(pad(["#","Player","Games","Wins","Losses","Win Rate","KDA","Avg K","Avg D","Avg A","Avg CS","Avg Dmg","Avg Gold"]))
-        fmts.append((f"A{rn()}:M{rn()}", {"backgroundColor":HEADER,"textFormat":{"bold":True,"fontSize":10,"foregroundColor":WHITE},"horizontalAlignment":"CENTER"}))
+        rows.append(pad(["IN-HOUSE LEADERBOARD"])); merges.append(f"A{rn()}:{last_col}{rn()}")
+        fmts.append((f"A{rn()}:{last_col}{rn()}", {"backgroundColor":SECTION,"textFormat":{"bold":True,"fontSize":14,"foregroundColor":GOLD},"horizontalAlignment":"CENTER"}))
+        rows.append(pad(["#","Player","Games","Wins","Losses","Win Rate","Last 10","KDA","Avg K","Avg D","Avg A","Avg CS","Avg Dmg","Avg Gold","Cur Streak","Best Streak","MVPs"]))
+        fmts.append((f"A{rn()}:{last_col}{rn()}", {"backgroundColor":HEADER,"textFormat":{"bold":True,"fontSize":10,"foregroundColor":WHITE},"horizontalAlignment":"CENTER"}))
 
         sp=sorted(player_stats.items(), key=lambda x:(x[1]["wins"]/max(x[1]["games"],1),x[1]["games"]), reverse=True)
         for i,(name,ps) in enumerate(sp,1):
             g=ps["games"]
             if g==0: continue
-            wr=round(ps["wins"]/g*100,1); kda=round((ps["kills"]+ps["assists"])/max(ps["deaths"],1),2)
+            wr=round(ps["wins"]/g*100,1)
+            kda=round((ps["kills"]+ps["assists"])/max(ps["deaths"],1),2)
+            recent_wr = ps.get("recent_wr")
+            last10 = f"{int(recent_wr)}%" if recent_wr is not None else "—"
             bg=LG if i<=3 else(LB if i%2==0 else {"red":1,"green":1,"blue":1})
-            rows.append(pad([i,name,g,ps["wins"],g-ps["wins"],f"{wr}%",kda,
+            rows.append(pad([i,name,g,ps["wins"],g-ps["wins"],f"{wr}%",last10,kda,
                 round(ps["kills"]/g,1),round(ps["deaths"]/g,1),round(ps["assists"]/g,1),
-                round(ps["cs"]/g),f"{round(ps['damage']/g):,}",f"{round(ps['gold']/g):,}"]))
-            fmts.append((f"A{rn()}:M{rn()}", {"backgroundColor":bg,"textFormat":{"fontSize":11,"bold":i<=3},"horizontalAlignment":"CENTER"}))
+                round(ps["cs"]/g),f"{round(ps['damage']/g):,}",f"{round(ps['gold']/g):,}",
+                ps.get("win_streak",0),ps.get("best_streak",0),ps.get("mvp_count",0)]))
+            fmts.append((f"A{rn()}:{last_col}{rn()}", {"backgroundColor":bg,"textFormat":{"fontSize":11,"bold":i<=3},"horizontalAlignment":"CENTER"}))
 
         rows.append(pad([""])); rows.append(pad([""]))
-        rows.append(pad(["IN-HOUSE CHAMPION STATS"])); merges.append(f"A{rn()}:N{rn()}")
-        fmts.append((f"A{rn()}:N{rn()}", {"backgroundColor":SECTION,"textFormat":{"bold":True,"fontSize":14,"foregroundColor":GOLD},"horizontalAlignment":"CENTER"}))
+        rows.append(pad(["IN-HOUSE CHAMPION STATS"])); merges.append(f"A{rn()}:{last_col}{rn()}")
+        fmts.append((f"A{rn()}:{last_col}{rn()}", {"backgroundColor":SECTION,"textFormat":{"bold":True,"fontSize":14,"foregroundColor":GOLD},"horizontalAlignment":"CENTER"}))
 
         for name,ps in sp:
             if ps["games"]==0: continue
             wr=round(ps["wins"]/ps["games"]*100,1)
-            rows.append(pad([f"{name}  -  {ps['games']} games  |  {wr}% WR"])); merges.append(f"A{rn()}:N{rn()}")
-            fmts.append((f"A{rn()}:N{rn()}", {"backgroundColor":{"red":0.2,"green":0.3,"blue":0.5},"textFormat":{"bold":True,"fontSize":12,"foregroundColor":WHITE},"horizontalAlignment":"CENTER"}))
+            rows.append(pad([f"{name}  -  {ps['games']} games  |  {wr}% WR"])); merges.append(f"A{rn()}:{last_col}{rn()}")
+            fmts.append((f"A{rn()}:{last_col}{rn()}", {"backgroundColor":{"red":0.2,"green":0.3,"blue":0.5},"textFormat":{"bold":True,"fontSize":12,"foregroundColor":WHITE},"horizontalAlignment":"CENTER"}))
             rows.append(pad(["Champion","Games","Wins","Losses","WR%","KDA","Avg K","Avg D","Avg A","Avg Dmg"]))
             fmts.append((f"A{rn()}:J{rn()}", {"backgroundColor":HEADER,"textFormat":{"bold":True,"fontSize":10,"foregroundColor":WHITE},"horizontalAlignment":"CENTER"}))
             for j,(ch,cs) in enumerate(sorted(ps["champs"].items(), key=lambda x:x[1]["games"], reverse=True)):
@@ -10179,8 +10503,8 @@ def _run_inhouse(argv):
             rows.append(pad([""]))
 
         rows.append(pad([""])); rows.append(pad([""]))
-        rows.append(pad(["IN-HOUSE ROLE PERFORMANCE"])); merges.append(f"A{rn()}:N{rn()}")
-        fmts.append((f"A{rn()}:N{rn()}", {"backgroundColor":SECTION,"textFormat":{"bold":True,"fontSize":14,"foregroundColor":GOLD},"horizontalAlignment":"CENTER"}))
+        rows.append(pad(["IN-HOUSE ROLE PERFORMANCE"])); merges.append(f"A{rn()}:{last_col}{rn()}")
+        fmts.append((f"A{rn()}:{last_col}{rn()}", {"backgroundColor":SECTION,"textFormat":{"bold":True,"fontSize":14,"foregroundColor":GOLD},"horizontalAlignment":"CENTER"}))
         rows.append(pad(["Player","Top","","Jungle","","Mid","","Bot","","Support",""]))
         fmts.append((f"A{rn()}:K{rn()}", {"backgroundColor":HEADER,"textFormat":{"bold":True,"fontSize":10,"foregroundColor":WHITE},"horizontalAlignment":"CENTER"}))
         rows.append(pad(["","G","WR%","G","WR%","G","WR%","G","WR%","G","WR%"]))
@@ -10194,24 +10518,26 @@ def _run_inhouse(argv):
             rows.append(pad(rd))
             fmts.append((f"A{rn()}:K{rn()}", {"backgroundColor":LB,"textFormat":{"fontSize":11},"horizontalAlignment":"CENTER"}))
 
-        ws.update(values=rows, range_name="A1"); time.sleep(1)
-        for m in merges: ws.merge_cells(m)
-        time.sleep(1)
-        col_px=[50,120,60,55,60,70,55,60,60,60,70,95,90,80]
+        sheets_retry(ws.update, values=rows, range_name="A1")
+        for m in merges:
+            sheets_retry(ws.merge_cells, m)
+        col_px=[50,120,60,55,60,70,65,55,60,60,60,70,95,90,80,85,55]
         reqs=[{"updateDimensionProperties":{"range":{"sheetId":ws.id,"dimension":"COLUMNS","startIndex":ci,"endIndex":ci+1},"properties":{"pixelSize":px},"fields":"pixelSize"}} for ci,px in enumerate(col_px)]
         reqs.append({"updateDimensionProperties":{"range":{"sheetId":ws.id,"dimension":"ROWS","startIndex":0,"endIndex":1},"properties":{"pixelSize":50},"fields":"pixelSize"}})
-        spreadsheet.batch_update({"requests":reqs}); time.sleep(0.5)
+        sheets_retry(spreadsheet.batch_update, {"requests":reqs})
         for i in range(0,len(fmts),15):
-            ws.batch_format([{"range":r,"format":f} for r,f in fmts[i:i+15]]); time.sleep(0.5)
+            sheets_retry(ws.batch_format, [{"range":r,"format":f} for r,f in fmts[i:i+15]])
         print("  In-House Stats written")
 
 
     def write_h2h(spreadsheet, h2h, player_stats):
-        try: spreadsheet.del_worksheet(spreadsheet.worksheet("In-House Head-to-Head"))
-        except: pass
+        try:
+            spreadsheet.del_worksheet(spreadsheet.worksheet("In-House Head-to-Head"))
+        except gspread.exceptions.WorksheetNotFound:
+            pass  # sheet doesn't exist yet, that's fine
         active=sorted([n for n,ps in player_stats.items() if ps["games"]>0])
         n=len(active)
-        ws=spreadsheet.add_worksheet("In-House Head-to-Head", rows=n*2+15, cols=n+3)
+        ws=sheets_retry(spreadsheet.add_worksheet, "In-House Head-to-Head", rows=n*2+15, cols=n+3)
         rows=[]; fmts=[]
         pad_n=n+2; ec=chr(64+min(pad_n,26))
         pad=lambda d: d+[""]*(pad_n-len(d))
@@ -10238,13 +10564,13 @@ def _run_inhouse(argv):
                 fmts.append((f"A{rn()}", {"backgroundColor":HEADER,"textFormat":{"bold":True,"fontSize":9,"foregroundColor":WHITE}}))
             rows.append(pad([""])); rows.append(pad([""]))
 
-        ws.update(values=rows, range_name="A1"); time.sleep(1)
+        sheets_retry(ws.update, values=rows, range_name="A1")
         reqs=[{"updateDimensionProperties":{"range":{"sheetId":ws.id,"dimension":"COLUMNS","startIndex":0,"endIndex":1},"properties":{"pixelSize":100},"fields":"pixelSize"}}]
         for ci in range(1,n+1):
             reqs.append({"updateDimensionProperties":{"range":{"sheetId":ws.id,"dimension":"COLUMNS","startIndex":ci,"endIndex":ci+1},"properties":{"pixelSize":85},"fields":"pixelSize"}})
-        spreadsheet.batch_update({"requests":reqs}); time.sleep(0.5)
+        sheets_retry(spreadsheet.batch_update, {"requests":reqs})
         for i in range(0,len(fmts),15):
-            ws.batch_format([{"range":r,"format":f} for r,f in fmts[i:i+15]]); time.sleep(0.5)
+            sheets_retry(ws.batch_format, [{"range":r,"format":f} for r,f in fmts[i:i+15]])
         print("  Head-to-Head written")
 
     main()

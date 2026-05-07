@@ -16,6 +16,8 @@ import textwrap
 from pathlib import Path
 from secrets import EMBEDDED_API_KEY, CREDENTIALS_PATH
 
+CORE_CONFIG = Path("core/config.py").read_text(encoding="utf-8")
+CORE_THEME  = Path("core/theme.py").read_text(encoding="utf-8")
 LAUNCHER = Path("launcher.py").read_text(encoding="utf-8")
 MAIN     = Path("fetch_ranks_gsheets.py").read_text(encoding="utf-8")
 INHOUSE  = Path("inhouse_tracker.py").read_text(encoding="utf-8")
@@ -35,46 +37,51 @@ def strip_main_block(src):
 
 
 def strip_imports(src):
-    """Remove top-level `import` and `from ... import` statements.
-    They'll be deduplicated and put at the top of the merged file.
-    Preserves any non-import code that's between the imports and the rest.
-    """
+    """Remove top-level import statements (including multi-line parenthesized ones)."""
     lines = src.split("\n")
     keep_lines = []
     in_imports_section = True
+    in_multiline_import = False
 
     for ln in lines:
         s = ln.strip()
+
+        if in_multiline_import:
+            if ")" in ln:
+                in_multiline_import = False
+            continue  # drop continuation lines
+
         if in_imports_section:
-            # In the early section, drop imports and blank lines
             if s.startswith("import ") or s.startswith("from "):
+                if "(" in ln and ")" not in ln:
+                    in_multiline_import = True
                 continue
             if s.startswith("#") or s == "":
-                # Comments and blanks at the top get dropped (we'll add our own)
                 continue
-            # First non-import non-comment line: we're past the imports section
             in_imports_section = False
             keep_lines.append(ln)
         else:
-            # In the body, only drop module-level imports of the same form
-            # to avoid duplicate `import argparse` etc.
-            if s.startswith("import ") or s.startswith("from "):
-                # Only drop if it's at module level (no indent)
-                if not ln.startswith(" ") and not ln.startswith("\t"):
-                    continue
+            if (s.startswith("import ") or s.startswith("from ")) and \
+                    not ln.startswith(" ") and not ln.startswith("\t"):
+                if "(" in ln and ")" not in ln:
+                    in_multiline_import = True
+                continue
             keep_lines.append(ln)
 
     return "\n".join(keep_lines)
 
 
 def collect_imports(src):
-    """Return a sorted list of unique top-level import statements from src."""
+    """Return unique top-level single-line import statements, skipping internal core.* ones."""
     out = set()
     for ln in src.split("\n"):
         s = ln.strip()
         if (s.startswith("import ") or s.startswith("from ")) and \
-                not ln.startswith(" ") and not ln.startswith("\t"):
-            out.add(s)
+                not ln.startswith(" ") and not ln.startswith("\t") and \
+                not s.startswith("from core."):
+            # Only collect single-line imports; multi-line ones are internal
+            if "(" not in s or ")" in s:
+                out.add(s)
     return out
 
 
@@ -82,17 +89,24 @@ def collect_imports(src):
 # 2. Read each script's source after stripping
 # ─────────────────────────────────────────────────────────────────────
 
+core_config_clean = strip_main_block(CORE_CONFIG)
+core_theme_clean  = strip_main_block(CORE_THEME)
 launcher_clean = strip_main_block(LAUNCHER)
 main_clean     = strip_main_block(MAIN)
 inhouse_clean  = strip_main_block(INHOUSE)
 
-# Collect & dedupe imports from all 3 scripts
-all_imports = (collect_imports(launcher_clean)
+# Collect & dedupe imports from all sources
+all_imports = (collect_imports(core_config_clean)
+               | collect_imports(core_theme_clean)
+               | collect_imports(launcher_clean)
                | collect_imports(main_clean)
                | collect_imports(inhouse_clean))
 
 # Strip top-level imports from each (we'll put them all at the top)
-launcher_body = strip_imports(launcher_clean)
+# core modules are prepended to launcher_body so patches find their definitions
+core_config_body = strip_imports(core_config_clean)
+core_theme_body  = strip_imports(core_theme_clean)
+launcher_body = core_config_body + "\n\n" + core_theme_body + "\n\n" + strip_imports(launcher_clean)
 main_body     = strip_imports(main_clean)
 inhouse_body  = strip_imports(inhouse_clean)
 
