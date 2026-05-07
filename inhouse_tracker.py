@@ -18,7 +18,7 @@ OPTIONS:
   --lol-path Custom League install path
 """
 
-import argparse, time, sys, os, re, subprocess, urllib3
+import argparse, time, random, sys, os, re, subprocess, urllib3
 from datetime import datetime, timedelta
 from collections import defaultdict
 
@@ -29,6 +29,21 @@ from google.oauth2.service_account import Credentials
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets",
           "https://www.googleapis.com/auth/drive"]
+
+
+# ── Sheets Retry Helper ───────────────────────────────────────
+
+def sheets_retry(fn, *args, max_attempts=6, **kwargs):
+    """Call fn(*args, **kwargs) with exponential backoff on quota/server errors."""
+    for attempt in range(max_attempts):
+        try:
+            return fn(*args, **kwargs)
+        except gspread.exceptions.APIError as e:
+            status = getattr(e.response, "status_code", None)
+            if status in (429, 500, 503) and attempt < max_attempts - 1:
+                time.sleep((2 ** attempt) + random.uniform(0, 1))
+            else:
+                raise
 
 
 # ── LCU Connection ───────────────────────────────────────────
@@ -53,7 +68,8 @@ def find_lockfile():
             if m:
                 lf = os.path.join(os.path.dirname(m.group(1)), "lockfile")
                 if os.path.exists(lf): return lf
-        except: pass
+        except Exception as e:
+            print(f"Warning: lockfile lookup failed: {e}")
     return None
 
 
@@ -77,7 +93,8 @@ def connect_lcu(lockfile_path=None):
             print(f"  Connected as: {name}")
             return base, auth
         print(f"  LCU error: {r.status_code}"); return None, None
-    except:
+    except Exception as e:
+        print(f"  LCU connection attempt failed: {e}")
         print("  Can't connect to League client"); return None, None
 
 
@@ -113,7 +130,9 @@ def fetch_all_matches(base_url, auth, max_count=500):
                     if gid and gid not in seen_ids:
                         seen_ids.add(gid); all_games.append(g); new += 1
                 if new == 0: break
-            except: break
+            except Exception as e:
+                print(f"Warning: match page fetch failed: {e}")
+                break
     return all_games
 
 
@@ -122,7 +141,8 @@ def fetch_detail(base_url, auth, game_id):
         r = requests.get(f"{base_url}/lol-match-history/v1/games/{game_id}",
                         auth=auth, verify=False, timeout=15)
         if r.status_code == 200: return r.json()
-    except: pass
+    except Exception as e:
+        print(f"Warning: game detail fetch failed: {e}")
     return None
 
 
@@ -131,7 +151,9 @@ def load_champion_map():
         v = requests.get("https://ddragon.leagueoflegends.com/api/versions.json", timeout=10).json()
         data = requests.get(f"https://ddragon.leagueoflegends.com/cdn/{v[0]}/data/en_US/champion.json", timeout=10).json()
         return {int(d["key"]): d["name"] for d in data["data"].values()}
-    except: return {}
+    except Exception as e:
+        print(f"Warning: failed to load champion map from DDragon: {e}")
+        return {}
 
 
 def connect_sheet(creds, sheet):
@@ -158,21 +180,20 @@ def load_existing_game_ids(spreadsheet):
         return set()
 
 
-def append_game_log(spreadsheet, new_records):
+def append_game_log(spreadsheet, new_records, logged_by="Unknown"):
     """Append new game records to the _InhouseGameLog sheet. Creates if needed."""
     try:
         ws = spreadsheet.worksheet("_InhouseGameLog")
     except gspread.exceptions.WorksheetNotFound:
-        ws = spreadsheet.add_worksheet("_InhouseGameLog", rows=5000, cols=16)
+        ws = sheets_retry(spreadsheet.add_worksheet, "_InhouseGameLog", rows=5000, cols=16)
         header = ["gameId", "timestamp", "player", "champion", "teamId",
                   "win", "kills", "deaths", "assists", "cs", "damage",
                   "gold", "vision", "role", "duration", "logged_by"]
-        ws.update(values=[header], range_name="A1")
-        ws.format("A1:P1", {
+        sheets_retry(ws.update, values=[header], range_name="A1")
+        sheets_retry(ws.format, "A1:P1", {
             "backgroundColor": {"red": 0.09, "green": 0.14, "blue": 0.28},
             "textFormat": {"bold": True, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
             "horizontalAlignment": "CENTER"})
-        time.sleep(0.5)
 
     if not new_records:
         return
@@ -194,10 +215,11 @@ def append_game_log(spreadsheet, new_records):
     # Write in chunks of 500 to avoid API limits
     for i in range(0, len(rows), 500):
         chunk = rows[i:i+500]
-        ws.update(values=chunk, range_name=f"A{next_row + i}")
-        time.sleep(1)
+        sheets_retry(ws.update, values=chunk, range_name=f"A{next_row + i}")
 
     print(f"  Appended {len(rows)} new records to game log")
+    _log_activity(spreadsheet, "INHOUSE", logged_by,
+                  f"Logged {len(rows)} new games ({next_row - 1 + len(rows)} total)")
 
 
 def load_full_game_log(spreadsheet):
@@ -225,7 +247,8 @@ def load_full_game_log(spreadsheet):
                 })
             except (ValueError, IndexError): continue
         return records
-    except:
+    except Exception as e:
+        print(f"Warning: failed to load game log: {e}")
         return []
 
 
@@ -238,7 +261,11 @@ def compute_stats_from_log(records):
                                         "deaths": 0, "assists": 0, "damage": 0}),
         "roles": defaultdict(lambda: {"games": 0, "wins": 0}),
         "champ_roles": defaultdict(lambda: defaultdict(int)),
+        "win_streak": 0, "best_streak": 0, "mvp_count": 0,
+        "recent_wr": None,
     })
+    # Keyed by player name; holds (timestamp, win) tuples for post-processing
+    game_results: dict[str, list] = defaultdict(list)
 
     h2h = defaultdict(lambda: defaultdict(lambda: {
         "same_team": 0, "same_wins": 0, "vs": 0, "vs_wins": 0}))
@@ -253,6 +280,8 @@ def compute_stats_from_log(records):
         if len(players) != 10: continue
         total_games += 1
 
+        mvp_name = None
+        mvp_score = None
         for p in players:
             name = p["player"]
             ps = player_stats[name]
@@ -264,6 +293,8 @@ def compute_stats_from_log(records):
             ps["cs"] += p["cs"]
             ps["damage"] += p["damage"]
             ps["gold"] += p["gold"]
+
+            game_results[name].append((p["timestamp"], p["win"]))
 
             ce = ps["champs"][p["champion"]]
             ce["games"] += 1
@@ -279,6 +310,15 @@ def compute_stats_from_log(records):
             rs["wins"] += 1 if p["win"] else 0
 
             ps["champ_roles"][p["champion"]][role] += 1
+
+            # MVP: player with highest kills*3 + assists - deaths + damage/1000
+            score = p["kills"] * 3 + p["assists"] - p["deaths"] + p["damage"] / 1000
+            if mvp_score is None or score > mvp_score:
+                mvp_score = score
+                mvp_name = name
+
+        if mvp_name:
+            player_stats[mvp_name]["mvp_count"] += 1
 
         # Head-to-head
         t100 = [p for p in players if p["teamId"] == 100]
@@ -304,7 +344,46 @@ def compute_stats_from_log(records):
                 else:
                     h2h[b][a]["vs_wins"] += 1
 
+    # Post-process streaks and recent WR for each player
+    for name, ps in player_stats.items():
+        outcomes = [win for _, win in sorted(game_results[name], key=lambda x: x[0])]
+
+        streak = 0
+        for win in reversed(outcomes):
+            if win:
+                streak += 1
+            else:
+                break
+        ps["win_streak"] = streak
+
+        best = cur = 0
+        for win in outcomes:
+            cur = cur + 1 if win else 0
+            best = max(best, cur)
+        ps["best_streak"] = best
+
+        recent = outcomes[-10:]
+        ps["recent_wr"] = round(sum(recent) / len(recent) * 100, 1) if len(recent) >= 3 else None
+
     return dict(player_stats), dict(h2h), total_games
+
+
+# ── Activity Log ─────────────────────────────────────────────
+
+def _log_activity(spreadsheet, event_type, player_name, details):
+    """Write one row to the _Activity sheet for cross-user feed visibility."""
+    try:
+        sheet_name = "_Activity"
+        try:
+            ws = spreadsheet.worksheet(sheet_name)
+        except gspread.exceptions.WorksheetNotFound:
+            ws = sheets_retry(spreadsheet.add_worksheet, sheet_name, rows=500, cols=4)
+            sheets_retry(ws.append_row, ["_ACTIVITY LOG", "", "", ""], value_input_option="RAW")
+        sheets_retry(ws.append_row,
+            [datetime.now().strftime("%Y-%m-%d %H:%M"), event_type, player_name or "", details],
+            value_input_option="RAW")
+    except Exception as e:
+        print(f"  (Activity log write skipped: {e})")
 
 
 # ── Main ─────────────────────────────────────────────────────
@@ -342,7 +421,8 @@ def main():
         r = requests.get(f"{base_url}/lol-summoner/v1/current-summoner",
                         auth=auth, verify=False, timeout=5)
         logged_by = r.json().get("gameName", "Unknown") if r.status_code == 200 else "Unknown"
-    except:
+    except Exception as e:
+        print(f"Warning: could not fetch summoner name: {e}")
         logged_by = "Unknown"
 
     # Connect to Google Sheets early to check existing games
@@ -351,7 +431,9 @@ def main():
         spreadsheet = connect_sheet(args.creds, args.sheet)
         print(f"  Connected to: {spreadsheet.title}")
     except Exception as e:
-        print(f"  Error: {e}"); sys.exit(1)
+        print(f"Error: Could not connect to Google Sheets. Check your credentials file and sheet name.")
+        print(f"  Detail: {e}")
+        sys.exit(1)
 
     # Load existing game IDs to skip duplicates
     print("\nChecking for existing game data...")
@@ -452,7 +534,7 @@ def main():
         if new_records:
             print(f"\n  {valid_count} new 5v5 games, {len(new_records)} player records")
             print(f"\nSaving to game log...")
-            append_game_log(spreadsheet, new_records)
+            append_game_log(spreadsheet, new_records, logged_by)
         else:
             print(f"\n  No new valid 5v5 games found")
     else:
@@ -476,9 +558,7 @@ def main():
     print(f"{'='*60}\n")
 
     write_overview(spreadsheet, player_stats, total_games, champ_map)
-    time.sleep(1)
     write_h2h(spreadsheet, h2h, player_stats)
-    time.sleep(1)
     write_inhouse_db(spreadsheet, player_stats)
 
     # Summary
@@ -503,9 +583,11 @@ def main():
 # ── Inhouse Database (for scouting/draft integration) ────────
 
 def write_inhouse_db(spreadsheet, player_stats):
-    try: spreadsheet.del_worksheet(spreadsheet.worksheet("_InhouseDB"))
-    except: pass
-    ws = spreadsheet.add_worksheet("_InhouseDB", rows=500, cols=13)
+    try:
+        spreadsheet.del_worksheet(spreadsheet.worksheet("_InhouseDB"))
+    except gspread.exceptions.WorksheetNotFound:
+        pass  # sheet doesn't exist yet, that's fine
+    ws = sheets_retry(spreadsheet.add_worksheet, "_InhouseDB", rows=500, cols=13)
     rows = [["INHOUSE DATABASE - DO NOT EDIT", "", "", "", "", "",
              datetime.now().strftime("%Y-%m-%d %H:%M")],
             ["player", "champion", "games", "wins", "wr", "kda",
@@ -525,7 +607,7 @@ def write_inhouse_db(spreadsheet, player_stats):
                          round(cs["kills"]/cg, 1), round(cs["deaths"]/cg, 1),
                          round(cs["assists"]/cg, 1), round(cs["damage"]/cg),
                          g, total_wr, role_str])
-    ws.update(values=rows, range_name="A1")
+    sheets_retry(ws.update, values=rows, range_name="A1")
     print("  Inhouse DB saved (for scouting/draft)")
 
 
@@ -540,45 +622,55 @@ LB = {"red":0.88,"green":0.92,"blue":0.98}
 LG = {"red":0.85,"green":0.95,"blue":0.85}
 
 def write_overview(spreadsheet, player_stats, total, champ_map):
-    try: spreadsheet.del_worksheet(spreadsheet.worksheet("In-House Stats"))
-    except: pass
-    ws = spreadsheet.add_worksheet("In-House Stats", rows=300, cols=14)
+    try:
+        spreadsheet.del_worksheet(spreadsheet.worksheet("In-House Stats"))
+    except gspread.exceptions.WorksheetNotFound:
+        pass  # sheet doesn't exist yet, that's fine
+    ws = sheets_retry(spreadsheet.add_worksheet, "In-House Stats", rows=300, cols=17)
     rows=[]; fmts=[]; merges=[]
-    pad=lambda d,n=14: d+[""]*(n-len(d))
+    # 17 columns: # Player Games Wins Losses WinRate Last10 KDA AvgK AvgD AvgA AvgCS AvgDmg AvgGold CurStreak BestStreak MVPs
+    NCOLS = 17
+    pad=lambda d,n=NCOLS: d+[""]*(n-len(d))
     rn=lambda: len(rows)
 
-    rows.append(pad(["IN-HOUSE 5v5 STATS"])); merges.append(f"A{rn()}:N{rn()}")
-    fmts.append((f"A{rn()}:N{rn()}", {"backgroundColor":DARK,"textFormat":{"bold":True,"fontSize":18,"foregroundColor":GOLD},"horizontalAlignment":"CENTER"}))
+    last_col = chr(64 + NCOLS)  # 'Q'
+
+    rows.append(pad(["IN-HOUSE 5v5 STATS"])); merges.append(f"A{rn()}:{last_col}{rn()}")
+    fmts.append((f"A{rn()}:{last_col}{rn()}", {"backgroundColor":DARK,"textFormat":{"bold":True,"fontSize":18,"foregroundColor":GOLD},"horizontalAlignment":"CENTER"}))
     ts=datetime.now().strftime("%Y-%m-%d %H:%M")
-    rows.append(pad([f"{total} custom 5v5 games (all contributors combined)  |  Updated: {ts}"])); merges.append(f"A{rn()}:N{rn()}")
-    fmts.append((f"A{rn()}:N{rn()}", {"backgroundColor":DARK,"textFormat":{"fontSize":11,"foregroundColor":WHITE},"horizontalAlignment":"CENTER"}))
+    rows.append(pad([f"{total} custom 5v5 games (all contributors combined)  |  Updated: {ts}"])); merges.append(f"A{rn()}:{last_col}{rn()}")
+    fmts.append((f"A{rn()}:{last_col}{rn()}", {"backgroundColor":DARK,"textFormat":{"fontSize":11,"foregroundColor":WHITE},"horizontalAlignment":"CENTER"}))
     rows.append(pad([""]))
 
-    rows.append(pad(["IN-HOUSE LEADERBOARD"])); merges.append(f"A{rn()}:N{rn()}")
-    fmts.append((f"A{rn()}:N{rn()}", {"backgroundColor":SECTION,"textFormat":{"bold":True,"fontSize":14,"foregroundColor":GOLD},"horizontalAlignment":"CENTER"}))
-    rows.append(pad(["#","Player","Games","Wins","Losses","Win Rate","KDA","Avg K","Avg D","Avg A","Avg CS","Avg Dmg","Avg Gold"]))
-    fmts.append((f"A{rn()}:M{rn()}", {"backgroundColor":HEADER,"textFormat":{"bold":True,"fontSize":10,"foregroundColor":WHITE},"horizontalAlignment":"CENTER"}))
+    rows.append(pad(["IN-HOUSE LEADERBOARD"])); merges.append(f"A{rn()}:{last_col}{rn()}")
+    fmts.append((f"A{rn()}:{last_col}{rn()}", {"backgroundColor":SECTION,"textFormat":{"bold":True,"fontSize":14,"foregroundColor":GOLD},"horizontalAlignment":"CENTER"}))
+    rows.append(pad(["#","Player","Games","Wins","Losses","Win Rate","Last 10","KDA","Avg K","Avg D","Avg A","Avg CS","Avg Dmg","Avg Gold","Cur Streak","Best Streak","MVPs"]))
+    fmts.append((f"A{rn()}:{last_col}{rn()}", {"backgroundColor":HEADER,"textFormat":{"bold":True,"fontSize":10,"foregroundColor":WHITE},"horizontalAlignment":"CENTER"}))
 
     sp=sorted(player_stats.items(), key=lambda x:(x[1]["wins"]/max(x[1]["games"],1),x[1]["games"]), reverse=True)
     for i,(name,ps) in enumerate(sp,1):
         g=ps["games"]
         if g==0: continue
-        wr=round(ps["wins"]/g*100,1); kda=round((ps["kills"]+ps["assists"])/max(ps["deaths"],1),2)
+        wr=round(ps["wins"]/g*100,1)
+        kda=round((ps["kills"]+ps["assists"])/max(ps["deaths"],1),2)
+        recent_wr = ps.get("recent_wr")
+        last10 = f"{int(recent_wr)}%" if recent_wr is not None else "—"
         bg=LG if i<=3 else(LB if i%2==0 else {"red":1,"green":1,"blue":1})
-        rows.append(pad([i,name,g,ps["wins"],g-ps["wins"],f"{wr}%",kda,
+        rows.append(pad([i,name,g,ps["wins"],g-ps["wins"],f"{wr}%",last10,kda,
             round(ps["kills"]/g,1),round(ps["deaths"]/g,1),round(ps["assists"]/g,1),
-            round(ps["cs"]/g),f"{round(ps['damage']/g):,}",f"{round(ps['gold']/g):,}"]))
-        fmts.append((f"A{rn()}:M{rn()}", {"backgroundColor":bg,"textFormat":{"fontSize":11,"bold":i<=3},"horizontalAlignment":"CENTER"}))
+            round(ps["cs"]/g),f"{round(ps['damage']/g):,}",f"{round(ps['gold']/g):,}",
+            ps.get("win_streak",0),ps.get("best_streak",0),ps.get("mvp_count",0)]))
+        fmts.append((f"A{rn()}:{last_col}{rn()}", {"backgroundColor":bg,"textFormat":{"fontSize":11,"bold":i<=3},"horizontalAlignment":"CENTER"}))
 
     rows.append(pad([""])); rows.append(pad([""]))
-    rows.append(pad(["IN-HOUSE CHAMPION STATS"])); merges.append(f"A{rn()}:N{rn()}")
-    fmts.append((f"A{rn()}:N{rn()}", {"backgroundColor":SECTION,"textFormat":{"bold":True,"fontSize":14,"foregroundColor":GOLD},"horizontalAlignment":"CENTER"}))
+    rows.append(pad(["IN-HOUSE CHAMPION STATS"])); merges.append(f"A{rn()}:{last_col}{rn()}")
+    fmts.append((f"A{rn()}:{last_col}{rn()}", {"backgroundColor":SECTION,"textFormat":{"bold":True,"fontSize":14,"foregroundColor":GOLD},"horizontalAlignment":"CENTER"}))
 
     for name,ps in sp:
         if ps["games"]==0: continue
         wr=round(ps["wins"]/ps["games"]*100,1)
-        rows.append(pad([f"{name}  -  {ps['games']} games  |  {wr}% WR"])); merges.append(f"A{rn()}:N{rn()}")
-        fmts.append((f"A{rn()}:N{rn()}", {"backgroundColor":{"red":0.2,"green":0.3,"blue":0.5},"textFormat":{"bold":True,"fontSize":12,"foregroundColor":WHITE},"horizontalAlignment":"CENTER"}))
+        rows.append(pad([f"{name}  -  {ps['games']} games  |  {wr}% WR"])); merges.append(f"A{rn()}:{last_col}{rn()}")
+        fmts.append((f"A{rn()}:{last_col}{rn()}", {"backgroundColor":{"red":0.2,"green":0.3,"blue":0.5},"textFormat":{"bold":True,"fontSize":12,"foregroundColor":WHITE},"horizontalAlignment":"CENTER"}))
         rows.append(pad(["Champion","Games","Wins","Losses","WR%","KDA","Avg K","Avg D","Avg A","Avg Dmg"]))
         fmts.append((f"A{rn()}:J{rn()}", {"backgroundColor":HEADER,"textFormat":{"bold":True,"fontSize":10,"foregroundColor":WHITE},"horizontalAlignment":"CENTER"}))
         for j,(ch,cs) in enumerate(sorted(ps["champs"].items(), key=lambda x:x[1]["games"], reverse=True)):
@@ -590,8 +682,8 @@ def write_overview(spreadsheet, player_stats, total, champ_map):
         rows.append(pad([""]))
 
     rows.append(pad([""])); rows.append(pad([""]))
-    rows.append(pad(["IN-HOUSE ROLE PERFORMANCE"])); merges.append(f"A{rn()}:N{rn()}")
-    fmts.append((f"A{rn()}:N{rn()}", {"backgroundColor":SECTION,"textFormat":{"bold":True,"fontSize":14,"foregroundColor":GOLD},"horizontalAlignment":"CENTER"}))
+    rows.append(pad(["IN-HOUSE ROLE PERFORMANCE"])); merges.append(f"A{rn()}:{last_col}{rn()}")
+    fmts.append((f"A{rn()}:{last_col}{rn()}", {"backgroundColor":SECTION,"textFormat":{"bold":True,"fontSize":14,"foregroundColor":GOLD},"horizontalAlignment":"CENTER"}))
     rows.append(pad(["Player","Top","","Jungle","","Mid","","Bot","","Support",""]))
     fmts.append((f"A{rn()}:K{rn()}", {"backgroundColor":HEADER,"textFormat":{"bold":True,"fontSize":10,"foregroundColor":WHITE},"horizontalAlignment":"CENTER"}))
     rows.append(pad(["","G","WR%","G","WR%","G","WR%","G","WR%","G","WR%"]))
@@ -605,24 +697,26 @@ def write_overview(spreadsheet, player_stats, total, champ_map):
         rows.append(pad(rd))
         fmts.append((f"A{rn()}:K{rn()}", {"backgroundColor":LB,"textFormat":{"fontSize":11},"horizontalAlignment":"CENTER"}))
 
-    ws.update(values=rows, range_name="A1"); time.sleep(1)
-    for m in merges: ws.merge_cells(m)
-    time.sleep(1)
-    col_px=[50,120,60,55,60,70,55,60,60,60,70,95,90,80]
+    sheets_retry(ws.update, values=rows, range_name="A1")
+    for m in merges:
+        sheets_retry(ws.merge_cells, m)
+    col_px=[50,120,60,55,60,70,65,55,60,60,60,70,95,90,80,85,55]
     reqs=[{"updateDimensionProperties":{"range":{"sheetId":ws.id,"dimension":"COLUMNS","startIndex":ci,"endIndex":ci+1},"properties":{"pixelSize":px},"fields":"pixelSize"}} for ci,px in enumerate(col_px)]
     reqs.append({"updateDimensionProperties":{"range":{"sheetId":ws.id,"dimension":"ROWS","startIndex":0,"endIndex":1},"properties":{"pixelSize":50},"fields":"pixelSize"}})
-    spreadsheet.batch_update({"requests":reqs}); time.sleep(0.5)
+    sheets_retry(spreadsheet.batch_update, {"requests":reqs})
     for i in range(0,len(fmts),15):
-        ws.batch_format([{"range":r,"format":f} for r,f in fmts[i:i+15]]); time.sleep(0.5)
+        sheets_retry(ws.batch_format, [{"range":r,"format":f} for r,f in fmts[i:i+15]])
     print("  In-House Stats written")
 
 
 def write_h2h(spreadsheet, h2h, player_stats):
-    try: spreadsheet.del_worksheet(spreadsheet.worksheet("In-House Head-to-Head"))
-    except: pass
+    try:
+        spreadsheet.del_worksheet(spreadsheet.worksheet("In-House Head-to-Head"))
+    except gspread.exceptions.WorksheetNotFound:
+        pass  # sheet doesn't exist yet, that's fine
     active=sorted([n for n,ps in player_stats.items() if ps["games"]>0])
     n=len(active)
-    ws=spreadsheet.add_worksheet("In-House Head-to-Head", rows=n*2+15, cols=n+3)
+    ws=sheets_retry(spreadsheet.add_worksheet, "In-House Head-to-Head", rows=n*2+15, cols=n+3)
     rows=[]; fmts=[]
     pad_n=n+2; ec=chr(64+min(pad_n,26))
     pad=lambda d: d+[""]*(pad_n-len(d))
@@ -649,13 +743,13 @@ def write_h2h(spreadsheet, h2h, player_stats):
             fmts.append((f"A{rn()}", {"backgroundColor":HEADER,"textFormat":{"bold":True,"fontSize":9,"foregroundColor":WHITE}}))
         rows.append(pad([""])); rows.append(pad([""]))
 
-    ws.update(values=rows, range_name="A1"); time.sleep(1)
+    sheets_retry(ws.update, values=rows, range_name="A1")
     reqs=[{"updateDimensionProperties":{"range":{"sheetId":ws.id,"dimension":"COLUMNS","startIndex":0,"endIndex":1},"properties":{"pixelSize":100},"fields":"pixelSize"}}]
     for ci in range(1,n+1):
         reqs.append({"updateDimensionProperties":{"range":{"sheetId":ws.id,"dimension":"COLUMNS","startIndex":ci,"endIndex":ci+1},"properties":{"pixelSize":85},"fields":"pixelSize"}})
-    spreadsheet.batch_update({"requests":reqs}); time.sleep(0.5)
+    sheets_retry(spreadsheet.batch_update, {"requests":reqs})
     for i in range(0,len(fmts),15):
-        ws.batch_format([{"range":r,"format":f} for r,f in fmts[i:i+15]]); time.sleep(0.5)
+        sheets_retry(ws.batch_format, [{"range":r,"format":f} for r,f in fmts[i:i+15]])
     print("  Head-to-Head written")
 
 
