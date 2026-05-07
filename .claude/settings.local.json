@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -E \"\\\\.py$|\\\\.txt$|\\\\.spec$\")",
+      "Bash(python -c \"import PyInstaller; print\\(PyInstaller.__version__\\)\")",
+      "Bash(pyinstaller --version)",
+      "Bash(grep -E \"\\\\.py$|\\\\.txt$|\\\\.spec$|\\\\.json$\")",
+      "Bash(python build_merger.py)",
+      "Bash(python -c ' *)",
+      "Bash(pyinstaller --onefile --windowed --name LoLPowerRankings app.py)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('app.py', encoding='utf-8'\\).read\\(\\)\\); print\\('app.py syntax OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('app.py', encoding='utf-8'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
+      "Bash(grep -v \"^build$\\\\|^dist$\\\\|^\\\\.claude$\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('app.py',encoding='utf-8'\\).read\\(\\)\\); print\\('syntax OK'\\)\")",
+      "Bash(taskkill /F /IM LoLPowerRankings.exe)",
+      "PowerShell(Stop-Process -Name \"LoLPowerRankings\" -Force -ErrorAction SilentlyContinue)",
+      "Bash(python build.py)",
+      "Bash(pyinstaller LoLPowerRankings.spec)"
+    ]
+  }
+}
