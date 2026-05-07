@@ -14,6 +14,7 @@ Strategy:
 import re
 import textwrap
 from pathlib import Path
+from secrets import EMBEDDED_API_KEY, CREDENTIALS_PATH
 
 LAUNCHER = Path("launcher.py").read_text(encoding="utf-8")
 MAIN     = Path("fetch_ranks_gsheets.py").read_text(encoding="utf-8")
@@ -118,8 +119,7 @@ inhouse_indented = indent_body(inhouse_body)
 # 4. Embed credentials and API key
 # ─────────────────────────────────────────────────────────────────────
 
-CREDS_JSON = Path("credentials.json").read_text(encoding="utf-8")
-EMBEDDED_API_KEY = "RGAPI-0b3a766e-0bb4-4248-a479-578cff5d165b"
+CREDS_JSON = Path(CREDENTIALS_PATH).read_text(encoding="utf-8")
 
 # ─────────────────────────────────────────────────────────────────────
 # Auto-update configuration

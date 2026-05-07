@@ -1,0 +1,9 @@
+secrets.py
+credentials.json
+*.b64
+app.py
+__pycache__/
+*.pyc
+dist/
+build/
+*.spec
