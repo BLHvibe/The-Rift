@@ -20,6 +20,7 @@ OPTIONS:
 
 import argparse
 import time
+import random
 import sys
 import re
 import json
@@ -65,6 +66,21 @@ TIER_TO_NUM = {"S": 6, "A": 5, "B": 4, "C": 3, "D": 2, "F": 1}
 NUM_TO_TIER = {6: "S", 5: "A", 4: "B", 3: "C", 2: "D", 1: "F"}
 
 
+# ── Retry helper ──────────────────────────────────────────────
+
+def sheets_retry(fn, *args, max_attempts=6, **kwargs):
+    """Call fn(*args, **kwargs) with exponential backoff on quota/server errors."""
+    for attempt in range(max_attempts):
+        try:
+            return fn(*args, **kwargs)
+        except gspread.exceptions.APIError as e:
+            status = getattr(e.response, "status_code", None)
+            if status in (429, 500, 503) and attempt < max_attempts - 1:
+                time.sleep((2 ** attempt) + random.uniform(0, 1))
+            else:
+                raise
+
+
 # ── Google Sheets helpers ─────────────────────────────────────
 
 def connect_to_sheet(creds_file, sheet_identifier):
@@ -82,11 +98,11 @@ def get_or_create_sheet(spreadsheet, name, rows=100, cols=30):
     try:
         return spreadsheet.worksheet(name)
     except gspread.exceptions.WorksheetNotFound:
-        return spreadsheet.add_worksheet(name, rows=rows, cols=cols)
+        return sheets_retry(spreadsheet.add_worksheet, name, rows=rows, cols=cols)
 
 
 def fmt_title(ws, end_col):
-    ws.format(f"A1:{end_col}1", {
+    sheets_retry(ws.format, f"A1:{end_col}1", {
         "backgroundColor": {"red": 0.11, "green": 0.11, "blue": 0.18},
         "textFormat": {"bold": True, "fontSize": 14,
                        "foregroundColor": {"red": 0.91, "green": 0.72, "blue": 0.29}},
@@ -95,7 +111,7 @@ def fmt_title(ws, end_col):
 
 
 def fmt_header(ws, row, end_col):
-    ws.format(f"A{row}:{end_col}{row}", {
+    sheets_retry(ws.format, f"A{row}:{end_col}{row}", {
         "backgroundColor": {"red": 0.09, "green": 0.14, "blue": 0.28},
         "textFormat": {"bold": True,
                        "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
@@ -347,11 +363,11 @@ def write_rank_data(spreadsheet, results, timestamp):
                      r["lp"], r["wins"], r["losses"], r["score"],
                      r["normalized"], wr, games, timestamp])
     ws.clear()
-    ws.update(range_name="A1", values=rows)
+    sheets_retry(ws.update, range_name="A1", values=rows)
     fmt_title(ws, "L")
     fmt_header(ws, 2, "L")
     if len(rows) > 2:
-        ws.format(f"A3:L{len(rows)}", {"horizontalAlignment": "CENTER"})
+        sheets_retry(ws.format, f"A3:L{len(rows)}", {"horizontalAlignment": "CENTER"})
     print("  Rank Data updated")
 
 
@@ -396,11 +412,11 @@ def write_player_stats(spreadsheet, results, champ_map):
         rows.append([r["row"], r["name"], wr, c1, m1, c2, m2, c3, m3,
                      rwl, rwr, kda, ak, ad, aa, hc])
     ws.clear()
-    ws.update(range_name="A1", values=rows)
+    sheets_retry(ws.update, range_name="A1", values=rows)
     fmt_title(ws, "P")
     fmt_header(ws, 2, "P")
     if len(rows) > 2:
-        ws.format(f"A3:P{len(rows)}", {"horizontalAlignment": "CENTER"})
+        sheets_retry(ws.format, f"A3:P{len(rows)}", {"horizontalAlignment": "CENTER"})
     print("  Player Stats updated")
 
 
@@ -423,11 +439,11 @@ def write_consensus(spreadsheet, consensus_data):
         rows.append([i, c["name"], c["avg"], c.get("avg_tier", "?"),
                      c["std"], c["min"], c["max"], c["range"], verdict])
     ws.clear()
-    ws.update(range_name="A1", values=rows)
+    sheets_retry(ws.update, range_name="A1", values=rows)
     fmt_title(ws, "I")
     fmt_header(ws, 2, "I")
     if len(rows) > 2:
-        ws.format(f"A3:I{len(rows)}", {"horizontalAlignment": "CENTER"})
+        sheets_retry(ws.format, f"A3:I{len(rows)}", {"horizontalAlignment": "CENTER"})
     print("  Consensus & Controversy updated")
 
 
@@ -444,9 +460,9 @@ def write_hot_takes(spreadsheet, hot_takes):
     if not hot_takes:
         rows.append(["", "No hot takes found - everyone agrees!", "", "", "", "", ""])
     ws.clear()
-    ws.update(range_name="A1", values=rows)
+    sheets_retry(ws.update, range_name="A1", values=rows)
     fmt_title(ws, "G")
-    ws.format("A2:G2", {
+    sheets_retry(ws.format, "A2:G2", {
         "backgroundColor": {"red": 0.15, "green": 0.15, "blue": 0.25},
         "textFormat": {"italic": True,
                        "foregroundColor": {"red": 0.7, "green": 0.7, "blue": 0.7}},
@@ -454,7 +470,7 @@ def write_hot_takes(spreadsheet, hot_takes):
     })
     fmt_header(ws, 3, "G")
     if len(rows) > 3:
-        ws.format(f"A4:G{len(rows)}", {"horizontalAlignment": "CENTER"})
+        sheets_retry(ws.format, f"A4:G{len(rows)}", {"horizontalAlignment": "CENTER"})
     print(f"  Hot Take Detector updated ({len(hot_takes)} hot takes)")
 
 
@@ -470,11 +486,11 @@ def write_rater_bias(spreadsheet, rater_bias):
         rows.append([i, rb["rater"], rb["avg"], rb["avg_tier"],
                      rb["s_count"], rb["f_count"], rb["std"], ds, rb["label"]])
     ws.clear()
-    ws.update(range_name="A1", values=rows)
+    sheets_retry(ws.update, range_name="A1", values=rows)
     fmt_title(ws, "I")
     fmt_header(ws, 2, "I")
     if len(rows) > 2:
-        ws.format(f"A3:I{len(rows)}", {"horizontalAlignment": "CENTER"})
+        sheets_retry(ws.format, f"A3:I{len(rows)}", {"horizontalAlignment": "CENTER"})
     print("  Rater Bias Report updated")
 
 
@@ -502,7 +518,7 @@ def write_rank_history(spreadsheet, results, timestamp):
 
         all_rows = [title, header, data_row]
         ws.clear()
-        ws.update(range_name="A1", values=all_rows)
+        sheets_retry(ws.update, range_name="A1", values=all_rows)
         fmt_title(ws, chr(64 + min(num_players + 1, 26)))
 
         ref_labels = [
@@ -517,7 +533,7 @@ def write_rank_history(spreadsheet, results, timestamp):
             "Iron I = 4", "Iron IV = 1", "Unranked = 0",
         ]
         for i, label in enumerate(ref_labels):
-            ws.update_cell(i + 1, ref_col, label)
+            sheets_retry(ws.update_cell, i + 1, ref_col, label)
 
         print("  Rank History created (first snapshot)")
     else:
@@ -532,7 +548,7 @@ def write_rank_history(spreadsheet, results, timestamp):
             else:
                 data_row.append("")
 
-        ws.update(range_name=f"A{next_row}", values=[data_row])
+        sheets_retry(ws.update, range_name=f"A{next_row}", values=[data_row])
 
         data_points = next_row - 2
         print(f"  Rank History updated ({data_points} data points)")
@@ -722,11 +738,11 @@ def write_scouting_sheet(spreadsheet, player_name, rank_str, lp, analysis, ranki
     sheet_name = f"Scout - {player_name}"[:30]
     try:
         old = spreadsheet.worksheet(sheet_name)
-        spreadsheet.del_worksheet(old)
+        sheets_retry(spreadsheet.del_worksheet, old)
     except gspread.exceptions.WorksheetNotFound:
         pass
 
-    ws = spreadsheet.add_worksheet(sheet_name, rows=120, cols=12)
+    ws = sheets_retry(spreadsheet.add_worksheet, sheet_name, rows=120, cols=12)
 
     DARK = {"red": 0.11, "green": 0.11, "blue": 0.18}
     HEADER = {"red": 0.09, "green": 0.14, "blue": 0.28}
@@ -989,11 +1005,11 @@ def write_scouting_sheet(spreadsheet, player_name, rank_str, lp, analysis, ranki
                                                 "horizontalAlignment": "CENTER"}))
 
     # ── WRITE + FORMAT ──
-    ws.update(range_name="A1", values=rows)
+    sheets_retry(ws.update, range_name="A1", values=rows)
 
     # Apply all tracked merges
     for m in merges:
-        ws.merge_cells(m)
+        sheets_retry(ws.merge_cells, m)
 
     # Column widths
     col_px = [160, 80, 80, 80, 90, 80, 90, 100, 100, 90, 100, 120]
@@ -1007,19 +1023,18 @@ def write_scouting_sheet(spreadsheet, player_name, rank_str, lp, analysis, ranki
         "range": {"sheetId": ws.id, "dimension": "ROWS",
                   "startIndex": 0, "endIndex": 1},
         "properties": {"pixelSize": 50}, "fields": "pixelSize"}})
-    spreadsheet.batch_update({"requests": reqs})
+    sheets_retry(spreadsheet.batch_update, {"requests": reqs})
 
     # Apply formats in batches
     for i in range(0, len(fmts), 15):
         batch = [{"range": r, "format": f} for r, f in fmts[i:i+15]]
-        ws.batch_format(batch)
-        time.sleep(0.3)
+        sheets_retry(ws.batch_format, batch)
 
     # Tab color by form
     tc = ({"red": 0.2, "green": 0.8, "blue": 0.2} if a["form"] == "HOT"
           else {"red": 0.8, "green": 0.2, "blue": 0.2} if a["form"] == "COLD"
           else {"red": 0.3, "green": 0.5, "blue": 0.9})
-    spreadsheet.batch_update({"requests": [{
+    sheets_retry(spreadsheet.batch_update, {"requests": [{
         "updateSheetProperties": {
             "properties": {"sheetId": ws.id, "tabColor": tc},
             "fields": "tabColor"}}]})
@@ -1179,9 +1194,11 @@ def load_inhouse_db(spreadsheet):
             for name in inhouse:
                 inhouse[name]["champs"].sort(key=lambda x: x["games"], reverse=True)
             return inhouse
-        except:
+        except Exception as e:
+            print(f"Warning: failed to load inhouse DB fallback: {e}")
             return {}
-    except Exception:
+    except Exception as e:
+        print(f"Warning: failed to load inhouse data: {e}")
         return {}
 
 
@@ -1660,11 +1677,11 @@ def write_draft_tool(spreadsheet, player_names):
     sheet_name = "Draft Tool"
     try:
         old = spreadsheet.worksheet(sheet_name)
-        spreadsheet.del_worksheet(old)
+        sheets_retry(spreadsheet.del_worksheet, old)
     except gspread.exceptions.WorksheetNotFound:
         pass
 
-    ws = spreadsheet.add_worksheet(sheet_name, rows=120, cols=14)
+    ws = sheets_retry(spreadsheet.add_worksheet, sheet_name, rows=120, cols=14)
 
     DARK = {"red": 0.11, "green": 0.11, "blue": 0.18}
     HEADER = {"red": 0.09, "green": 0.14, "blue": 0.28}
@@ -1806,9 +1823,9 @@ def write_draft_tool(spreadsheet, player_names):
     rows.append(pad(["(Run --draft to generate comp suggestions based on selected players)"]))
 
     # Write all data
-    ws.update(range_name="A1", values=rows)
-    ws.merge_cells("A1:N1")
-    ws.merge_cells("A2:N2")
+    sheets_retry(ws.update, range_name="A1", values=rows)
+    sheets_retry(ws.merge_cells, "A1:N1")
+    sheets_retry(ws.merge_cells, "A2:N2")
 
     # Add data validation dropdowns for player selection
     role_list = "Top,Jungle,Mid,Bot,Support"
@@ -1871,13 +1888,12 @@ def write_draft_tool(spreadsheet, player_names):
                   "startIndex": 0, "endIndex": 1},
         "properties": {"pixelSize": 50}, "fields": "pixelSize"}})
 
-    spreadsheet.batch_update({"requests": reqs})
+    sheets_retry(spreadsheet.batch_update, {"requests": reqs})
 
     # Apply formats
     for i in range(0, len(fmts), 15):
         batch = [{"range": r, "format": f} for r, f in fmts[i:i+15]]
-        ws.batch_format(batch)
-        time.sleep(0.3)
+        sheets_retry(ws.batch_format, batch)
 
     print("  Draft Tool created with dropdowns")
 
@@ -1943,7 +1959,8 @@ def run_draft(spreadsheet, all_scouting, rankings, champ_tags_data=None):
         for row in pv[2:]:
             if len(row) >= 3 and "#" in str(row[2]):
                 riot_name_map[row[1].strip()] = row[2].rsplit("#", 1)[0]
-    except: pass
+    except Exception as e:
+        print(f"Warning: riot name map build failed: {e}")
 
     def get_inhouse(player_name):
         ih = inhouse_db.get(player_name)
@@ -1969,9 +1986,9 @@ def run_draft(spreadsheet, all_scouting, rankings, champ_tags_data=None):
 
     # ── Delete and recreate sheet to avoid write limit issues ──
     sheet_id = ws.id
-    spreadsheet.del_worksheet(ws)
-    ws = spreadsheet.add_worksheet("Draft Tool", rows=200, cols=14)
-    time.sleep(1)
+    sheets_retry(spreadsheet.del_worksheet, ws)
+    ws = sheets_retry(spreadsheet.add_worksheet, "Draft Tool", rows=200, cols=14)
+    time.sleep(1)  # needed for the sheet to be available after recreation
 
     DARK = {"red": 0.11, "green": 0.11, "blue": 0.18}
     HEADER = {"red": 0.09, "green": 0.14, "blue": 0.28}
@@ -2179,13 +2196,11 @@ def run_draft(spreadsheet, all_scouting, rankings, champ_tags_data=None):
         rows.append(pad([""]))
 
     # ── SINGLE BATCH WRITE ──
-    ws.update(values=rows, range_name="A1")
-    time.sleep(1)
+    sheets_retry(ws.update, values=rows, range_name="A1")
 
     # Apply merges
     for m in merges:
-        ws.merge_cells(m)
-    time.sleep(1)
+        sheets_retry(ws.merge_cells, m)
 
     # Column widths
     col_px = [80, 130, 150, 110, 70, 70, 110, 80, 130, 150, 110, 70, 70, 110]
@@ -2199,14 +2214,12 @@ def run_draft(spreadsheet, all_scouting, rankings, champ_tags_data=None):
         "range": {"sheetId": ws.id, "dimension": "ROWS",
                   "startIndex": 0, "endIndex": 1},
         "properties": {"pixelSize": 50}, "fields": "pixelSize"}})
-    spreadsheet.batch_update({"requests": reqs})
-    time.sleep(0.5)
+    sheets_retry(spreadsheet.batch_update, {"requests": reqs})
 
     # Apply formats in batches
     for i in range(0, len(fmts), 15):
         batch = [{"range": r, "format": f} for r, f in fmts[i:i+15]]
-        ws.batch_format(batch)
-        time.sleep(0.5)
+        sheets_retry(ws.batch_format, batch)
 
     print("\n  Draft Tool updated with bans and comp suggestions!")
 
@@ -2218,13 +2231,12 @@ def append_activity_event(spreadsheet, event_type, player_name, details):
         ws = get_or_create_sheet(spreadsheet, sheet_name, rows=200, cols=4)
         # Write header row if the sheet is brand new
         if not ws.get_all_values():
-            ws.append_row(["_ACTIVITY LOG", "", "", ""],
-                          value_input_option="RAW")
-        ws.append_row(
-            [datetime.now().strftime("%Y-%m-%d %H:%M"), event_type,
-             player_name or "", details],
-            value_input_option="RAW",
-        )
+            sheets_retry(ws.append_row, ["_ACTIVITY LOG", "", "", ""],
+                         value_input_option="RAW")
+        sheets_retry(ws.append_row,
+                     [datetime.now().strftime("%Y-%m-%d %H:%M"), event_type,
+                      player_name or "", details],
+                     value_input_option="RAW")
     except Exception as e:
         print(f"  (Activity log write skipped: {e})")
 
@@ -2233,7 +2245,8 @@ def load_activity_log(spreadsheet, limit=50):
     """Return the most recent `limit` activity events as a list of dicts."""
     try:
         ws = spreadsheet.worksheet("_Activity")
-    except Exception:
+    except Exception as e:
+        print(f"Warning: could not load activity log: {e}")
         return []
     rows = ws.get_all_values()
     # Skip header row; rows are oldest-first
@@ -2251,11 +2264,11 @@ def write_scouting_database(spreadsheet, all_scouting, rankings):
     sheet_name = "_ScoutDB"
     try:
         old = spreadsheet.worksheet(sheet_name)
-        spreadsheet.del_worksheet(old)
+        sheets_retry(spreadsheet.del_worksheet, old)
     except gspread.exceptions.WorksheetNotFound:
         pass
 
-    ws = spreadsheet.add_worksheet(sheet_name, rows=500, cols=15)
+    ws = sheets_retry(spreadsheet.add_worksheet, sheet_name, rows=500, cols=15)
 
     rows = [["SCOUTING DATABASE - DO NOT EDIT", "", "", "", "", "",
              datetime.now().strftime("%Y-%m-%d %H:%M")]]
@@ -2282,7 +2295,7 @@ def write_scouting_database(spreadsheet, all_scouting, rankings):
                 champ["avg_gold"], role_str, rank_pos, rank_score,
             ])
 
-    ws.update(range_name="A1", values=rows)
+    sheets_retry(ws.update, range_name="A1", values=rows)
     print(f"  Scouting database saved ({len(all_scouting)} players)")
 
 
@@ -2599,11 +2612,11 @@ def write_inhouse_overview(spreadsheet, player_stats, total_games):
     sheet_name = "In-House Stats"
     try:
         old = spreadsheet.worksheet(sheet_name)
-        spreadsheet.del_worksheet(old)
+        sheets_retry(spreadsheet.del_worksheet, old)
     except gspread.exceptions.WorksheetNotFound:
         pass
 
-    ws = spreadsheet.add_worksheet(sheet_name, rows=80, cols=14)
+    ws = sheets_retry(spreadsheet.add_worksheet, sheet_name, rows=80, cols=14)
 
     DARK = {"red": 0.11, "green": 0.11, "blue": 0.18}
     HEADER = {"red": 0.09, "green": 0.14, "blue": 0.28}
@@ -2779,12 +2792,10 @@ def write_inhouse_overview(spreadsheet, player_stats, total_games):
             "horizontalAlignment": "CENTER"}))
 
     # Write everything in one batch
-    ws.update(values=rows, range_name="A1")
-    time.sleep(1)
+    sheets_retry(ws.update, values=rows, range_name="A1")
 
     for m in merges:
-        ws.merge_cells(m)
-    time.sleep(1)
+        sheets_retry(ws.merge_cells, m)
 
     col_px = [50, 120, 65, 60, 65, 75, 60, 75, 80, 80, 80, 100, 80, 100]
     reqs = []
@@ -2797,13 +2808,11 @@ def write_inhouse_overview(spreadsheet, player_stats, total_games):
         "range": {"sheetId": ws.id, "dimension": "ROWS",
                   "startIndex": 0, "endIndex": 1},
         "properties": {"pixelSize": 50}, "fields": "pixelSize"}})
-    spreadsheet.batch_update({"requests": reqs})
-    time.sleep(0.5)
+    sheets_retry(spreadsheet.batch_update, {"requests": reqs})
 
     for i in range(0, len(fmts), 15):
         batch = [{"range": r, "format": f} for r, f in fmts[i:i+15]]
-        ws.batch_format(batch)
-        time.sleep(0.5)
+        sheets_retry(ws.batch_format, batch)
 
     print("  In-House Stats overview written")
 
@@ -2813,7 +2822,7 @@ def write_inhouse_h2h(spreadsheet, h2h, player_stats):
     sheet_name = "In-House Head-to-Head"
     try:
         old = spreadsheet.worksheet(sheet_name)
-        spreadsheet.del_worksheet(old)
+        sheets_retry(spreadsheet.del_worksheet, old)
     except gspread.exceptions.WorksheetNotFound:
         pass
 
@@ -2822,7 +2831,7 @@ def write_inhouse_h2h(spreadsheet, h2h, player_stats):
     active.sort()
     n = len(active)
 
-    ws = spreadsheet.add_worksheet(sheet_name, rows=n * 2 + 10, cols=n + 3)
+    ws = sheets_retry(spreadsheet.add_worksheet, sheet_name, rows=n * 2 + 10, cols=n + 3)
 
     DARK = {"red": 0.11, "green": 0.11, "blue": 0.18}
     HEADER = {"red": 0.09, "green": 0.14, "blue": 0.28}
@@ -2923,8 +2932,7 @@ def write_inhouse_h2h(spreadsheet, h2h, player_stats):
             "textFormat": {"bold": True, "fontSize": 9, "foregroundColor": WHITE}}))
 
     # Write
-    ws.update(values=rows, range_name="A1")
-    time.sleep(1)
+    sheets_retry(ws.update, values=rows, range_name="A1")
 
     # Column widths
     reqs = [{"updateDimensionProperties": {
@@ -2940,13 +2948,11 @@ def write_inhouse_h2h(spreadsheet, h2h, player_stats):
         "range": {"sheetId": ws.id, "dimension": "ROWS",
                   "startIndex": 0, "endIndex": 1},
         "properties": {"pixelSize": 45}, "fields": "pixelSize"}})
-    spreadsheet.batch_update({"requests": reqs})
-    time.sleep(0.5)
+    sheets_retry(spreadsheet.batch_update, {"requests": reqs})
 
     for i in range(0, len(fmts), 15):
         batch = [{"range": r, "format": f} for r, f in fmts[i:i+15]]
-        ws.batch_format(batch)
-        time.sleep(0.5)
+        sheets_retry(ws.batch_format, batch)
 
     print("  In-House Head-to-Head matrix written")
 
@@ -3121,17 +3127,12 @@ def main():
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
 
         write_rank_data(spreadsheet, results, ts)
-        time.sleep(1)
         write_player_stats(spreadsheet, results, champ_map)
-        time.sleep(1)
         if consensus:
             write_consensus(spreadsheet, consensus)
-            time.sleep(1)
         write_hot_takes(spreadsheet, hot_takes)
-        time.sleep(1)
         if rater_bias:
             write_rater_bias(spreadsheet, rater_bias)
-            time.sleep(1)
         write_rank_history(spreadsheet, results, ts)
         append_activity_event(spreadsheet, "UPDATE", "",
                               f"Updated ranks for {len(results)} player(s)")
@@ -3207,7 +3208,6 @@ def main():
                 player_inhouse = inhouse_db.get(riot_name)
 
             write_scouting_sheet(spreadsheet, player["name"], rs, plp, analysis, ranking_info, player_inhouse)
-            time.sleep(1)
 
         # Create Draft Tool sheet with dropdowns
         print(f"\nCreating Draft Tool...")
@@ -3291,7 +3291,6 @@ def main():
                 player_inhouse = inhouse_db.get(riot_name)
 
             write_scouting_sheet(spreadsheet, player["name"], rs, plp, analysis, ranking_info, player_inhouse)
-            time.sleep(1)
 
         if not new_scouting:
             print("\nNo new players could be scouted.")
@@ -3436,7 +3435,6 @@ def main():
             print(f"{'='*60}\n")
 
             write_inhouse_overview(spreadsheet, player_stats, len(inhouse_matches))
-            time.sleep(1)
             write_inhouse_h2h(spreadsheet, h2h, player_stats)
 
             # Print summary
