@@ -1242,12 +1242,21 @@ COMP_ARCHETYPES = {
     },
 }
 
+ARCHETYPE_CONFLICTS = {
+    "Dive": ["hypercarry", "disengage"],        # hypercarry/peel in dive = bad
+    "Teamfight": ["disengage", "duelist"],       # selfish fighters in TF = bad
+    "Poke / Siege": ["engage", "assassin_or_burst"],  # dive in poke = contradictory
+    "Protect the Carry": ["assassin_or_burst"],  # assassins in protect = bad
+    "Split Push": ["engage", "aoe_damage"],      # AoE teamfight in split = bad
+}
+
 CHAMP_SUBCLASSES = {
     "engage": {"Malphite","Amumu","Leona","Nautilus","Rakan","Rell","Alistar",
                "Jarvan IV","Sejuani","Maokai","Ornn","Zac","Sion","Gragas",
                "Wukong","Diana","Galio","Skarner","Yone","Kennen","Hecarim",
-               "Vi","Camille","Kled","Nocturne","Rek'Sai","Pantheon"},
-    "aoe_damage": {"Orianna","MissFortune","Kennen","Rumble","Diana","Yone",
+               "Vi","Camille","Kled","Nocturne","Rek'Sai","Pantheon",
+               "Ambessa","Aurora"},
+    "aoe_damage": {"Orianna","Miss Fortune","Kennen","Rumble","Diana","Yone",
                    "Yasuo","Gangplank","Samira","Karthus","Brand","Zyra",
                    "Viktor","Cassiopeia","Nilah","Fiddlesticks","Aurora","Katarina",
                    "Vladimir","Lissandra","Wukong","Galio","Lillia","Briar",
@@ -1255,13 +1264,14 @@ CHAMP_SUBCLASSES = {
     "frontline": {"Malphite","Maokai","Ornn","Sion","Cho'Gath","Dr. Mundo",
                   "Tahm Kench","Shen","Braum","Taric","Alistar","Leona",
                   "Nautilus","Rell","Sejuani","Amumu","Rammus","Zac",
-                  "Poppy","Skarner","Ksante","Gragas","Volibear","Darius",
-                  "Garen","Sett","Mordekaiser","Illaoi","Urgot","Aatrox"},
+                  "Poppy","Skarner","K'Sante","Gragas","Volibear","Darius",
+                  "Garen","Sett","Mordekaiser","Illaoi","Urgot","Aatrox","Ambessa"},
     "assassin_or_burst": {"Zed","Talon","Qiyana","Akali","LeBlanc","Fizz",
                           "Katarina","Ekko","Kha'Zix","Rengar","Evelynn",
                           "Shaco","Naafiri","Pyke","Syndra","Ahri","Veigar",
                           "Annie","Lux","Neeko","Zoe","Vex","Aurora",
-                          "Nocturne","Diana","Briar","Lee Sin"},
+                          "Nocturne","Diana","Briar","Lee Sin",
+                          "Ambessa","Mel"},
     "cc": {"Thresh","Morgana","Lux","Ahri","Ashe","Jhin","Veigar","Neeko",
            "Twisted Fate","Blitzcrank","Pyke","Elise","Lee Sin","Hwei",
            "Sejuani","Amumu","Leona","Nautilus","Maokai","Zyra","Bard",
@@ -1273,7 +1283,7 @@ CHAMP_SUBCLASSES = {
     "waveclear": {"Anivia","Ryze","Malzahar","Viktor","Ziggs","Sivir",
                   "Jinx","Orianna","Xerath","Taliyah","Aurelion Sol","Hwei",
                   "Twisted Fate","Corki","Heimerdinger","Seraphine","Veigar",
-                  "Cassiopeia","Vladimir","Azir"},
+                  "Cassiopeia","Vladimir","Azir","Mel","Smolder"},
     "long_range": {"Xerath","Vel'Koz","Lux","Ziggs","Jayce","Ezreal","Varus",
                    "Kog'Maw","Nidalee","Zoe","Hwei","Caitlyn","Senna",
                    "Seraphine","Karma","Viktor","Corki","Jhin","Ashe"},
@@ -1291,15 +1301,15 @@ CHAMP_SUBCLASSES = {
 
 
 ROLE_VALID = {
-    "Top": {"Aatrox","Ambessa","Aurora","Camille","ChoGath","Darius","DrMundo",
+    "Top": {"Aatrox","Ambessa","Aurora","Camille","Cho'Gath","Darius","Dr. Mundo",
             "Fiora","Gangplank","Garen","Gnar","Gwen","Illaoi","Irelia","Jax",
-            "Jayce","KSante","Kayle","Kennen","Kled","Malphite","Maokai",
+            "Jayce","K'Sante","Kayle","Kennen","Kled","Malphite","Maokai",
             "Mordekaiser","Nasus","Olaf","Ornn","Pantheon","Poppy","Quinn",
             "Renekton","Rengar","Riven","Rumble","Sett","Shen","Singed",
             "Sion","Tahm Kench","Teemo","Trundle","Tryndamere","Urgot",
             "Vladimir","Volibear","Wukong","Yasuo","Yone","Yorick","Gragas",
             "Heimerdinger","Akali","Sylas","Warwick","Zac"},
-    "Jungle": {"Amumu","Bel'Veth","Briar","Diana","Ekko","Elise","Evelynn",
+    "Jungle": {"Amumu","Ambessa","Bel'Veth","Briar","Diana","Ekko","Elise","Evelynn",
                "Fiddlesticks","Gragas","Graves","Hecarim","Ivern","Jarvan IV",
                "Karthus","Kayn","Kha'Zix","Kindred","Lee Sin","Lillia",
                "Master Yi","Nidalee","Nocturne","Nunu","Pantheon","Poppy",
@@ -1309,16 +1319,16 @@ ROLE_VALID = {
     "Mid": {"Ahri","Akali","Akshan","Anivia","Annie","Aurelion Sol","Azir",
             "Cassiopeia","Corki","Diana","Ekko","Fizz","Galio","Hwei",
             "Irelia","Kassadin","Katarina","LeBlanc","Lissandra","Lux",
-            "Malzahar","Naafiri","Neeko","Orianna","Pantheon","Qiyana",
+            "Malzahar","Mel","Naafiri","Neeko","Orianna","Pantheon","Qiyana",
             "Ryze","Sylas","Syndra","Taliyah","Talon","Tristana","Twisted Fate",
             "Veigar","Vex","Viktor","Vladimir","Xerath","Yasuo","Yone",
-            "Zed","Zoe","Ziggs","Aurora","Jayce","Rumble","Heimerdinger"},
+            "Zed","Zoe","Ziggs","Aurora","Jayce","Rumble","Heimerdinger","Zyra"},
     "Bot": {"Aphelios","Ashe","Caitlyn","Corki","Draven","Ezreal","Jhin",
             "Jinx","Kai'Sa","Kalista","Kog'Maw","Lucian","Miss Fortune",
             "Nilah","Samira","Sivir","Smolder","Tristana","Twitch","Varus",
             "Vayne","Xayah","Zeri","Ziggs","Senna"},
     "Support": {"Alistar","Bard","Blitzcrank","Braum","Janna","Karma","Leona",
-                "Lulu","Lux","Milio","Morgana","Nami","Nautilus","Pyke",
+                "Lulu","Lux","Mel","Milio","Morgana","Nami","Nautilus","Pyke",
                 "Rakan","Rell","Renata Glasc","Senna","Seraphine","Sona",
                 "Soraka","Taric","Thresh","Yuumi","Zilean","Zyra","Xerath",
                 "Vel'Koz","Maokai","Poppy","Tahm Kench","Galio"},
@@ -1326,15 +1336,15 @@ ROLE_VALID = {
 
 
 def score_champ_for_archetype(champ_name, archetype, champ_tags_data):
-    """Score how well a champion fits an archetype (0-1)."""
-    arch = COMP_ARCHETYPES[archetype]
-    score = 0
-    matches = 0
-    total_needs = sum(arch["needs"].values())
+    """Score how well a champion fits an archetype (0-1).
 
-    for need, count in arch["needs"].items():
-        if champ_name in CHAMP_SUBCLASSES.get(need, set()):
-            matches += 1
+    Positive score from subclass needs + tag overlap; penalty when champion
+    subclass conflicts with the archetype's style.
+    """
+    arch = COMP_ARCHETYPES[archetype]
+    total_needs = sum(arch["needs"].values())
+    matches = sum(1 for need in arch["needs"]
+                  if champ_name in CHAMP_SUBCLASSES.get(need, set()))
 
     # Tag match bonus
     tags = set(champ_tags_data.get(champ_name, []))
@@ -1342,7 +1352,15 @@ def score_champ_for_archetype(champ_name, archetype, champ_tags_data):
     tag_overlap = len(tags & ideal)
 
     score = (matches / max(total_needs, 1)) * 0.7 + (tag_overlap / max(len(ideal), 1)) * 0.3
-    return min(score, 1.0)
+
+    # Conflict penalty: subclasses that contradict this archetype subtract 0.2
+    conflicts = ARCHETYPE_CONFLICTS.get(archetype, [])
+    for conflict_class in conflicts:
+        if champ_name in CHAMP_SUBCLASSES.get(conflict_class, set()):
+            score -= 0.2
+            break  # only penalize once even if multiple conflicts
+
+    return max(score, 0.0)
 
 
 def score_team_synergy(picks, champ_tags_data):
@@ -1461,23 +1479,64 @@ def compute_ban_recommendations(team_players, all_scouting, rankings):
         if b["champion"] not in seen:
             seen.add(b["champion"]); final.append(b)
         if len(final) >= 10: break
+
+    # Assign phase labels for display
+    for i, ban in enumerate(final):
+        if i < 3:
+            ban["phase"] = 1
+            ban["phase_reason"] = ("Must ban" if ban["is_must_ban"]
+                                   else "High threat flexible pick")
+        else:
+            ban["phase"] = 2
+            ban["phase_reason"] = "Phase 2 — target likely counter-picks"
+
     return final
 
 
 def compute_comp_suggestions(team_players, all_scouting, rankings,
-                             champ_tags_data=None, inhouse_db=None):
+                             champ_tags_data=None, inhouse_db=None,
+                             enemy_team_players=None, enemy_scouting=None):
     """Smart comp engine. Balances player comfort (33%), archetype fit (33%), win condition (33%).
 
     Improvements over v1:
     - Uses module-level ROLE_VALID (shared with ban engine)
     - Role specialist comfort boost (1.25x) for champions played in assigned role
-    - In-house champion boost (1.2x) when player has in-house games on that champion
+    - Scaled in-house boost based on games + WR
+    - In-house-only champions included as synthetic candidates
+    - Enemy context: counter_potential score added per archetype
     - inhouse_db: dict from load_inhouse_db(), keyed by player name
+    - enemy_team_players: list of (name, role) for the opposing team
+    - enemy_scouting: all_scouting dict (used to evaluate enemy champ pools)
     """
     if champ_tags_data is None:
         champ_tags_data = {}
     if inhouse_db is None:
         inhouse_db = {}
+    if enemy_scouting is None:
+        enemy_scouting = all_scouting
+
+    # Pre-compute enemy tendencies for counter scoring
+    enemy_squishy_count = 0
+    enemy_diver_count = 0
+    enemy_frontline_count = 0
+    if enemy_team_players:
+        for e_name, _e_role in enemy_team_players:
+            e_scout = enemy_scouting.get(e_name)
+            if not e_scout:
+                continue
+            top_champs = [c["name"] for c in e_scout.get("champ_list", [])[:3]]
+            squishy_subs = CHAMP_SUBCLASSES.get("assassin_or_burst", set()) | \
+                           CHAMP_SUBCLASSES.get("hypercarry", set()) | \
+                           CHAMP_SUBCLASSES.get("long_range", set())
+            diver_subs = CHAMP_SUBCLASSES.get("engage", set()) | \
+                         CHAMP_SUBCLASSES.get("assassin_or_burst", set())
+            frontline_subs = CHAMP_SUBCLASSES.get("frontline", set())
+            if any(c in squishy_subs for c in top_champs):
+                enemy_squishy_count += 1
+            if any(c in diver_subs for c in top_champs):
+                enemy_diver_count += 1
+            if any(c in frontline_subs for c in top_champs):
+                enemy_frontline_count += 1
 
     suggestions = {}
 
@@ -1518,11 +1577,20 @@ def compute_comp_suggestions(team_players, all_scouting, rankings,
                 role_spec = scout.get("role_champs_flat", {})
                 role_spec_boost = 1.25 if (role and cname in role_spec.get(role, set())) else 1.0
 
-                # In-house boost: player has custom game experience on this champion
+                # Scaled inhouse boost: more games + higher WR = stronger boost
                 ih = inhouse_db.get(player_name)
                 inhouse_boost = 1.0
-                if ih and any(c.get("name") == cname for c in ih.get("champs", [])):
-                    inhouse_boost = 1.2
+                if ih:
+                    ih_champ = next((c for c in ih.get("champs", []) if c.get("name") == cname), None)
+                    if ih_champ:
+                        ih_games = ih_champ.get("games", 0)
+                        ih_wr = ih_champ.get("wr", 0)
+                        if ih_games >= 5 and ih_wr >= 60:
+                            inhouse_boost = 2.5
+                        elif ih_games >= 3:
+                            inhouse_boost = 1.8
+                        else:
+                            inhouse_boost = 1.5
 
                 comfort = min((champ["wr"] / 100) * math.log(champ["games"] + 1) *
                              min(champ["kda"] / 2.5, 1.5), 3.0) / 3.0
@@ -1548,6 +1616,30 @@ def compute_comp_suggestions(team_players, all_scouting, rankings,
 
                 total = (comfort * 0.33 + arch_fit * 0.33 + win_cond * 0.33)
                 candidates.append((champ, total, arch_fit))
+
+            # Include in-house-only champions not in ranked data
+            ih = inhouse_db.get(player_name)
+            if ih and ih.get("champs"):
+                ih_names_in_candidates = {c[0]["name"] for c in candidates if c}
+                for ih_champ in ih["champs"]:
+                    cname = ih_champ.get("name", "")
+                    if cname in used_champs or cname in ih_names_in_candidates:
+                        continue
+                    if valid_for_role and cname not in valid_for_role:
+                        continue
+                    # Create a synthetic champ entry from in-house data
+                    synth = {"name": cname, "games": ih_champ.get("games", 0),
+                             "wr": ih_champ.get("wr", 50), "kda": ih_champ.get("kda", 2.0)}
+                    # Apply strong inhouse boost since this is custom-only
+                    inhouse_boost_synth = 2.0 if ih_champ.get("games", 0) >= 3 else 1.5
+                    comfort = min((synth["wr"] / 100) * math.log(synth["games"] + 1) *
+                                 min(synth["kda"] / 2.5, 1.5), 3.0) / 3.0 * inhouse_boost_synth
+                    comfort = min(comfort, 1.0)
+                    arch_fit = score_champ_for_archetype(cname, archetype, champ_tags_data)
+                    # Use conservative win condition since no ranked data
+                    win_cond = 0.5
+                    total = (comfort * 0.33 + arch_fit * 0.33 + win_cond * 0.33)
+                    candidates.append((synth, total, arch_fit))
 
             candidates.sort(key=lambda x: x[1], reverse=True)
 
@@ -1586,12 +1678,32 @@ def compute_comp_suggestions(team_players, all_scouting, rankings,
         # Combined viability score
         combined = synergy * 0.5 + avg_comfort * 50 * 0.3 + on_meta * 10 * 0.2
 
+        # Counter potential: bonus score when this comp counters the enemy
+        counter_bonus = 0.0
+        if enemy_team_players:
+            pick_names = [p["champion"].replace(" (off-meta)", "") for p in arch_picks
+                          if p["champion"] != "?"]
+            engage_subs = CHAMP_SUBCLASSES.get("engage", set())
+            frontline_subs = CHAMP_SUBCLASSES.get("frontline", set())
+            long_range_subs = CHAMP_SUBCLASSES.get("long_range", set())
+            poke_subs = CHAMP_SUBCLASSES.get("long_range", set()) | \
+                        CHAMP_SUBCLASSES.get("waveclear", set())
+            if enemy_squishy_count >= 3:
+                counter_bonus += sum(0.15 for c in pick_names if c in engage_subs)
+            if enemy_diver_count >= 3:
+                counter_bonus += sum(0.15 for c in pick_names if c in frontline_subs)
+            if enemy_frontline_count >= 3:
+                counter_bonus += sum(0.15 for c in pick_names
+                                     if c in long_range_subs or c in poke_subs)
+        counter_potential = min(int(counter_bonus * 100), 100)
+
         suggestions[archetype] = {
             "description": arch_data["description"],
             "picks": arch_picks,
             "synergy": synergy,
             "on_meta_count": on_meta,
             "combined_score": round(combined, 1),
+            "counter_potential": counter_potential,
             "viability": ("STRONG" if combined >= 35 else
                           "VIABLE" if combined >= 25 else
                           "WEAK" if combined >= 15 else "NOT RECOMMENDED"),
@@ -1947,9 +2059,13 @@ def run_draft(spreadsheet, all_scouting, rankings, champ_tags_data=None):
 
     print("  Computing comp suggestions...")
     comps_t1 = compute_comp_suggestions(team1, all_scouting, rankings,
-                                        champ_tags_data, inhouse_db=inhouse_db)
+                                        champ_tags_data, inhouse_db=inhouse_db,
+                                        enemy_team_players=team2,
+                                        enemy_scouting=all_scouting)
     comps_t2 = compute_comp_suggestions(team2, all_scouting, rankings,
-                                        champ_tags_data, inhouse_db=inhouse_db)
+                                        champ_tags_data, inhouse_db=inhouse_db,
+                                        enemy_team_players=team1,
+                                        enemy_scouting=all_scouting)
 
     # Build name-to-riot-name mapping from Players sheet
     riot_name_map = {}
@@ -2159,9 +2275,11 @@ def run_draft(spreadsheet, all_scouting, rankings, champ_tags_data=None):
                 "NOT RECOMMENDED": {"red": 0.5, "green": 0.2, "blue": 0.2},
             }
 
+            ctr = comp.get("counter_potential", 0)
+            ctr_str = f" | Counter: {ctr}/100" if ctr > 0 else ""
             rows.append(pad([f"{archetype.upper()} — {comp['description']}",
                              "", "", "", "", "", "",
-                             f"{viability} | Synergy: {comp.get('synergy', 0)}/100 | {comp['on_meta_count']}/5 on-meta"]))
+                             f"{viability} | Synergy: {comp.get('synergy', 0)}/100 | {comp['on_meta_count']}/5 on-meta{ctr_str}"]))
             merges.append(f"A{rn()}:G{rn()}")
             merges.append(f"H{rn()}:N{rn()}")
             fmts.append((f"A{rn()}:N{rn()}", {
