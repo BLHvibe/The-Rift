@@ -3190,6 +3190,7 @@ class App(tk.Tk):
         # Column headers
         h = tk.Frame(card, bg=C["strip"])
         h.pack(fill="x")
+        tk.Frame(h, width=3, bg=C["strip"]).pack(side="left")
         for txt, w in [("#", 4), ("RESULT", 7), ("CHAMPION", 14), ("ROLE", 6),
                        ("K/D/A", 10), ("KDA", 6), ("CS/M", 6),
                        ("DMG", 9), ("VIS", 5), ("GOLD", 9), ("TIME", 6)]:
@@ -3258,6 +3259,7 @@ class App(tk.Tk):
 
         h = tk.Frame(card, bg=C["strip"])
         h.pack(fill="x")
+        tk.Frame(h, width=3, bg=C["strip"]).pack(side="left")
         for txt, w in [("CHAMPION", 14), ("GAMES", 6), ("WR", 6),
                        ("KDA", 6), ("CS/M", 6), ("DMG", 8),
                        ("THREAT", 11)]:
