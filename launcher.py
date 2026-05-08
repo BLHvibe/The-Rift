@@ -623,42 +623,26 @@ class App(tk.Tk):
                 _card.after(50, _breathe)
             card.after(400, _breathe)
 
-        # Fade label text in from card background over 300ms
-        self._fade_labels(card, C["panel"], steps=12, interval=25)
+        # Fade podium label text in from card bg
+        self._fade_lbl(name_lbl, C["panel"], C["gold_lt"], steps=12, ms=25)
 
-    def _fade_labels(self, root, from_color, steps=10, interval=20):
-        """Fade all tk.Label fg colors in `root` from `from_color` to their target."""
-        targets = []
-        def _collect(w):
-            if isinstance(w, tk.Label):
-                targets.append((w, w.cget("fg")))
-                w.configure(fg=from_color)
-            for child in w.winfo_children():
-                _collect(child)
-        _collect(root)
-        if not targets:
-            return
-        def _hex(h):
+    def _fade_lbl(self, lbl, from_c, to_c, steps=8, ms=20):
+        """Interpolate a single Label's fg from from_c to to_c."""
+        def _rgb(h):
             h = h.lstrip("#")
             return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-        fr = _hex(from_color)
-        trgbs = [_hex(c) for _, c in targets]
-        def _step(i):
-            if not targets[0][0].winfo_exists():
+        fr, to = _rgb(from_c), _rgb(to_c)
+        lbl.configure(fg=from_c)
+        def _step(i, _l=lbl):
+            if not _l.winfo_exists():
                 return
-            t = min(i / steps, 1.0)
-            for (w, _), tr in zip(targets, trgbs):
-                if not w.winfo_exists():
-                    continue
-                if t >= 1.0:
-                    w.configure(fg=_)
-                    continue
-                r = int(fr[0] + (tr[0] - fr[0]) * t)
-                g = int(fr[1] + (tr[1] - fr[1]) * t)
-                b = int(fr[2] + (tr[2] - fr[2]) * t)
-                w.configure(fg=f"#{r:02x}{g:02x}{b:02x}")
+            t = i / steps
+            r = int(fr[0] + (to[0] - fr[0]) * t)
+            g = int(fr[1] + (to[1] - fr[1]) * t)
+            b = int(fr[2] + (to[2] - fr[2]) * t)
+            _l.configure(fg=f"#{r:02x}{g:02x}{b:02x}")
             if i < steps:
-                root.after(interval, lambda: _step(i + 1))
+                _l.after(ms, lambda: _step(i + 1))
         _step(0)
 
     def _build_rankings_divider(self, parent, title):
@@ -762,15 +746,17 @@ class App(tk.Tk):
         score_box.pack_propagate(False)
         tk.Label(score_box, text="SCORE", bg=row_bg, fg=C["gold_dk"],
                  font=("Segoe UI", 8, "bold")).pack(pady=(12, 0))
-        tk.Label(score_box, text=str(player["final_score"]),
-                 bg=row_bg, fg=C["gold"],
-                 font=("Segoe UI", 22, "bold")).pack(pady=(0, 8))
+        score_val_lbl = tk.Label(score_box, text=str(player["final_score"]),
+                                 bg=row_bg, fg=C["gold"],
+                                 font=("Segoe UI", 22, "bold"))
+        score_val_lbl.pack(pady=(0, 8))
 
         # Bottom rule-color separator
         tk.Frame(row_outer, bg=C["rule"], height=1).pack(fill="x")
 
-        # Fade label text in from row background over 160ms
-        self._fade_labels(row, row_bg, steps=8, interval=20)
+        # Fade the two most visible labels in from row background
+        self._fade_lbl(name_lbl, row_bg, C["gold_lt"], steps=8, ms=20)
+        self._fade_lbl(score_val_lbl, row_bg, C["gold"], steps=8, ms=20)
 
     def _refresh_dropdowns(self):
         for menu in self.player_menus:
