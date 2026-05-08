@@ -129,6 +129,9 @@ class InhousePhase:
     DONE    = "done"
 
 
+_INHOUSE_FILTER_WIN = "inhouse_filter_win"
+FILTER_H = 44   # height of search bar between top-bar and leaderboard
+
 class InhouseState:
     def __init__(self):
         self.phase         = InhousePhase.IDLE
@@ -139,6 +142,7 @@ class InhouseState:
         self.header_alpha  = 0
         self.detail_x_frac = 0.0   # 0=hidden (right), 1=shown
         self._load_t       = 0.0
+        self.filter_text   = ""    # live search string
 
     def reset(self):
         self.__init__()
@@ -227,6 +231,41 @@ def _col_xs(tw):
 # Main draw
 # ---------------------------------------------------------------------------
 
+def _ensure_filter_window(vw, vh):
+    """Create or reposition the search-bar overlay window."""
+    if not dpg.does_item_exist(_INHOUSE_FILTER_WIN):
+        with dpg.window(tag=_INHOUSE_FILTER_WIN,
+                        pos=(68, TOP_BAR_H),
+                        width=vw - 68, height=FILTER_H,
+                        no_title_bar=True, no_resize=True,
+                        no_move=True, no_focus_on_appearing=True,
+                        no_scrollbar=True):
+            with dpg.group(horizontal=True):
+                dpg.add_spacer(width=PAD - 8)
+                search = dpg.add_input_text(
+                    tag="ih_search",
+                    hint="Search player…",
+                    width=260,
+                    height=30,
+                    callback=lambda s, a: setattr(inhouse, "filter_text", a),
+                )
+                if "raj_r_14" in _F:
+                    dpg.bind_item_font(search, _F["raj_r_14"])
+                dpg.add_spacer(width=12)
+                clear_btn = dpg.add_button(
+                    label="✕",
+                    width=28, height=28,
+                    callback=lambda: (dpg.set_value("ih_search", ""),
+                                      setattr(inhouse, "filter_text", "")),
+                )
+                if "raj_r_14" in _F:
+                    dpg.bind_item_font(clear_btn, _F["raj_r_14"])
+    else:
+        dpg.configure_item(_INHOUSE_FILTER_WIN,
+                           pos=(68, TOP_BAR_H),
+                           width=vw - 68, height=FILTER_H)
+
+
 def draw_inhouse(dl, vw, vh, fonts=None):
     if fonts:
         set_fonts(fonts)
@@ -247,7 +286,11 @@ def draw_inhouse(dl, vw, vh, fonts=None):
     table_w = vw - PAD*2 - (int(DETAIL_W * inhouse.detail_x_frac) if detail_open else 0)
 
     _draw_top_bar(dl, vw)
-    _draw_leaderboard(dl, PAD, TOP_BAR_H + PAD, table_w - PAD, vh - TOP_BAR_H - PAD*2, vw, vh)
+    _ensure_filter_window(vw, vh)
+
+    table_top = TOP_BAR_H + FILTER_H + 4
+    _draw_leaderboard(dl, PAD, table_top, table_w - PAD,
+                      vh - table_top - PAD, vw, vh)
     if detail_open:
         _draw_detail_panel(dl, vw, vh)
     _notif.draw(dl, vw)
@@ -318,7 +361,9 @@ def _draw_top_bar(dl, vw):
 
 
 def _draw_leaderboard(dl, tx, ty, tw, th, vw, vh):
-    players  = inhouse.players
+    ft = inhouse.filter_text.strip().lower()
+    players  = [p for p in inhouse.players
+                if not ft or ft in p["player"].lower()] if ft else inhouse.players
     col_xs   = _col_xs(tw)
     ha       = inhouse.header_alpha
 

@@ -8,6 +8,7 @@ import dearpygui.dearpygui as dpg
 from theme import C
 from core.animations import anim
 from data.config import load_config
+from data.reader import write_tier_list
 
 def _load_players():
     cfg = load_config()
@@ -28,6 +29,9 @@ TIER_COLORS = {
 # ---------------------------------------------------------------------------
 # State
 # ---------------------------------------------------------------------------
+_TL_SUBMIT_WIN = "tl_submit_dialog"
+
+
 class TierListState:
     def __init__(self):
         self.placements  = {t: [] for t in TIERS}   # tier → [player_name, ...]
@@ -38,6 +42,8 @@ class TierListState:
         self.bounce      = {}          # name → scale factor (0.8→1.0 on drop)
         self.scroll_off  = 0           # pool scroll offset in px
         self._pool_h     = 0           # measured pool height for scroll clamping
+        self.submit_status = ""        # "" | "Submitting…" | "✓ Submitted" | "✗ Error: ..."
+        self.submit_flash  = 0.0       # monotonic time of last status set (fades after 4s)
 
     def place(self, name, tier):
         # Remove from wherever it is
@@ -66,6 +72,8 @@ class TierListState:
         self.bounce      = {}
         self.scroll_off  = 0
         self._pool_h     = 0
+        self.submit_status = ""
+        self.submit_flash  = 0.0
 
 
 tl = TierListState()
@@ -153,12 +161,29 @@ def _draw_top_bar(dl, vw):
                         rounding=4, parent=dl)
     _txt(dl, bx+14, by+8, "↺  RESET", (*C["txt"][:3],200), 14, "raj_sb_16")
 
+    # Submit button
+    sbw, sbh = 160, 34
+    sbx = bx - sbw - 10
+    sby = by
+    dpg.draw_rectangle((sbx,sby),(sbx+sbw,sby+sbh),
+                        fill=(*C["gold_dk"][:3],200), color=(*C["gold"][:3],200),
+                        rounding=4, parent=dl)
+    _txt(dl, sbx+14, sby+8, "◆  SUBMIT LIST", (*C["gold_lt"][:3],230), 14, "raj_sb_16")
+
+    # Submit status flash
+    status = tl.submit_status
+    if status and (time.monotonic() - tl.submit_flash) < 5.0:
+        st_col = C["win"] if status.startswith("✓") else C["loss"] if status.startswith("✗") else C["txt_dim"]
+        _txt(dl, sbx - 320, sby+8, status, (*st_col[:3],220), 13, "raj_r_14")
+
     if dpg.is_mouse_button_clicked(0):
         mouse = dpg.get_mouse_pos(local=False)
         vp    = dpg.get_viewport_pos()
         rx = mouse[0]-vp[0]-68; ry = mouse[1]-vp[1]-52
         if bx<=rx<=bx+bw and by<=ry<=by+bh:
             tl.reset()
+        if sbx<=rx<=sbx+sbw and sby<=ry<=sby+sbh:
+            _open_submit_dialog()
 
 
 def _draw_tier_rows(dl, tx, ty, tw, vw, vh):
@@ -336,3 +361,67 @@ def _handle_drag(vw, vh, content_y, pool_y):
                         tl.remove(name)
                         return
                     cx += CARD_W + CARD_PAD
+
+
+# ---------------------------------------------------------------------------
+# Submit dialog
+# ---------------------------------------------------------------------------
+
+def _open_submit_dialog():
+    if dpg.does_item_exist(_TL_SUBMIT_WIN):
+        dpg.delete_item(_TL_SUBMIT_WIN)
+    players = _load_players()
+    placed  = sum(len(v) for v in tl.placements.values())
+    vp  = dpg.get_viewport_width(), dpg.get_viewport_height()
+    w, h = 380, 240
+    px  = (vp[0] - w) // 2
+    py  = (vp[1] - h) // 2
+    with dpg.window(tag=_TL_SUBMIT_WIN, label="Submit Tier List",
+                    pos=(px, py), width=w, height=h,
+                    no_resize=True, modal=True):
+        dpg.add_spacer(height=12)
+        t = dpg.add_text("SUBMIT YOUR TIER LIST", color=C["gold"][:3])
+        if "raj_sb_18" in _F: dpg.bind_item_font(t, _F["raj_sb_18"])
+        dpg.add_spacer(height=4)
+        dpg.add_text(f"{placed} player(s) placed across {len([v for v in tl.placements.values() if v])} tier(s).",
+                     color=C["txt_dim"][:3])
+        dpg.add_spacer(height=14)
+        dpg.add_text("Your display name:", color=C["txt_dim"][:3])
+        dpg.add_combo(tag="tl_submitter", items=players,
+                      default_value=players[0] if players else "",
+                      width=340)
+        dpg.add_spacer(height=16)
+        with dpg.group(horizontal=True):
+            dpg.add_button(label="  SUBMIT  ", callback=_do_submit,
+                           width=120, height=36)
+            dpg.add_spacer(width=12)
+            dpg.add_button(label="Cancel",
+                           callback=lambda: dpg.delete_item(_TL_SUBMIT_WIN),
+                           width=80, height=36)
+        dpg.add_spacer(height=8)
+        dpg.add_text(tag="tl_submit_status", default_value="",
+                     color=C["txt_dim"][:3])
+
+
+def _do_submit():
+    name = dpg.get_value("tl_submitter").strip()
+    if not name:
+        dpg.configure_item("tl_submit_status", default_value="⚠  Select your name first.")
+        return
+    dpg.configure_item("tl_submit_status", default_value="⟳  Writing to sheet…")
+    tl.submit_status = "Submitting…"
+    tl.submit_flash  = time.monotonic()
+
+    def _done():
+        tl.submit_status = "✓  Tier list submitted!"
+        tl.submit_flash  = time.monotonic()
+        if dpg.does_item_exist("tl_submit_status"):
+            dpg.configure_item("tl_submit_status", default_value=f"✓  Saved as {name}.")
+
+    def _err(msg):
+        tl.submit_status = f"✗  Error: {msg[:60]}"
+        tl.submit_flash  = time.monotonic()
+        if dpg.does_item_exist("tl_submit_status"):
+            dpg.configure_item("tl_submit_status", default_value=f"✗  {msg[:60]}")
+
+    write_tier_list(tl.placements, name, on_done=_done, on_error=_err)

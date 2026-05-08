@@ -6,6 +6,7 @@ import threading
 import dearpygui.dearpygui as dpg
 from theme import C
 from data.config import load_config, save_config
+from data.reader import test_sheets_connection
 
 _F = {}
 def set_fonts(f): global _F; _F = f
@@ -92,7 +93,16 @@ def _build_settings_window(vw, vh):
         _field_label("Google Sheets URL or Sheet Name")
         dpg.add_input_text(tag="set_sheet_url", default_value=settings.sheet_url,
                             width=560, hint="https://docs.google.com/spreadsheets/d/... or sheet name")
-        dpg.add_spacer(height=10)
+        dpg.add_spacer(height=6)
+        with dpg.group(horizontal=True):
+            test_btn = dpg.add_button(label="TEST CONNECTION", callback=_test_connection,
+                                       width=160, height=28)
+            if "raj_sb_14" in _F:
+                dpg.bind_item_font(test_btn, _F["raj_sb_14"])
+            dpg.add_spacer(width=12)
+            dpg.add_text(tag="set_conn_status", default_value="",
+                         color=C["txt_dim"][:3])
+        dpg.add_spacer(height=6)
 
         with dpg.group(horizontal=True):
             with dpg.group():
@@ -184,6 +194,28 @@ def _field_label(text):
     if "raj_sb_14" in _F:
         dpg.bind_item_font(t, _F["raj_sb_14"])
     dpg.add_spacer(height=3)
+
+
+def _test_connection():
+    # Save current URL/creds to config first so the test uses live values
+    settings.sheet_url  = dpg.get_value("set_sheet_url")
+    settings.creds_path = dpg.get_value("set_creds_path")
+    settings.save()
+    if dpg.does_item_exist("set_conn_status"):
+        dpg.configure_item("set_conn_status",
+                           default_value="⟳  Connecting…",
+                           color=C["txt_dim"][:3])
+    def _done(title):
+        if dpg.does_item_exist("set_conn_status"):
+            dpg.configure_item("set_conn_status",
+                               default_value=f"✓  Connected: {title}",
+                               color=C["win"][:3])
+    def _err(msg):
+        if dpg.does_item_exist("set_conn_status"):
+            dpg.configure_item("set_conn_status",
+                               default_value=f"✗  {msg[:80]}",
+                               color=C["loss"][:3])
+    test_sheets_connection(on_done=_done, on_error=_err)
 
 
 def _save_settings():

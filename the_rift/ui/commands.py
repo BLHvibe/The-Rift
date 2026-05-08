@@ -21,6 +21,8 @@ class CommandsState:
         self.running   = False
         self._lines    = []     # list of (text, color)
         self._max_lines = 500
+        self._proc     = None   # current subprocess (for Stop button)
+        self._last_run = {}     # script_name → "HH:MM:SS" timestamp string
 
     def log(self, text, color=None):
         self._log_q.put((text, color or C["txt"][:3]))
@@ -111,11 +113,51 @@ def _build_commands_window(vw, vh):
                 _cmd_button("▶  FETCH RANKS",
                             "Fetch latest ranks from Google Sheets + Riot API.",
                             _run_fetch_ranks)
+                dpg.add_text(tag="ts_fetch_ranks", default_value="",
+                             color=C["txt_dim"][:3])
+                if "raj_r_12" in _F:
+                    dpg.bind_item_font(dpg.last_item(), _F["raj_r_12"])
                 dpg.add_spacer(height=8)
+
+                _cmd_button("▶  RUN SCOUT",
+                            "Fetch scouting data for all players.",
+                            _run_scout)
+                dpg.add_text(tag="ts_scout", default_value="",
+                             color=C["txt_dim"][:3])
+                if "raj_r_12" in _F:
+                    dpg.bind_item_font(dpg.last_item(), _F["raj_r_12"])
+                dpg.add_spacer(height=8)
+
+                _cmd_button("▶  SETUP DRAFT",
+                            "Prepare the Draft Tool sheet with current roster.",
+                            _run_setup_draft)
+                dpg.add_text(tag="ts_draft", default_value="",
+                             color=C["txt_dim"][:3])
+                if "raj_r_12" in _F:
+                    dpg.bind_item_font(dpg.last_item(), _F["raj_r_12"])
+                dpg.add_spacer(height=8)
+
                 _cmd_button("▶  LOG INHOUSE GAME",
                             "Connect to LCU and log the last custom game.",
                             _run_inhouse)
+                dpg.add_text(tag="ts_inhouse", default_value="",
+                             color=C["txt_dim"][:3])
+                if "raj_r_12" in _F:
+                    dpg.bind_item_font(dpg.last_item(), _F["raj_r_12"])
                 dpg.add_spacer(height=24)
+
+                # ── Stop button ───────────────────────────────────────────
+                dpg.add_button(label="⬛  STOP PROCESS",
+                               callback=_stop_process,
+                               width=BTN_W, height=BTN_H)
+                if "raj_sb_16" in _F:
+                    dpg.bind_item_font(dpg.last_item(), _F["raj_sb_16"])
+                dpg.add_text("Kill the currently running command.",
+                             color=C["txt_dim"][:3], wrap=BTN_W)
+                if "raj_r_12" in _F:
+                    dpg.bind_item_font(dpg.last_item(), _F["raj_r_12"])
+                dpg.add_spacer(height=24)
+
                 _section_hdr("ROSTER")
                 _cmd_button("▶  JOIN TIER LIST",
                             "Register a new player into the tier list.",
@@ -187,6 +229,14 @@ def _py():
     return sys.executable
 
 
+_TS_TAG = {
+    "fetch_ranks_gsheets.py": "ts_fetch_ranks",
+    "inhouse_tracker.py":     "ts_inhouse",
+    "fetch_ranks_gsheets.py--scout": "ts_scout",
+    "fetch_ranks_gsheets.py--draft": "ts_draft",
+}
+
+
 def _run_script(label, script_name, extra_args=None):
     """Run a data script as a subprocess, streaming output to console."""
     if cmds.running:
@@ -203,7 +253,13 @@ def _run_script(label, script_name, extra_args=None):
     cmds.running = True
     _log(f"▶  {label}", C["gold"][:3])
 
+    # Build timestamp-widget tag key
+    ts_key = script_name
+    if extra_args:
+        ts_key += "".join(extra_args)
+
     def _bg():
+        proc = None
         try:
             sp = script_path(script_name)
             cmd = [
@@ -223,6 +279,7 @@ def _run_script(label, script_name, extra_args=None):
                 text=True,
                 bufsize=1,
             )
+            cmds._proc = proc
             for line in proc.stdout:
                 line = line.rstrip()
                 if line:
@@ -230,26 +287,63 @@ def _run_script(label, script_name, extra_args=None):
                           else C["loss"][:3] if line.startswith("[ERR") or "error" in line.lower() \
                           else C["txt"][:3]
                     _log(line, col)
-            proc.wait(timeout=300)
+            try:
+                proc.wait(timeout=300)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                _log("[ERR] Timed out after 5 minutes.", C["loss"][:3])
+                return
             if proc.returncode == 0:
                 _log(f"✓  {label} complete.", C["win"][:3])
+                ts_str = time.strftime("Last run: %H:%M:%S")
+                cmds._last_run[ts_key] = ts_str
+                tag = _TS_TAG.get(ts_key)
+                if tag and dpg.does_item_exist(tag):
+                    dpg.configure_item(tag, default_value=ts_str)
             else:
                 _log(f"[!] Exited with code {proc.returncode}.", C["loss"][:3])
         except FileNotFoundError:
             _log(f"[ERR] Script not found: {script_name}", C["loss"][:3])
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            _log("[ERR] Timed out after 5 minutes.", C["loss"][:3])
         except Exception as e:
             _log(f"[ERR] {e}", C["loss"][:3])
         finally:
             cmds.running = False
+            cmds._proc   = None
 
     threading.Thread(target=_bg, daemon=True, name=label).start()
 
 
+def _stop_process():
+    proc = cmds._proc
+    if proc is None:
+        _log("[!] No process is running.", C["txt_dim"][:3])
+        return
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        _log("[!] Process stopped.", C["loss"][:3])
+    except Exception as e:
+        _log(f"[ERR] Stop failed: {e}", C["loss"][:3])
+    finally:
+        cmds.running = False
+        cmds._proc   = None
+
+
 def _run_fetch_ranks():
     _run_script("Fetching ranks…", "fetch_ranks_gsheets.py")
+
+
+def _run_scout():
+    _run_script("Running full scout…", "fetch_ranks_gsheets.py", extra_args=["--scout"])
+
+
+def _run_setup_draft():
+    _run_script("Setting up draft…", "fetch_ranks_gsheets.py", extra_args=["--setup-draft"])
 
 
 def _run_inhouse():

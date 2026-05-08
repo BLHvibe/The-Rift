@@ -17,6 +17,7 @@ class LiveData:
         self.inhouse        = []   # list of player dicts for inhouse tab
         self.inhouse_champs = {}   # player_name → list of champ dicts
         self.primary_roles  = {}   # player_name → "TOP"/"JGL"/"MID"/"BOT"/"SUP"
+        self.activity       = []   # list of activity event dicts (newest first)
         self.loaded     = False
         self.loading    = False
         self.error      = None
@@ -1155,3 +1156,175 @@ def _parse_draft_sheet(values):
         "blue_comps":   blue_comps,
         "red_comps":    red_comps,
     }
+
+
+# ---------------------------------------------------------------------------
+# Activity feed reader
+# ---------------------------------------------------------------------------
+
+def _read_activity(sh):
+    """
+    Read '_Activity' tab → list of event dicts, newest first.
+    Columns: Timestamp, Event Type, Player, Details, Related Player
+    """
+    try:
+        ws   = sh.worksheet("_Activity")
+        rows = ws.get_all_values()
+        if len(rows) < 2:
+            return []
+        events = []
+        for row in rows[1:]:
+            if not row or not row[0]:
+                continue
+            events.append({
+                "timestamp":      str(row[0]).strip(),
+                "event_type":     str(row[1]).strip().upper() if len(row) > 1 else "",
+                "player":         str(row[2]).strip()         if len(row) > 2 else "",
+                "details":        str(row[3]).strip()         if len(row) > 3 else "",
+                "related_player": str(row[4]).strip()         if len(row) > 4 else "",
+            })
+        return list(reversed(events))   # newest first
+    except Exception:
+        return []
+
+
+def load_activity(on_done=None, on_error=None):
+    """Background load of _Activity sheet into live.activity."""
+    def _bg():
+        try:
+            cfg    = load_config()
+            sh     = _gspread_connect(cfg)
+            events = _read_activity(sh)
+            with live._lock:
+                live.activity = events
+            if on_done:
+                on_done(events)
+        except Exception as e:
+            if on_error:
+                on_error(str(e))
+    threading.Thread(target=_bg, daemon=True, name="activity_loader").start()
+
+
+# ---------------------------------------------------------------------------
+# Tier list sheet persistence
+# ---------------------------------------------------------------------------
+
+def write_tier_list(placements, submitter_name, on_done=None, on_error=None):
+    """
+    Write a player's tier list ratings to 'Tier Lists' sheet.
+    placements: dict {tier: [player_names]}
+    submitter_name: the display name of the person submitting this list.
+    Column per submitter, row per rated player, cell = tier letter.
+    """
+    def _bg():
+        try:
+            cfg = load_config()
+            sh  = _gspread_connect(cfg)
+            try:
+                ws = sh.worksheet("Tier Lists")
+            except Exception:
+                ws = sh.add_worksheet(title="Tier Lists", rows=50, cols=30)
+
+            # Row 1 = headers: col A = "Player", col B+ = submitter names
+            header = ws.row_values(1) or []
+            if submitter_name in header:
+                col_idx = header.index(submitter_name) + 1   # 1-based
+            else:
+                col_idx = len(header) + 1
+                ws.update_cell(1, col_idx, submitter_name)
+                header.append(submitter_name)
+            # Ensure col A header exists
+            if not header or header[0] != "Player":
+                ws.update_cell(1, 1, "Player")
+
+            # Build player → tier lookup
+            player_to_tier = {}
+            for tier, names in placements.items():
+                for n in names:
+                    player_to_tier[n] = tier
+
+            # Read existing player list from col A (rows 2+)
+            col_a = ws.col_values(1)   # 1-based rows including header
+
+            for pname, tier_letter in player_to_tier.items():
+                if pname in col_a:
+                    row_idx = col_a.index(pname) + 1   # 1-based
+                else:
+                    row_idx = len(col_a) + 1
+                    ws.update_cell(row_idx, 1, pname)
+                    col_a.append(pname)
+                ws.update_cell(row_idx, col_idx, tier_letter)
+
+            if on_done:
+                on_done()
+        except Exception as e:
+            if on_error:
+                on_error(str(e))
+
+    threading.Thread(target=_bg, daemon=True, name="tier_write").start()
+
+
+# ---------------------------------------------------------------------------
+# Settings: test Google Sheets connection
+# ---------------------------------------------------------------------------
+
+def test_sheets_connection(on_done=None, on_error=None):
+    """
+    Try to open the configured spreadsheet.
+    on_done(title: str) on success; on_error(msg: str) on failure.
+    """
+    def _bg():
+        try:
+            cfg = load_config()
+            if not cfg.get("sheet_url"):
+                if on_error:
+                    on_error("No sheet URL configured.")
+                return
+            if not cfg.get("creds_path"):
+                if on_error:
+                    on_error("No credentials path configured.")
+                return
+            sh = _gspread_connect(cfg)
+            if on_done:
+                on_done(sh.title)
+        except Exception as e:
+            if on_error:
+                on_error(str(e))
+    threading.Thread(target=_bg, daemon=True, name="test_conn").start()
+
+
+# ---------------------------------------------------------------------------
+# Auto-update: check GitHub Releases
+# ---------------------------------------------------------------------------
+
+def check_for_update(current_version, repo="BLHvibe/The-Rift", on_done=None):
+    """
+    Background check for a newer GitHub release.
+    on_done(latest_tag, download_url) if a newer version exists.
+    on_done(None, None) if up-to-date or check fails.
+    Versions compared as raw strings; tags like 'v1.2' match '1.2'.
+    """
+    def _normalise(v):
+        return v.lstrip("v")
+
+    def _bg():
+        try:
+            import urllib.request, json
+            url = f"https://api.github.com/repos/{repo}/releases/latest"
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "TheRift/updater"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read())
+            latest_tag   = data.get("tag_name", "")
+            assets       = data.get("assets", [])
+            download_url = assets[0]["browser_download_url"] if assets else data.get("html_url", "")
+            if latest_tag and _normalise(latest_tag) != _normalise(current_version):
+                if on_done:
+                    on_done(latest_tag, download_url)
+            else:
+                if on_done:
+                    on_done(None, None)
+        except Exception:
+            if on_done:
+                on_done(None, None)
+    threading.Thread(target=_bg, daemon=True, name="update_check").start()

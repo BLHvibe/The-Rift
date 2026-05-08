@@ -23,7 +23,9 @@ from ui.tierlist import draw_tierlist, register_wheel_handler
 from ui.settings import draw_settings, close_settings_window
 from ui.commands import draw_commands
 from ui.feed import draw_feed
-from data.reader import live, load_live_data
+from data.reader import live, load_live_data, check_for_update
+
+__version__ = "1.0.0"   # bump this on each release
 
 WIN_W, WIN_H = 1280, 800
 TITLE_H      = 52    # titlebar height
@@ -586,6 +588,44 @@ def main():
         splash.loading_done = True   # unblock splash even on error; tabs fall back to demo
 
     load_live_data(on_done=_on_live_data_ready, on_error=_on_live_data_error)
+
+    # ── Auto-update check (background, non-blocking) ───────────────────────
+    _update_notif_shown = [False]
+    _UPDATE_WIN = "update_notif_win"
+
+    def _on_update_result(latest_tag, download_url):
+        if not latest_tag or _update_notif_shown[0]:
+            return
+        _update_notif_shown[0] = True
+        vp_w = dpg.get_viewport_width()
+        nw, nh = 340, 90
+        nx = vp_w - nw - 16
+        ny = TITLE_H + 8
+        if dpg.does_item_exist(_UPDATE_WIN):
+            return
+        with dpg.window(tag=_UPDATE_WIN,
+                        pos=(nx, ny), width=nw, height=nh,
+                        no_title_bar=True, no_resize=True,
+                        no_move=False, no_scrollbar=True):
+            with dpg.drawlist(tag="update_dl", width=nw, height=nh):
+                dpg.draw_rectangle((0,0),(nw,nh),
+                                   fill=(*C["card"][:3],240),
+                                   color=(*C["gold"][:3],220), rounding=6)
+                dpg.draw_rectangle((0,0),(4,nh),
+                                   fill=(*C["gold"][:3],255),
+                                   color=(0,0,0,0), rounding=2)
+                t1 = dpg.draw_text((14,12), f"◆  UPDATE AVAILABLE: {latest_tag}",
+                                   color=(*C["gold_lt"][:3],240), size=15)
+                if "raj_sb_16" in _FONTS: dpg.bind_item_font(t1, _FONTS["raj_sb_16"])
+                t2 = dpg.draw_text((14,36), "Visit GitHub Releases to download.",
+                                   color=(*C["txt"][:3],200), size=12)
+                if "raj_r_12" in _FONTS: dpg.bind_item_font(t2, _FONTS["raj_r_12"])
+            with dpg.group(horizontal=True):
+                dpg.add_spacer(width=14)
+                dpg.add_button(label="Dismiss", height=22,
+                               callback=lambda: dpg.delete_item(_UPDATE_WIN) if dpg.does_item_exist(_UPDATE_WIN) else None)
+
+    check_for_update(__version__, on_done=_on_update_result)
 
     _rankings_triggered   = [False]
     _scout_populated      = [False]
