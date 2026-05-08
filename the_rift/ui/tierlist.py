@@ -7,13 +7,23 @@ import math, time
 import dearpygui.dearpygui as dpg
 from theme import C
 from core.animations import anim
-from data.config import load_config
+from data.config import load_config, save_config
 from data.reader import write_tier_list
 
 def _load_players():
     cfg = load_config()
     players = cfg.get("players", [])
     return [p for p in players if p and str(p).strip()]
+
+def _load_rater_name():
+    """Return the saved 'Rating as' identity, or empty string if unset."""
+    return load_config().get("tier_list_rater", "")
+
+def _save_rater_name(name):
+    """Persist the 'Rating as' identity to config."""
+    cfg = load_config()
+    cfg["tier_list_rater"] = name
+    save_config(cfg)
 
 TIERS = ["S", "A", "B", "C", "D", "F"]
 
@@ -30,6 +40,7 @@ TIER_COLORS = {
 # State
 # ---------------------------------------------------------------------------
 _TL_SUBMIT_WIN = "tl_submit_dialog"
+_TL_RATER_WIN  = "tl_rater_win"
 
 
 class TierListState:
@@ -44,6 +55,7 @@ class TierListState:
         self._pool_h     = 0           # measured pool height for scroll clamping
         self.submit_status = ""        # "" | "Submitting…" | "✓ Submitted" | "✗ Error: ..."
         self.submit_flash  = 0.0       # monotonic time of last status set (fades after 4s)
+        self.rater_name    = _load_rater_name()   # persisted "Rating as:" identity
 
     def place(self, name, tier):
         # Remove from wherever it is
@@ -74,6 +86,7 @@ class TierListState:
         self._pool_h     = 0
         self.submit_status = ""
         self.submit_flash  = 0.0
+        self.rater_name    = _load_rater_name()
 
 
 tl = TierListState()
@@ -125,10 +138,12 @@ def draw_tierlist(dl, vw, vh, fonts=None):
     dpg.draw_rectangle((0,0),(vw,vh), fill=C["bg"], color=(0,0,0,0), parent=dl)
 
     _draw_top_bar(dl, vw)
+    _ensure_rater_window(vw, vh)
 
-    content_y = TOP_BAR_H + PAD
+    rater_bar_h = 40 if not tl.rater_name else 0
+    content_y   = TOP_BAR_H + rater_bar_h + PAD
     tier_area_h = len(TIERS) * (TIER_H + 4)
-    pool_y = content_y + tier_area_h + 16
+    pool_y      = content_y + tier_area_h + 16
 
     _draw_tier_rows(dl, PAD, content_y, vw - PAD*2, vw, vh)
     _draw_pool_divider(dl, PAD, pool_y - 10, vw - PAD*2)
@@ -364,16 +379,80 @@ def _handle_drag(vw, vh, content_y, pool_y):
 
 
 # ---------------------------------------------------------------------------
+# Rater identity bar
+# ---------------------------------------------------------------------------
+
+def _ensure_rater_window(vw, vh):
+    """
+    Show a slim 'Rating as: [dropdown]' bar below the top bar.
+    Visible whenever a rater is set or needs to be set.
+    """
+    if not dpg.does_item_exist(_TL_RATER_WIN):
+        players = _load_players()
+        rater   = tl.rater_name
+        with dpg.window(tag=_TL_RATER_WIN,
+                        pos=(68, TOP_BAR_H),
+                        width=vw - 68, height=40,
+                        no_title_bar=True, no_resize=True,
+                        no_move=True, no_focus_on_appearing=True,
+                        no_scrollbar=True):
+            with dpg.group(horizontal=True):
+                dpg.add_spacer(width=PAD - 8)
+                lbl = dpg.add_text("Rating as:", color=C["txt_dim"][:3])
+                if "raj_sb_14" in _F: dpg.bind_item_font(lbl, _F["raj_sb_14"])
+                dpg.add_spacer(width=8)
+
+                def _on_rater_change(s, a):
+                    tl.rater_name = a
+                    _save_rater_name(a)
+
+                combo = dpg.add_combo(
+                    [""] + players,
+                    tag="tl_rater_combo",
+                    default_value=rater if rater in players else "",
+                    width=220,
+                    callback=_on_rater_change,
+                )
+                if "raj_r_14" in _F: dpg.bind_item_font(combo, _F["raj_r_14"])
+
+                dpg.add_spacer(width=16)
+                if not tl.rater_name:
+                    warn = dpg.add_text("⚠  Select your name before submitting a tier list.",
+                                        color=(*C["gold_dk"][:3], 200))
+                    if "raj_r_12" in _F: dpg.bind_item_font(warn, _F["raj_r_12"])
+    else:
+        dpg.configure_item(_TL_RATER_WIN,
+                           pos=(68, TOP_BAR_H),
+                           width=vw - 68, height=40)
+        # Keep the combo in sync if tl.rater_name was updated
+        if dpg.does_item_exist("tl_rater_combo"):
+            if dpg.get_value("tl_rater_combo") != tl.rater_name:
+                dpg.set_value("tl_rater_combo", tl.rater_name)
+
+
+# ---------------------------------------------------------------------------
 # Submit dialog
 # ---------------------------------------------------------------------------
 
 def _open_submit_dialog():
     if dpg.does_item_exist(_TL_SUBMIT_WIN):
         dpg.delete_item(_TL_SUBMIT_WIN)
-    players = _load_players()
-    placed  = sum(len(v) for v in tl.placements.values())
+
+    # Require rater identity before allowing submission
+    if not tl.rater_name:
+        # Flash warning in the rater bar instead of opening dialog
+        tl.submit_status = "⚠  Select your name in the 'Rating as:' bar first."
+        tl.submit_flash  = time.monotonic()
+        return
+
+    placed = sum(len(v) for v in tl.placements.values())
+    if placed == 0:
+        tl.submit_status = "⚠  Place at least one player before submitting."
+        tl.submit_flash  = time.monotonic()
+        return
+
     vp  = dpg.get_viewport_width(), dpg.get_viewport_height()
-    w, h = 380, 240
+    w, h = 380, 200
     px  = (vp[0] - w) // 2
     py  = (vp[1] - h) // 2
     with dpg.window(tag=_TL_SUBMIT_WIN, label="Submit Tier List",
@@ -382,20 +461,18 @@ def _open_submit_dialog():
         dpg.add_spacer(height=12)
         t = dpg.add_text("SUBMIT YOUR TIER LIST", color=C["gold"][:3])
         if "raj_sb_18" in _F: dpg.bind_item_font(t, _F["raj_sb_18"])
+        dpg.add_spacer(height=6)
+        dpg.add_text(f"Submitting as:  {tl.rater_name}", color=C["txt"][:3])
         dpg.add_spacer(height=4)
-        dpg.add_text(f"{placed} player(s) placed across {len([v for v in tl.placements.values() if v])} tier(s).",
+        dpg.add_text(f"{placed} player(s) placed across "
+                     f"{len([v for v in tl.placements.values() if v])} tier(s).",
                      color=C["txt_dim"][:3])
-        dpg.add_spacer(height=14)
-        dpg.add_text("Your display name:", color=C["txt_dim"][:3])
-        dpg.add_combo(tag="tl_submitter", items=players,
-                      default_value=players[0] if players else "",
-                      width=340)
-        dpg.add_spacer(height=16)
+        dpg.add_spacer(height=18)
         with dpg.group(horizontal=True):
             dpg.add_button(label="  SUBMIT  ", callback=_do_submit,
                            width=120, height=36)
             dpg.add_spacer(width=12)
-            dpg.add_button(label="Cancel",
+            dpg.add_button(label="Cancel##tl_cancel",
                            callback=lambda: dpg.delete_item(_TL_SUBMIT_WIN),
                            width=80, height=36)
         dpg.add_spacer(height=8)
@@ -404,19 +481,21 @@ def _open_submit_dialog():
 
 
 def _do_submit():
-    name = dpg.get_value("tl_submitter").strip()
+    name = tl.rater_name   # already validated in _open_submit_dialog
     if not name:
-        dpg.configure_item("tl_submit_status", default_value="⚠  Select your name first.")
         return
-    dpg.configure_item("tl_submit_status", default_value="⟳  Writing to sheet…")
+    if dpg.does_item_exist("tl_submit_status"):
+        dpg.configure_item("tl_submit_status", default_value="⟳  Writing to sheet…")
     tl.submit_status = "Submitting…"
     tl.submit_flash  = time.monotonic()
 
     def _done():
-        tl.submit_status = "✓  Tier list submitted!"
+        tl.submit_status = f"✓  Submitted as {name}"
         tl.submit_flash  = time.monotonic()
         if dpg.does_item_exist("tl_submit_status"):
             dpg.configure_item("tl_submit_status", default_value=f"✓  Saved as {name}.")
+        if dpg.does_item_exist(_TL_SUBMIT_WIN):
+            dpg.delete_item(_TL_SUBMIT_WIN)
 
     def _err(msg):
         tl.submit_status = f"✗  Error: {msg[:60]}"

@@ -361,12 +361,12 @@ def _open_team_builder(vw, vh):
 
             # Blue team column
             with dpg.group():
-                bt = dpg.add_text("BLUE TEAM")
+                bt = dpg.add_text("BLUE TEAM##blue_hdr")
                 if "raj_sb_22" in _F: dpg.bind_item_font(bt, _F["raj_sb_22"])
                 dpg.add_spacer(height=10)
                 for i, role in enumerate(_ROLES):
                     with dpg.group(horizontal=True):
-                        rt = dpg.add_text(f"{role:<3} ")
+                        rt = dpg.add_text(f"{role:<3} ##b{i}")
                         if "raj_sb_16" in _F: dpg.bind_item_font(rt, _F["raj_sb_16"])
                         dpg.add_combo(names, tag=f"tb_blue_{i}",
                                       width=combo_w - 60, default_value="")
@@ -376,12 +376,12 @@ def _open_team_builder(vw, vh):
 
             # Red team column
             with dpg.group():
-                rt2 = dpg.add_text("RED TEAM")
+                rt2 = dpg.add_text("RED TEAM##red_hdr")
                 if "raj_sb_22" in _F: dpg.bind_item_font(rt2, _F["raj_sb_22"])
                 dpg.add_spacer(height=10)
                 for i, role in enumerate(_ROLES):
                     with dpg.group(horizontal=True):
-                        rl = dpg.add_text(f"{role:<3} ")
+                        rl = dpg.add_text(f"{role:<3} ##r{i}")
                         if "raj_sb_16" in _F: dpg.bind_item_font(rl, _F["raj_sb_16"])
                         dpg.add_combo(names, tag=f"tb_red_{i}",
                                       width=combo_w - 60, default_value="")

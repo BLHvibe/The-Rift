@@ -587,21 +587,35 @@ def _rebuild_report_window(vw, vh):
 
         _rw_header(r)
 
-        # Sheet fetch indicator (shown until sheet data arrives or errors)
+        # Sheet fetch status banner
         if scout.report_loading:
             with dpg.group(horizontal=True):
                 dpg.add_spacer(width=14)
-                t = dpg.add_text("⟳ Loading full report from sheet…",
+                t = dpg.add_text("  Loading detailed report from sheet...",
                                  color=C["gold_dk"][:3])
                 if "raj_r_14" in _F: dpg.bind_item_font(t, _F["raj_r_14"])
             dpg.add_spacer(height=4)
         elif r.get("sheet_error"):
+            err_msg      = str(r["sheet_error"])
+            is_missing   = "No scouting sheet" in err_msg
+            banner_col   = C["gold_dk"][:3] if is_missing else C["loss"][:3]
             with dpg.group(horizontal=True):
                 dpg.add_spacer(width=14)
-                t = dpg.add_text("⚠ Sheet unavailable — showing cached data",
-                                 color=C["txt_dim"][:3])
-                if "raj_r_14" in _F: dpg.bind_item_font(t, _F["raj_r_14"])
-            dpg.add_spacer(height=4)
+                with dpg.child_window(width=-1, height=52, border=True,
+                                      no_scrollbar=True, no_scroll_with_mouse=True):
+                    if is_missing:
+                        t = dpg.add_text("  No scout sheet for this player.",
+                                         color=banner_col)
+                        if "raj_r_14" in _F: dpg.bind_item_font(t, _F["raj_r_14"])
+                        t2 = dpg.add_text(
+                            "  Run 'RUN SCOUT' from the Commands tab to generate it.",
+                            color=C["txt_dim"][:3])
+                        if "raj_r_12" in _F: dpg.bind_item_font(t2, _F["raj_r_12"])
+                    else:
+                        t = dpg.add_text(f"  Sheet error: {err_msg[:90]}",
+                                         color=banner_col)
+                        if "raj_r_14" in _F: dpg.bind_item_font(t, _F["raj_r_14"])
+            dpg.add_spacer(height=6)
 
         _rw_power_rating(r)
         _rw_overview(r)
