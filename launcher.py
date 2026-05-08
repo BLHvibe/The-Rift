@@ -623,6 +623,44 @@ class App(tk.Tk):
                 _card.after(50, _breathe)
             card.after(400, _breathe)
 
+        # Fade label text in from card background over 300ms
+        self._fade_labels(card, C["panel"], steps=12, interval=25)
+
+    def _fade_labels(self, root, from_color, steps=10, interval=20):
+        """Fade all tk.Label fg colors in `root` from `from_color` to their target."""
+        targets = []
+        def _collect(w):
+            if isinstance(w, tk.Label):
+                targets.append((w, w.cget("fg")))
+                w.configure(fg=from_color)
+            for child in w.winfo_children():
+                _collect(child)
+        _collect(root)
+        if not targets:
+            return
+        def _hex(h):
+            h = h.lstrip("#")
+            return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        fr = _hex(from_color)
+        trgbs = [_hex(c) for _, c in targets]
+        def _step(i):
+            if not targets[0][0].winfo_exists():
+                return
+            t = min(i / steps, 1.0)
+            for (w, _), tr in zip(targets, trgbs):
+                if not w.winfo_exists():
+                    continue
+                if t >= 1.0:
+                    w.configure(fg=_)
+                    continue
+                r = int(fr[0] + (tr[0] - fr[0]) * t)
+                g = int(fr[1] + (tr[1] - fr[1]) * t)
+                b = int(fr[2] + (tr[2] - fr[2]) * t)
+                w.configure(fg=f"#{r:02x}{g:02x}{b:02x}")
+            if i < steps:
+                root.after(interval, lambda: _step(i + 1))
+        _step(0)
+
     def _build_rankings_divider(self, parent, title):
         """Cinematic divider: thin rule lines + caps title (no diamonds)."""
         wrap = tk.Frame(parent, bg=C["bg"])
@@ -730,6 +768,9 @@ class App(tk.Tk):
 
         # Bottom rule-color separator
         tk.Frame(row_outer, bg=C["rule"], height=1).pack(fill="x")
+
+        # Fade label text in from row background over 160ms
+        self._fade_labels(row, row_bg, steps=8, interval=20)
 
     def _refresh_dropdowns(self):
         for menu in self.player_menus:
