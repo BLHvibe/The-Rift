@@ -12,21 +12,23 @@ from data.config import load_config
 # ---------------------------------------------------------------------------
 class LiveData:
     def __init__(self):
-        self.rankings   = []   # list of player dicts for rankings tab
-        self.scout      = []   # list of player dicts for scout tab
-        self.inhouse    = []   # list of player dicts for inhouse tab
-        self.inhouse_champs = {}  # player_name → list of champ dicts
+        self.rankings       = []   # list of player dicts for rankings tab
+        self.scout          = []   # list of player dicts for scout tab
+        self.inhouse        = []   # list of player dicts for inhouse tab
+        self.inhouse_champs = {}   # player_name → list of champ dicts
+        self.primary_roles  = {}   # player_name → "TOP"/"JGL"/"MID"/"BOT"/"SUP"
         self.loaded     = False
         self.loading    = False
         self.error      = None
         self._lock      = threading.Lock()
 
-    def set(self, rankings, scout, inhouse, inhouse_champs):
+    def set(self, rankings, scout, inhouse, inhouse_champs, primary_roles=None):
         with self._lock:
             self.rankings        = rankings
             self.scout           = scout
             self.inhouse         = inhouse
             self.inhouse_champs  = inhouse_champs
+            self.primary_roles   = primary_roles or {}
             self.loaded          = True
             self.loading         = False
             self.error           = None
@@ -58,8 +60,8 @@ def load_live_data(on_done=None, on_error=None):
     def _bg():
         try:
             cfg = load_config()
-            rankings, scout, inhouse, inhouse_champs = _read_sheets(cfg)
-            live.set(rankings, scout, inhouse, inhouse_champs)
+            rankings, scout, inhouse, inhouse_champs, primary_roles = _read_sheets(cfg)
+            live.set(rankings, scout, inhouse, inhouse_champs, primary_roles)
             if on_done:
                 on_done()
         except Exception as e:
@@ -84,11 +86,11 @@ def _read_sheets(cfg):
     sh   = gc.open_by_url(cfg["sheet_url"]) if cfg["sheet_url"].startswith("http") \
            else gc.open(cfg["sheet_url"])
 
-    rankings       = _read_final_rankings(sh)
-    scout          = _read_player_stats(sh, rankings)
-    known_names    = {r["name"] for r in rankings}
-    inhouse, ih_ch = _read_inhouse(sh, known_names)
-    return rankings, scout, inhouse, ih_ch
+    rankings                  = _read_final_rankings(sh)
+    scout                     = _read_player_stats(sh, rankings)
+    known_names               = {r["name"] for r in rankings}
+    inhouse, ih_ch, prim_roles = _read_inhouse(sh, known_names)
+    return rankings, scout, inhouse, ih_ch, prim_roles
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +329,7 @@ def _read_inhouse(sh, known_names=None):
             if len(row) < 6 or not row[0]:
                 continue
             try:
+                role_raw = str(row[13]).strip().upper() if len(row) > 13 and row[13] else ""
                 records.append({
                     "gameId":   row[0],
                     "player":   str(row[2]).strip(),
@@ -338,6 +341,7 @@ def _read_inhouse(sh, known_names=None):
                     "assists":  int(float(row[8])) if len(row)>8 and row[8] else 0,
                     "damage":   int(float(row[10])) if len(row)>10 and row[10] else 0,
                     "gold":     int(float(row[11])) if len(row)>11 and row[11] else 0,
+                    "role":     role_raw if role_raw in ("TOP","JGL","MID","BOT","SUP") else "",
                 })
             except (ValueError, IndexError):
                 continue
@@ -345,7 +349,7 @@ def _read_inhouse(sh, known_names=None):
         pass
 
     if not records:
-        return [], {}
+        return [], {}, {}
 
     # Only count full 5v5 games (10 players per gameId)
     games_by_id = defaultdict(list)
@@ -358,7 +362,7 @@ def _read_inhouse(sh, known_names=None):
             valid_records.extend(recs)
 
     if not valid_records:
-        return [], {}
+        return [], {}, {}
 
     # Per-player aggregates
     player_agg = defaultdict(lambda: {
@@ -369,6 +373,7 @@ def _read_inhouse(sh, known_names=None):
         "games": 0, "wins": 0, "kills": 0, "deaths": 0,
         "assists": 0, "damage": 0,
     }))
+    role_freq = defaultdict(lambda: defaultdict(int))
 
     for r in valid_records:
         name = r["player"]
@@ -389,6 +394,9 @@ def _read_inhouse(sh, known_names=None):
         ca["deaths"]  += r["deaths"]
         ca["assists"] += r["assists"]
         ca["damage"]  += r["damage"]
+
+        if r.get("role"):
+            role_freq[name][r["role"]] += 1
 
     leaderboard = []
     inhouse_champs = {}
@@ -437,10 +445,17 @@ def _read_inhouse(sh, known_names=None):
         champs.sort(key=lambda x: x["games"], reverse=True)
         inhouse_champs[name] = champs
 
+    # Primary role per player (most-played role in inhouse games)
+    primary_roles = {}
+    for name, roles in role_freq.items():
+        if roles:
+            primary_roles[name] = max(roles, key=roles.get)
+
     # Filter to known roster players if provided
     if known_names:
         leaderboard    = [p for p in leaderboard    if p["player"] in known_names]
         inhouse_champs = {k: v for k, v in inhouse_champs.items() if k in known_names}
+        primary_roles  = {k: v for k, v in primary_roles.items()  if k in known_names}
 
     # Sort by win rate desc, then games desc as tiebreaker
     def _wr_key(p):
@@ -453,4 +468,4 @@ def _read_inhouse(sh, known_names=None):
     for i, p in enumerate(leaderboard):
         p["rank"] = i + 1
 
-    return leaderboard, inhouse_champs
+    return leaderboard, inhouse_champs, primary_roles

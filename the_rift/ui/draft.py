@@ -42,34 +42,112 @@ def _player_score(p):
 
 _ROLES = ["TOP", "JGL", "MID", "BOT", "SUP"]
 
-_DEMO_WIN_PCT = 61.4
+# ---------------------------------------------------------------------------
+# Matchup computation
+# ---------------------------------------------------------------------------
 
-_DEMO_BLUE_BANS = ["Zed", "Akali", "Fizz", "Rengar", "Katarina"]
-_DEMO_RED_BANS  = ["Yasuo", "Irelia", "Jinx", "Thresh", "Hecarim"]
+_ENGAGE_CHAMPS  = {"Leona","Malphite","Amumu","Sejuani","Galio","Orianna",
+                   "Vi","Jarvan IV","Jarvan","Wukong","Zac","Kennen"}
+_POKE_CHAMPS    = {"Jayce","Ezreal","Zoe","Karma","Lux","Nidalee","Xerath",
+                   "Ziggs","Hwei","Corki","Caitlyn"}
+_SPLIT_CHAMPS   = {"Fiora","Camille","Tryndamere","Riven","Jax","Nasus","Garen"}
+_PROTECT_CHAMPS = {"Lulu","Janna","Soraka","Ivern","Sona","Tahm Kench","Shields"}
 
-_DEMO_BLUE_COMPS = [
-    "Engage (Engage/Dive)",
-    "Poke (Range/Siege)",
-    "Pick (CC/Burst)",
-    "Split Push (1-3-1)",
-    "Teamfight (AoE)",
+
+def _compute_matchups(blue, red):
+    """
+    Compute per-lane 1v1 matchup advantage for each role.
+    Returns list of (role, blue_name, red_name, blue_win_pct, note).
+
+    Factors:
+      1. Score delta — power rankings score difference
+      2. Role familiarity — whether player is in their inhouse primary role
+    """
+    rows = []
+    for i, (bp, rp) in enumerate(zip(blue, red)):
+        role = _ROLES[i]
+        bs   = _player_score(bp)
+        rs   = _player_score(rp)
+        diff = bs - rs
+
+        # Score advantage: ~0.5% per score point, capped ±25%
+        blue_adv = 50.0 + diff * 0.5
+        blue_adv = max(25.0, min(75.0, blue_adv))
+
+        # Role familiarity bonus: ±4% if playing/not-playing main role
+        b_main = live.primary_roles.get(bp["name"])
+        r_main = live.primary_roles.get(rp["name"])
+        if b_main == role:   blue_adv += 4.0
+        if r_main == role:   blue_adv -= 4.0
+        blue_adv = max(20.0, min(80.0, blue_adv))
+
+        note = _matchup_note(diff, role, bp["name"], rp["name"], b_main, r_main)
+        rows.append((role, bp["name"], rp["name"], round(blue_adv, 1), note))
+    return rows
+
+
+def _matchup_note(diff, role, bn, rn, b_main, r_main):
+    parts = []
+    if   abs(diff) >= 20: parts.append(f"{'Blue' if diff>0 else 'Red'} +{abs(diff):.0f} score")
+    elif abs(diff) >= 8:  parts.append("Close skill match")
+    else:                 parts.append("Even matchup")
+
+    if   b_main == role:             parts.append(f"{bn} on main")
+    elif b_main and b_main != role:  parts.append(f"{bn} off-role ({b_main})")
+    if   r_main == role:             parts.append(f"{rn} on main")
+    elif r_main and r_main != role:  parts.append(f"{rn} off-role ({r_main})")
+
+    return "  ·  ".join(parts[:3])
+
+
+def _compute_bans(opposing_players):
+    """
+    Recommend bans against the opposing team.
+    Prioritises inhouse champions with most games, then top_champs from Player Stats.
+    Returns list of up to 5 champion name strings.
+    """
+    seen   = {}
+    # Inhouse data first (most reliable — actual games played)
+    for p in opposing_players:
+        for ch in live.inhouse_champs.get(p["name"], [])[:3]:
+            cname = ch["champ"]
+            if cname not in seen or ch["games"] > seen[cname]["games"]:
+                seen[cname] = {"champ": cname, "games": ch["games"],
+                               "player": p["name"]}
+    # Top champs from Player Stats (mastery data)
+    for p in opposing_players:
+        for champ in p.get("top_champs", [])[:2]:
+            if champ and champ not in seen:
+                seen[champ] = {"champ": champ, "games": 0, "player": p["name"]}
+
+    bans = sorted(seen.values(), key=lambda x: -x["games"])[:5]
+    return [b["champ"] for b in bans]
+
+
+_COMP_TAGS = [
+    (_ENGAGE_CHAMPS,  "Engage  (Hard CC + Dive)"),
+    (_POKE_CHAMPS,    "Poke  (Range + Siege)"),
+    (_SPLIT_CHAMPS,   "Split Push  (1-3-1)"),
+    (_PROTECT_CHAMPS, "Protect ADC  (Shield/Heal)"),
 ]
-_DEMO_RED_COMPS = [
-    "Poke (Sustained dmg)",
-    "Protect ADC (Shield)",
-    "Engage (Hard CC)",
-    "Wombo Combo (AoE)",
-    "Split + Skirmish",
+_COMP_FALLBACKS = [
+    "Teamfight  (AoE burst)",
+    "Skirmish  (Pick + Catch)",
+    "Scaling  (Late-game win)",
 ]
 
-_DEMO_PVP = [
-    # (role, blue_name, red_name, blue_win_pct, note)
-    ("TOP", "Phantom",  "Shroud",  68, "Strong laner, early gap"),
-    ("JGL", "Ironclad", "Blaze",   44, "Red favoured early"),
-    ("MID", "Vex",      "Nox",     57, "Blue scaling advantage"),
-    ("BOT", "Kira",     "Cinder",  61, "Blue hypercarry late"),
-    ("SUP", "Dusk",     "Riven",   53, "Even, playmaking edge"),
-]
+def _compute_comps(players):
+    """Suggest team compositions based on the assembled players' champion pools."""
+    all_champs = {ch for p in players for ch in p.get("top_champs", [])}
+    comps = []
+    for champ_set, label in _COMP_TAGS:
+        if all_champs & champ_set:
+            comps.append(label)
+    for fb in _COMP_FALLBACKS:
+        if len(comps) >= 5:
+            break
+        comps.append(fb)
+    return comps[:5]
 
 # Fly-in config
 FLY_DURATION_MS  = 460
@@ -104,8 +182,14 @@ class DraftState:
         self.analyse_t        = 0.0
         self._landed          = 0
         self._total           = 0
-        self.blue_avg         = 0.0  # average final_score for blue team
-        self.red_avg          = 0.0  # average final_score for red team
+        self.blue_avg         = 0.0
+        self.red_avg          = 0.0
+        # Computed analysis data
+        self.pvp_rows         = []   # [(role, blue_name, red_name, blue_pct, note)]
+        self.blue_bans        = []   # [champ_name, ...]
+        self.red_bans         = []
+        self.blue_comps       = []   # [comp_str, ...]
+        self.red_comps        = []
 
     def reset(self):
         self.__init__()
@@ -309,15 +393,17 @@ def _open_team_builder(vw, vh):
 
 
 def _on_begin_analysis():
-    pool = _get_player_pool()
+    pool         = _get_player_pool()
     pool_by_name = {p["name"]: p for p in pool}
 
     blue_players, red_players = [], []
     for i, role in enumerate(_ROLES):
         bn = dpg.get_value(f"tb_blue_{i}")
         rn = dpg.get_value(f"tb_red_{i}")
-        bp = dict(pool_by_name.get(bn, {"name": bn, "tier": "Unranked", "final_score": 50.0, "score": 50.0}))
-        rp = dict(pool_by_name.get(rn, {"name": rn, "tier": "Unranked", "final_score": 50.0, "score": 50.0}))
+        bp = dict(pool_by_name.get(bn, {"name": bn, "tier": "Unranked",
+                                         "final_score": 50.0, "score": 50.0}))
+        rp = dict(pool_by_name.get(rn, {"name": rn, "tier": "Unranked",
+                                         "final_score": 50.0, "score": 50.0}))
         bp["role"] = role
         rp["role"] = role
         blue_players.append(bp)
@@ -330,8 +416,13 @@ def _on_begin_analysis():
     win_pct = (blue_avg / total * 100) if total > 0 else 50.0
     win_pct = max(25.0, min(75.0, win_pct))
 
-    draft.blue_avg = blue_avg
-    draft.red_avg  = red_avg
+    draft.blue_avg   = blue_avg
+    draft.red_avg    = red_avg
+    draft.pvp_rows   = _compute_matchups(blue_players, red_players)
+    draft.blue_bans  = _compute_bans(red_players)    # blue bans = target red team's picks
+    draft.red_bans   = _compute_bans(blue_players)
+    draft.blue_comps = _compute_comps(blue_players)
+    draft.red_comps  = _compute_comps(red_players)
 
     if dpg.does_item_exist(_TB_WIN):
         dpg.delete_item(_TB_WIN)
@@ -572,27 +663,24 @@ def _win_color(pct):
 # Analysis panels
 # ---------------------------------------------------------------------------
 
-def _draw_blue_panel(dl, px, py, pw, ph, al):
-    _panel_bg(dl, px, py, px+pw, py+ph, C["platinum"], al)
-
-    # Header
-    _txt(dl, px+18, py+16, "BLUE TEAM STRATEGY",
-         (*C["platinum"][:3], al), 18, "raj_sb_18")
+def _draw_strategy_panel(dl, px, py, pw, ph, al, header, header_col, bans, comps):
+    """Shared renderer for blue/red strategy panels."""
+    _panel_bg(dl, px, py, px+pw, py+ph, header_col, al)
+    _txt(dl, px+18, py+16, header, (*header_col[:3], al), 18, "raj_sb_18")
     dpg.draw_line((px+18, py+44),(px+pw-18, py+44),
                   color=(*C["rule_dark"][:3], al), thickness=1, parent=dl)
 
-    # --- Ban recommendations (5 slots) ---
     _txt(dl, px+18, py+54, "PRIORITY BANS",
          (*C["txt2"][:3], al), 14, "raj_sb_16")
 
-    bans_per_row = 5
-    ban_slot_w   = (pw - 36 - (bans_per_row-1)*6) // bans_per_row
-    ban_h        = 44
-    ban_y        = py + 76
+    ban_h     = 44
+    ban_y     = py + 76
+    n_bans    = max(1, len(bans)) if bans else 5
+    slot_w    = (pw - 36 - (n_bans-1)*6) // n_bans
 
-    for i, champ in enumerate(_DEMO_BLUE_BANS[:bans_per_row]):
-        bx = px + 18 + i * (ban_slot_w + 6)
-        dpg.draw_rectangle((bx, ban_y),(bx+ban_slot_w, ban_y+ban_h),
+    for i, champ in enumerate(bans[:5]):
+        bx = px + 18 + i * (slot_w + 6)
+        dpg.draw_rectangle((bx, ban_y),(bx+slot_w, ban_y+ban_h),
                             fill=(*C["card"][:3], al),
                             color=(*C["loss"][:3], int(al*0.5)),
                             rounding=4, parent=dl)
@@ -600,149 +688,108 @@ def _draw_blue_panel(dl, px, py, pw, ph, al):
         ys, ye = ban_y+8, ban_y+18
         dpg.draw_line((xs,ys),(xe,ye), color=(*C["loss"][:3],al), thickness=1.5, parent=dl)
         dpg.draw_line((xe,ys),(xs,ye), color=(*C["loss"][:3],al), thickness=1.5, parent=dl)
-        _txt(dl, bx+24, ban_y+ban_h//2-9, champ,
-             (*C["txt"][:3], al), 14, "raj_16")
+        _txt(dl, bx+24, ban_y+ban_h//2-9, champ, (*C["txt"][:3], al), 13, "raj_16")
 
-    # Divider
+    if not bans:
+        _txt(dl, px+24, ban_y+14, "Run analysis to compute",
+             (*C["txt_dim"][:3], al), 13, "raj_r_14")
+
     div_y = ban_y + ban_h + 14
     dpg.draw_line((px+18, div_y),(px+pw-18, div_y),
                   color=(*C["rule_dark"][:3], al), thickness=1, parent=dl)
 
-    # --- Team compositions ---
-    _txt(dl, px+18, div_y + 10, "TEAM COMPOSITIONS",
+    _txt(dl, px+18, div_y+10, "TEAM COMPOSITIONS",
          (*C["txt2"][:3], al), 14, "raj_sb_16")
 
     comp_y = div_y + 34
     comp_h = max(36, (ph - (comp_y - py) - 18) // 5)
 
-    for i, comp in enumerate(_DEMO_BLUE_COMPS):
+    for i, comp in enumerate(comps[:5]):
         cy2 = comp_y + i * (comp_h + 5)
         dpg.draw_rectangle((px+18, cy2),(px+pw-18, cy2+comp_h),
                             fill=(*C["card"][:3], al),
                             color=(*C["rule_dark"][:3], al),
                             rounding=4, parent=dl)
         dpg.draw_rectangle((px+18, cy2),(px+22, cy2+comp_h),
-                            fill=(*C["platinum"][:3], al),
+                            fill=(*header_col[:3], al),
                             color=(0,0,0,0), rounding=2, parent=dl)
-        num_t = dpg.draw_text((px+28, cy2+comp_h//2-11), str(i+1),
-                               color=(*C["txt_dim"][:3], al), size=14, parent=dl)
-        _txt(dl, px+46, cy2+comp_h//2-11, comp,
-             (*C["txt"][:3], al), 16, "raj_18")
+        dpg.draw_text((px+28, cy2+comp_h//2-11), str(i+1),
+                      color=(*C["txt_dim"][:3], al), size=14, parent=dl)
+        _txt(dl, px+46, cy2+comp_h//2-11, comp, (*C["txt"][:3], al), 14, "raj_16")
+
+
+def _draw_blue_panel(dl, px, py, pw, ph, al):
+    _draw_strategy_panel(dl, px, py, pw, ph, al,
+                         "BLUE TEAM STRATEGY", C["platinum"],
+                         draft.blue_bans, draft.blue_comps)
 
 
 def _draw_pvp_panel(dl, px, py, pw, ph, al):
     _panel_bg(dl, px, py, px+pw, py+ph, C["gold"], al)
 
-    _txt(dl, px+18, py+16, "PLAYER vs PLAYER",
+    _txt(dl, px+18, py+16, "LANE ADVANTAGE",
          (*C["gold"][:3], al), 18, "raj_sb_18")
     dpg.draw_line((px+18, py+44),(px+pw-18, py+44),
                   color=(*C["rule_dark"][:3], al), thickness=1, parent=dl)
 
     note_col = (*C["txt_dim"][:3], int(al * 0.6))
-    _txt(dl, px+18, py+52, "Head-to-head by role — historical matchup data",
-         note_col, 12, "raj_r_14")
+    _txt(dl, px+18, py+52, "Score delta + role familiarity  ·  Blue win % per lane",
+         note_col, 11, "raj_r_14")
 
-    row_h = max(44, (ph - 80) // 5)
+    rows    = draft.pvp_rows
+    row_h   = max(44, (ph - 80) // max(len(rows), 1)) if rows else 60
     start_y = py + 72
 
-    for i, (role, blue_name, red_name, blue_win, note) in enumerate(_DEMO_PVP):
+    role_cols = {
+        "TOP":(180,100,60),"JGL":(80,160,80),
+        "MID":(100,120,200),"BOT":(180,160,60),"SUP":(100,180,180),
+    }
+
+    if not rows:
+        _txt(dl, px+18, start_y+16, "Configure teams to see matchups",
+             (*C["txt_dim"][:3], al), 14, "raj_r_14")
+        return
+
+    for i, (role, blue_name, red_name, blue_win, note) in enumerate(rows):
         ry = start_y + i * (row_h + 6)
 
         dpg.draw_rectangle((px+12, ry),(px+pw-12, ry+row_h),
-                            fill=(*C["card"][:3], al),
-                            color=(0,0,0,0), rounding=4, parent=dl)
+                            fill=(*C["card"][:3], al), color=(0,0,0,0), rounding=4, parent=dl)
 
-        # Role label
-        role_cols = {
-            "TOP":(180,100,60),"JGL":(80,160,80),
-            "MID":(100,120,200),"BOT":(180,160,60),"SUP":(100,180,180)
-        }
         rc = role_cols.get(role, (120,120,120))
         dpg.draw_rectangle((px+12, ry),(px+16, ry+row_h),
                             fill=(*rc, al), color=(0,0,0,0), rounding=2, parent=dl)
         _txt(dl, px+22, ry+4, role, (*rc, al), 11, "raj_sb_11")
 
-        # Blue player name
+        # Blue name (left)
         _txt(dl, px+22, ry+row_h//2-8, blue_name.upper(),
-             (*C["platinum"][:3], al), 16, "raj_18")
+             (*C["platinum"][:3], al), 15, "raj_18")
 
         # Win bar (centered)
-        bar_x   = px + pw//2 - 60
-        bar_w   = 120
-        bar_h_h = 6
-        bar_y   = ry + row_h//2 - bar_h_h//2
+        bar_x, bar_w, bh2 = px + pw//2 - 55, 110, 7
+        bar_y = ry + row_h//2 - bh2//2
 
-        dpg.draw_rectangle((bar_x, bar_y),(bar_x+bar_w, bar_y+bar_h_h),
+        dpg.draw_rectangle((bar_x, bar_y),(bar_x+bar_w, bar_y+bh2),
                             fill=(*C["bg"][:3], al), color=(0,0,0,0), rounding=3, parent=dl)
         fill_px = int(bar_w * blue_win / 100)
         bar_col = (79,168,130) if blue_win >= 50 else (184,69,53)
-        dpg.draw_rectangle((bar_x, bar_y),(bar_x+fill_px, bar_y+bar_h_h),
+        dpg.draw_rectangle((bar_x, bar_y),(bar_x+fill_px, bar_y+bh2),
                             fill=(*bar_col, al), color=(0,0,0,0), rounding=3, parent=dl)
 
-        pct_str = f"{blue_win}%"
-        _txt(dl, px + pw//2 - 16, ry + row_h//2 - 18, pct_str,
-             (*bar_col, al), 14, "raj_16")
+        pct_str = f"{blue_win:.0f}%"
+        _txt(dl, px + pw//2 - 18, ry + row_h//2 - 19, pct_str, (*bar_col, al), 14, "raj_16")
 
-        # Red player name (right-aligned)
-        rname_x = px + pw - 18 - len(red_name)*9
-        _txt(dl, rname_x, ry + row_h//2 - 8, red_name.upper(),
-             (220, 90, 90, al), 16, "raj_18")
+        # Red name (right-aligned)
+        rname_x = px + pw - 18 - len(red_name) * 9
+        _txt(dl, rname_x, ry + row_h//2 - 8, red_name.upper(), (220, 90, 90, al), 15, "raj_18")
 
-        # Note below
-        if row_h > 40:
-            _txt(dl, px+22, ry+row_h-16, note,
-                 (*C["txt_dim"][:3], int(al*0.65)), 11, "raj_r_14")
+        # Note
+        if row_h > 40 and note:
+            _txt(dl, px+22, ry+row_h-15, note,
+                 (*C["txt_dim"][:3], int(al*0.65)), 10, "raj_r_14")
 
 
 def _draw_red_panel(dl, px, py, pw, ph, al):
-    _panel_bg(dl, px, py, px+pw, py+ph, (220, 90, 90, 255), al)
-
-    _txt(dl, px+18, py+16, "RED TEAM STRATEGY",
-         (220, 90, 90, al), 18, "raj_sb_18")
-    dpg.draw_line((px+18, py+44),(px+pw-18, py+44),
-                  color=(*C["rule_dark"][:3], al), thickness=1, parent=dl)
-
-    _txt(dl, px+18, py+54, "PRIORITY BANS",
-         (*C["txt2"][:3], al), 14, "raj_sb_16")
-
-    bans_per_row = 5
-    ban_slot_w   = (pw - 36 - (bans_per_row-1)*6) // bans_per_row
-    ban_h        = 44
-    ban_y        = py + 76
-
-    for i, champ in enumerate(_DEMO_RED_BANS[:bans_per_row]):
-        bx = px + 18 + i * (ban_slot_w + 6)
-        dpg.draw_rectangle((bx, ban_y),(bx+ban_slot_w, ban_y+ban_h),
-                            fill=(*C["card"][:3], al),
-                            color=(184, 69, 53, int(al*0.5)),
-                            rounding=4, parent=dl)
-        xs, xe = bx+8, bx+18
-        ys, ye = ban_y+8, ban_y+18
-        dpg.draw_line((xs,ys),(xe,ye), color=(184,69,53,al), thickness=1.5, parent=dl)
-        dpg.draw_line((xe,ys),(xs,ye), color=(184,69,53,al), thickness=1.5, parent=dl)
-        _txt(dl, bx+24, ban_y+ban_h//2-9, champ,
-             (*C["txt"][:3], al), 14, "raj_16")
-
-    div_y = ban_y + ban_h + 14
-    dpg.draw_line((px+18, div_y),(px+pw-18, div_y),
-                  color=(*C["rule_dark"][:3], al), thickness=1, parent=dl)
-
-    _txt(dl, px+18, div_y + 10, "TEAM COMPOSITIONS",
-         (*C["txt2"][:3], al), 14, "raj_sb_16")
-
-    comp_y = div_y + 34
-    comp_h = max(36, (ph - (comp_y - py) - 18) // 5)
-
-    for i, comp in enumerate(_DEMO_RED_COMPS):
-        cy2 = comp_y + i * (comp_h + 5)
-        dpg.draw_rectangle((px+18, cy2),(px+pw-18, cy2+comp_h),
-                            fill=(*C["card"][:3], al),
-                            color=(*C["rule_dark"][:3], al),
-                            rounding=4, parent=dl)
-        dpg.draw_rectangle((px+18, cy2),(px+22, cy2+comp_h),
-                            fill=(220, 90, 90, al),
-                            color=(0,0,0,0), rounding=2, parent=dl)
-        _txt(dl, px+28, cy2+comp_h//2-11, str(i+1),
-             (*C["txt_dim"][:3], al), 14)
-        _txt(dl, px+46, cy2+comp_h//2-11, comp,
-             (*C["txt"][:3], al), 16, "raj_18")
+    _draw_strategy_panel(dl, px, py, pw, ph, al,
+                         "RED TEAM STRATEGY", (220, 90, 90, 255),
+                         draft.red_bans, draft.red_comps)

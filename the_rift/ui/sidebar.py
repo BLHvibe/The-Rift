@@ -13,6 +13,7 @@ _OVERLAY_TAGS = {
     "settings": "settings_overlay_win",
     "commands": "commands_overlay_win",
     "feed":     "feed_overlay_win",
+    "scout":    "scout_report_panel_win",
 }
 
 def _cleanup_overlay(tab_id):
