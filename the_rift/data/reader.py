@@ -469,3 +469,383 @@ def _read_inhouse(sh, known_names=None):
         p["rank"] = i + 1
 
     return leaderboard, inhouse_champs, primary_roles
+
+
+# ---------------------------------------------------------------------------
+# Shared gspread connection helper
+# ---------------------------------------------------------------------------
+
+def _gspread_connect(cfg):
+    """Return an authenticated gspread Spreadsheet object from config dict."""
+    import gspread
+    from google.oauth2.service_account import Credentials
+    SCOPES = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    creds = Credentials.from_service_account_file(
+        cfg.get("creds_path", "credentials.json"), scopes=SCOPES)
+    gc  = gspread.authorize(creds)
+    url = cfg.get("sheet_url", "")
+    return gc.open_by_url(url) if url.startswith("http") else gc.open(url)
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 — Draft win prediction (Rank History + live inhouse stats)
+# ---------------------------------------------------------------------------
+
+def load_prediction_data(blue_names, red_names, on_done=None):
+    """
+    Background read of 'Rank History' sheet.
+    Combines with live.inhouse (already loaded) for inhouse WR weighting.
+    Calls on_done(prediction_dict) when complete.
+    prediction_dict keys: blue_prob, red_prob, strengths, rank_vals, inhouse_stats
+    On failure, blue_prob / red_prob will be 50.0 and 'error' key will be set.
+    """
+    def _bg():
+        cfg = load_config()
+        rank_vals = {}
+        try:
+            sh        = _gspread_connect(cfg)
+            rank_vals = _read_rank_history_latest(sh)
+        except Exception:
+            pass  # silent fallback — local score ratio used instead
+
+        # Use already-loaded live.inhouse rather than re-reading "In-House Stats"
+        inhouse_stats = {}
+        for p in live.inhouse:
+            name  = p.get("player", "")
+            games = p.get("games", 0)
+            wins  = p.get("wins", 0)
+            if name and games > 0:
+                inhouse_stats[name] = {"games": games, "wr": wins / games}
+
+        all_names = list(blue_names) + list(red_names)
+        strengths = {n: _player_strength(n, rank_vals, inhouse_stats)
+                     for n in all_names}
+
+        t1 = sum(strengths.get(n, 0.5) for n in blue_names) / max(len(list(blue_names)), 1)
+        t2 = sum(strengths.get(n, 0.5) for n in red_names)  / max(len(list(red_names)),  1)
+        total   = t1 + t2
+        t1_prob = round(t1 / total * 100, 1) if total > 0 else 50.0
+        t1_prob = max(25.0, min(75.0, t1_prob))
+
+        result = {
+            "blue_prob":     t1_prob,
+            "red_prob":      round(100 - t1_prob, 1),
+            "strengths":     strengths,
+            "rank_vals":     rank_vals,
+            "inhouse_stats": inhouse_stats,
+        }
+        if not rank_vals:
+            result["error"] = "Rank History sheet unavailable — using score ratio"
+        if on_done:
+            on_done(result)
+
+    threading.Thread(target=_bg, daemon=True, name="draft_prediction").start()
+
+
+def _read_rank_history_latest(sh):
+    """
+    Return {player_name: rank_value} from the most recent row of 'Rank History'.
+    Row 0 may be a title; Row 1 = header with player names; Row 2+ = data.
+    Last data row = most recent snapshot.
+    """
+    try:
+        ws   = sh.worksheet("Rank History")
+        rows = ws.get_all_values()
+        if len(rows) < 3:
+            return {}
+        header   = rows[1]
+        last_row = rows[-1]
+        result   = {}
+        for ci, col_name in enumerate(header[1:], start=1):
+            col_name = str(col_name).strip()
+            if col_name and ci < len(last_row) and last_row[ci]:
+                try:
+                    result[col_name] = float(last_row[ci])
+                except ValueError:
+                    pass
+        return result
+    except Exception:
+        return {}
+
+
+def _player_strength(name, rank_vals, inhouse_stats):
+    """
+    Composite strength score in [0, 1].
+    65% from rank position (normalised to ~30-player group),
+    35% from inhouse WR (confidence-weighted by games played).
+    """
+    rv        = rank_vals.get(name, 13.0)   # default = mid-table of ~25 players
+    rank_norm = rv / 31.0
+    ih = inhouse_stats.get(name)
+    if ih and ih["games"] >= 1:
+        conf    = min(ih["games"] / 10.0, 1.0)
+        wr_norm = ih["wr"] * conf + 0.5 * (1 - conf)
+    else:
+        wr_norm = 0.5
+    return 0.65 * rank_norm + 0.35 * wr_norm
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — Draft sheet write + subprocess + result parser
+# ---------------------------------------------------------------------------
+
+_DRAFT_SCRIPT_PATH = None   # resolved once and cached
+
+
+def _find_draft_script():
+    """
+    Locate fetch_ranks_gsheets.py.
+    Searches: parent of the_rift/, directory of running .exe, cwd.
+    """
+    global _DRAFT_SCRIPT_PATH
+    if _DRAFT_SCRIPT_PATH:
+        return _DRAFT_SCRIPT_PATH
+    import os, sys
+    here = os.path.dirname(os.path.abspath(__file__))   # the_rift/data/
+    candidates = [
+        os.path.normpath(os.path.join(here, "..", "..", "fetch_ranks_gsheets.py")),
+        os.path.normpath(os.path.join(os.path.dirname(sys.executable), "fetch_ranks_gsheets.py")),
+        os.path.normpath(os.path.join(os.getcwd(), "fetch_ranks_gsheets.py")),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            _DRAFT_SCRIPT_PATH = c
+            return c
+    return None
+
+
+def write_draft_picks(blue_players, red_players, on_done=None, on_error=None):
+    """
+    Write blue/red team selections to 'Draft Tool' sheet (rows 6–10).
+    Columns A–C = slot#, player, tier/rank  |  H–J = slot#, player, tier/rank
+    blue_players / red_players: list of dicts with keys 'name', 'tier', 'role'.
+    on_done() called on success; on_error(msg) called on failure.
+    """
+    def _bg():
+        try:
+            cfg = load_config()
+            sh  = _gspread_connect(cfg)
+            ws  = sh.worksheet("Draft Tool")
+            for i in range(5):
+                row = i + 6
+                bp  = blue_players[i] if i < len(blue_players) else {}
+                rp  = red_players[i]  if i < len(red_players)  else {}
+                ws.update(values=[[i + 1, bp.get("name",""), bp.get("tier","")]],
+                          range_name=f"A{row}:C{row}")
+                ws.update(values=[[i + 1, rp.get("name",""), rp.get("tier","")]],
+                          range_name=f"H{row}:J{row}")
+            if on_done:
+                on_done()
+        except Exception as e:
+            if on_error:
+                on_error(str(e))
+
+    threading.Thread(target=_bg, daemon=True, name="draft_write").start()
+
+
+def run_draft_subprocess(on_done=None, on_error=None, on_line=None):
+    """
+    Run `fetch_ranks_gsheets.py --draft` as a subprocess.
+    on_done(sh)   — called with an open Spreadsheet object when exit code == 0
+    on_error(msg) — called on failure / script not found / timeout
+    on_line(text) — optional, called for each stdout line (for console streaming)
+    """
+    import subprocess, sys, os
+
+    script = _find_draft_script()
+    if not script:
+        if on_error:
+            on_error("fetch_ranks_gsheets.py not found — rich draft analysis unavailable.")
+        return
+
+    cfg = load_config()
+    key = cfg.get("api_key", "")
+    if not key:
+        if on_error:
+            on_error("No API key set — add your Riot API key in Settings.")
+        return
+
+    py  = sys.executable   # use same Python that's running the app
+    cmd = [
+        py, script,
+        "--key",     key,
+        "--sheet",   cfg.get("sheet_url", ""),
+        "--creds",   cfg.get("creds_path", "credentials.json"),
+        "--region",  cfg.get("region",  "na1"),
+        "--routing", cfg.get("routing", "americas"),
+        "--draft",
+    ]
+
+    def _bg():
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
+                cwd=os.path.dirname(script),
+                env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            )
+            for line in iter(proc.stdout.readline, ""):
+                if on_line:
+                    on_line(line.rstrip())
+            try:
+                proc.wait(timeout=120)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                if on_error:
+                    on_error("Draft subprocess timed out after 120 s.")
+                return
+            if proc.returncode != 0:
+                if on_error:
+                    on_error(f"Draft subprocess exited with code {proc.returncode}.")
+                return
+            # Re-open sheet so caller can read results
+            try:
+                sh = _gspread_connect(cfg)
+                if on_done:
+                    on_done(sh)
+            except Exception as e:
+                if on_error:
+                    on_error(f"Couldn't reconnect to sheet after draft: {e}")
+        except Exception as e:
+            if on_error:
+                on_error(f"Draft subprocess error: {e}")
+
+    threading.Thread(target=_bg, daemon=True, name="draft_subprocess").start()
+
+
+def read_draft_results(sh, on_done=None, on_error=None):
+    """
+    Read and parse the 'Draft Tool' sheet after the subprocess has written results.
+    Calls on_done(results_dict) or on_error(msg) from a background thread.
+    """
+    def _bg():
+        try:
+            ws   = sh.worksheet("Draft Tool")
+            data = _parse_draft_sheet(ws.get_all_values())
+            if on_done:
+                on_done(data)
+        except Exception as e:
+            if on_error:
+                on_error(str(e))
+
+    threading.Thread(target=_bg, daemon=True, name="draft_read").start()
+
+
+def _parse_draft_sheet(values):
+    """
+    Parse rows from the 'Draft Tool' sheet into a structured results dict.
+    Ported from old launcher._parse_draft_sheet().
+    Returns dict with keys:
+      team1_roster, team2_roster,
+      bans_blue, bans_red,
+      blue_comps, red_comps
+    """
+    import re
+    ROLES = {"TOP", "JGL", "MID", "BOT", "SUP"}
+
+    team1_roster, team2_roster = [], []
+    bans_blue,    bans_red     = [], []
+    blue_comps,   red_comps    = [], []
+
+    def _pad(row, n=14):
+        return (list(row) + [""] * n)[:n]
+
+    # ── Roster rows ──────────────────────────────────────────────
+    for i, row in enumerate(values):
+        if not row:
+            continue
+        first = str(row[0])
+        if "TEAM 1" in first and "BLUE" in first:
+            for j in range(i + 2, min(i + 7, len(values))):
+                r = _pad(values[j])
+                if r[1].strip():
+                    team1_roster.append({"role": r[0].strip(), "player": r[1].strip(),
+                                         "rank": r[2].strip(), "top_champ": r[3].strip()})
+                if r[8].strip():
+                    team2_roster.append({"role": r[7].strip(), "player": r[8].strip(),
+                                         "rank": r[9].strip(), "top_champ": r[10].strip()})
+            break
+
+    # ── Ban rows ──────────────────────────────────────────────────
+    for i, row in enumerate(values):
+        if not row:
+            continue
+        first = str(row[0])
+        if "RECOMMENDED BANS" in first:
+            for j in range(i + 2, min(i + 7, len(values))):
+                r = _pad(values[j])
+                if r[1] and r[1] != "-":
+                    bans_blue.append({"phase": r[0], "champion": r[1], "target": r[2],
+                                      "wr": r[3], "games": r[4], "priority": r[5]})
+                if r[8] and r[8] != "-":
+                    bans_red.append({"phase": r[7], "champion": r[8], "target": r[9],
+                                     "wr": r[10], "games": r[11], "priority": r[12]})
+            break
+
+    # ── Comp suggestion rows ──────────────────────────────────────
+    current_team = None
+    current_comp = None
+    for row in values:
+        if not row:
+            continue
+        r      = _pad(row)
+        first  = r[0].strip()
+        eighth = r[7].strip()
+
+        if "TEAM 1 COMP SUGGESTIONS" in first:
+            current_team, current_comp = "blue", None
+            continue
+        if "TEAM 2 COMP SUGGESTIONS" in first:
+            current_team, current_comp = "red", None
+            continue
+        if current_team is None:
+            continue
+
+        # Archetype header: "NAME — description" in col A, viability in col H
+        if "—" in first and any(v in eighth for v in
+                                 ["STRONG", "VIABLE", "WEAK", "NOT RECOMMENDED", "Synergy"]):
+            parts     = first.split("—", 1)
+            archetype = parts[0].strip()
+            desc      = parts[1].strip() if len(parts) > 1 else ""
+            viability = "VIABLE"
+            for v in ["NOT RECOMMENDED", "STRONG", "VIABLE", "WEAK"]:
+                if eighth.startswith(v):
+                    viability = v
+                    break
+            syn  = re.search(r"Synergy:\s*(\d+)", eighth)
+            meta = re.search(r"(\d+)/5\s*on-meta", eighth)
+            current_comp = {
+                "archetype":   archetype,
+                "description": desc,
+                "viability":   viability,
+                "synergy":     int(syn.group(1))  if syn  else 0,
+                "on_meta":     meta.group(1)       if meta else "0",
+                "picks":       [],
+            }
+            (blue_comps if current_team == "blue" else red_comps).append(current_comp)
+            continue
+
+        # Skip column-header rows
+        if first == "Player" and r[1].strip() == "Role":
+            continue
+
+        # Pick data rows
+        if current_comp is not None and r[1].strip() in ROLES:
+            current_comp["picks"].append({
+                "player":   r[0], "role": r[1], "champion": r[2],
+                "games":    r[3], "wr":   r[4], "kda":      r[5], "fit": r[6],
+            })
+
+    return {
+        "team1_roster": team1_roster,
+        "team2_roster": team2_roster,
+        "bans_blue":    bans_blue,
+        "bans_red":     bans_red,
+        "blue_comps":   blue_comps,
+        "red_comps":    red_comps,
+    }

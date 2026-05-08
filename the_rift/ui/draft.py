@@ -11,7 +11,7 @@ import math, time
 import dearpygui.dearpygui as dpg
 from theme import C, RANK_COLORS
 from core.animations import anim, Ripple
-from data.reader import live
+from data.reader import live, load_prediction_data, write_draft_picks, run_draft_subprocess, read_draft_results
 from data.config import load_config
 
 # ---------------------------------------------------------------------------
@@ -184,12 +184,21 @@ class DraftState:
         self._total           = 0
         self.blue_avg         = 0.0
         self.red_avg          = 0.0
-        # Computed analysis data
+        # Local computed analysis data
         self.pvp_rows         = []   # [(role, blue_name, red_name, blue_pct, note)]
         self.blue_bans        = []   # [champ_name, ...]
         self.red_bans         = []
         self.blue_comps       = []   # [comp_str, ...]
         self.red_comps        = []
+        # Sheet / subprocess results (richer data, arrives later)
+        self.ban_detail_blue  = []   # [{champion, wr, games, priority, target}, ...]
+        self.ban_detail_red   = []
+        self.comp_detail_blue = []   # [{archetype, description, viability, synergy, picks}, ...]
+        self.comp_detail_red  = []
+        self.prediction_src   = "local"   # "local" | "sheets"
+        self.bg_running       = False     # background sheet/subprocess in progress
+        self.bg_status        = ""        # human-readable status for the ANALYSING screen
+        self.prediction_ready = False     # flag: better prediction arrived, re-tween needed
 
     def reset(self):
         self.__init__()
@@ -416,17 +425,109 @@ def _on_begin_analysis():
     win_pct = (blue_avg / total * 100) if total > 0 else 50.0
     win_pct = max(25.0, min(75.0, win_pct))
 
-    draft.blue_avg   = blue_avg
-    draft.red_avg    = red_avg
-    draft.pvp_rows   = _compute_matchups(blue_players, red_players)
-    draft.blue_bans  = _compute_bans(red_players)    # blue bans = target red team's picks
-    draft.red_bans   = _compute_bans(blue_players)
-    draft.blue_comps = _compute_comps(blue_players)
-    draft.red_comps  = _compute_comps(red_players)
+    draft.blue_avg        = blue_avg
+    draft.red_avg         = red_avg
+    draft.pvp_rows        = _compute_matchups(blue_players, red_players)
+    draft.blue_bans       = _compute_bans(red_players)    # blue bans = target red team's picks
+    draft.red_bans        = _compute_bans(blue_players)
+    draft.blue_comps      = _compute_comps(blue_players)
+    draft.red_comps       = _compute_comps(red_players)
+    # Reset richer results from any previous run
+    draft.ban_detail_blue  = []
+    draft.ban_detail_red   = []
+    draft.comp_detail_blue = []
+    draft.comp_detail_red  = []
+    draft.prediction_src   = "local"
+    draft.prediction_ready = False
 
     if dpg.does_item_exist(_TB_WIN):
         dpg.delete_item(_TB_WIN)
     draft.start_assembly(blue_players, red_players, win_pct)
+
+    # ── Phase 1: Better win probability from Rank History + inhouse stats ──
+    blue_names = [p["name"] for p in blue_players]
+    red_names  = [p["name"] for p in red_players]
+    load_prediction_data(blue_names, red_names, on_done=_apply_prediction)
+
+    # ── Phase 2: Write picks to sheet + run subprocess + read rich results ──
+    draft.bg_running = True
+    draft.bg_status  = "Writing picks to sheet…"
+    _kick_off_bg_draft(blue_players, red_players)
+
+
+def _apply_prediction(pred):
+    """
+    Called from background thread when Rank History prediction is ready.
+    Updates win_pct; if results are already showing, flags a re-tween.
+    Thread-safe: only mutates Python attributes, no DPG calls.
+    """
+    if "error" not in pred or pred.get("rank_vals"):
+        draft.win_pct       = pred["blue_prob"]
+        draft.prediction_src = "sheets"
+        draft.prediction_ready = True   # main loop handles the re-tween
+
+
+def _kick_off_bg_draft(blue_players, red_players):
+    """
+    Background chain: write picks → run subprocess → read results.
+    All errors are soft — local results remain visible if any step fails.
+    """
+    def _on_write_done():
+        draft.bg_status = "Running draft analysis…"
+        run_draft_subprocess(
+            on_done  = _on_subprocess_done,
+            on_error = _on_bg_error,
+        )
+
+    def _on_write_error(msg):
+        # Write failed — still attempt subprocess with existing sheet picks
+        draft.bg_status = f"Sheet write failed ({msg}) — running analysis anyway…"
+        run_draft_subprocess(
+            on_done  = _on_subprocess_done,
+            on_error = _on_bg_error,
+        )
+
+    def _on_subprocess_done(sh):
+        draft.bg_status = "Reading results from sheet…"
+        read_draft_results(sh,
+                           on_done  = _apply_draft_results,
+                           on_error = _on_bg_error)
+
+    def _on_bg_error(msg):
+        draft.bg_running = False
+        draft.bg_status  = f"Rich analysis unavailable: {msg}"
+
+    write_draft_picks(blue_players, red_players,
+                      on_done  = _on_write_done,
+                      on_error = _on_write_error)
+
+
+def _apply_draft_results(results):
+    """
+    Called from background thread when the Draft Tool sheet has been parsed.
+    Updates ban/comp data with richer sheet-sourced information.
+    Thread-safe: only mutates Python attributes.
+    """
+    draft.bg_running = False
+    draft.bg_status  = "Full analysis complete ✓"
+
+    bans_b  = results.get("bans_blue",  [])
+    bans_r  = results.get("bans_red",   [])
+    comps_b = results.get("blue_comps", [])
+    comps_r = results.get("red_comps",  [])
+
+    if bans_b:
+        draft.blue_bans       = [b["champion"] for b in bans_b]
+        draft.ban_detail_blue = bans_b
+    if bans_r:
+        draft.red_bans        = [b["champion"] for b in bans_r]
+        draft.ban_detail_red  = bans_r
+    if comps_b:
+        draft.comp_detail_blue = comps_b
+        draft.blue_comps       = [c["archetype"] for c in comps_b]
+    if comps_r:
+        draft.comp_detail_red  = comps_r
+        draft.red_comps        = [c["archetype"] for c in comps_r]
 
 
 def _close_team_builder():
@@ -608,12 +709,28 @@ def _draw_team_area(dl, vw, team_h):
             _txt(dl, sx - len(tier_abbr)*6, slot_y + hex_r + 36, tier_abbr,
                  (*RANK_COLORS.get(tier, RANK_COLORS["Unranked"])[:3], al), 16, "raj_18")
 
-    # Analysing pulse
+    # Analysing pulse + background status
     if draft.phase == DraftPhase.ANALYSING:
-        t = (math.sin(draft.analyse_t * 2.2) + 1) / 2
+        t  = (math.sin(draft.analyse_t * 2.2) + 1) / 2
         pa = int(100 + t * 130)
         _txt(dl, center - 90, team_h - 36, "ANALYSING...",
              (*C["gold_dk"][:3], pa), 20, "raj_20")
+    elif draft.bg_running and draft.phase in (DraftPhase.RESULTS, DraftPhase.DONE):
+        # Subtle running indicator after results appear
+        t  = (math.sin(time.monotonic() * 2.0) + 1) / 2
+        pa = int(60 + t * 60)
+        _txt(dl, center - 120, team_h - 22, draft.bg_status,
+             (*C["txt_dim"][:3], pa), 11, "raj_r_14")
+    elif draft.bg_status and not draft.bg_running and draft.phase in (DraftPhase.RESULTS, DraftPhase.DONE):
+        _txt(dl, center - 120, team_h - 22, draft.bg_status,
+             (*C["txt_dim"][:3], 140), 11, "raj_r_14")
+
+    # Re-tween win meter if a better prediction just arrived
+    if draft.prediction_ready:
+        draft.prediction_ready = False
+        if draft.phase in (DraftPhase.RESULTS, DraftPhase.DONE):
+            anim.tween(draft.win_pct_display, draft.win_pct, 900, "in_out",
+                       on_update=lambda v: setattr(draft, "win_pct_display", v))
 
     # Win meter
     _draw_win_meter(dl, center, team_h)
@@ -663,8 +780,13 @@ def _win_color(pct):
 # Analysis panels
 # ---------------------------------------------------------------------------
 
-def _draw_strategy_panel(dl, px, py, pw, ph, al, header, header_col, bans, comps):
-    """Shared renderer for blue/red strategy panels."""
+def _draw_strategy_panel(dl, px, py, pw, ph, al, header, header_col,
+                         bans, comps, ban_detail=None, comp_detail=None):
+    """
+    Shared renderer for blue/red strategy panels.
+    ban_detail: optional list of rich ban dicts {champion, wr, games, priority}
+    comp_detail: optional list of rich comp dicts {archetype, viability, synergy, picks}
+    """
     _panel_bg(dl, px, py, px+pw, py+ph, header_col, al)
     _txt(dl, px+18, py+16, header, (*header_col[:3], al), 18, "raj_sb_18")
     dpg.draw_line((px+18, py+44),(px+pw-18, py+44),
@@ -673,22 +795,45 @@ def _draw_strategy_panel(dl, px, py, pw, ph, al, header, header_col, bans, comps
     _txt(dl, px+18, py+54, "PRIORITY BANS",
          (*C["txt2"][:3], al), 14, "raj_sb_16")
 
-    ban_h     = 44
-    ban_y     = py + 76
-    n_bans    = max(1, len(bans)) if bans else 5
-    slot_w    = (pw - 36 - (n_bans-1)*6) // n_bans
+    has_rich_bans = bool(ban_detail)
+    ban_h  = 58 if has_rich_bans else 44
+    ban_y  = py + 76
+    n_bans = max(1, len(bans)) if bans else 5
+    slot_w = (pw - 36 - (n_bans - 1) * 6) // n_bans
+
+    _PRIORITY_COLORS = {
+        "HIGH":   C["loss"][:3],
+        "MEDIUM": C["gold"][:3],
+        "LOW":    C["txt2"][:3],
+    }
 
     for i, champ in enumerate(bans[:5]):
-        bx = px + 18 + i * (slot_w + 6)
+        bx     = px + 18 + i * (slot_w + 6)
+        detail = ban_detail[i] if has_rich_bans and i < len(ban_detail) else None
         dpg.draw_rectangle((bx, ban_y),(bx+slot_w, ban_y+ban_h),
                             fill=(*C["card"][:3], al),
                             color=(*C["loss"][:3], int(al*0.5)),
                             rounding=4, parent=dl)
+        # X icon
         xs, xe = bx+8, bx+18
         ys, ye = ban_y+8, ban_y+18
         dpg.draw_line((xs,ys),(xe,ye), color=(*C["loss"][:3],al), thickness=1.5, parent=dl)
         dpg.draw_line((xe,ys),(xs,ye), color=(*C["loss"][:3],al), thickness=1.5, parent=dl)
-        _txt(dl, bx+24, ban_y+ban_h//2-9, champ, (*C["txt"][:3], al), 13, "raj_16")
+        # Champion name
+        name_y = (ban_y + 8) if has_rich_bans else (ban_y + ban_h//2 - 9)
+        _txt(dl, bx+24, name_y, champ, (*C["txt"][:3], al), 13, "raj_16")
+        # Rich detail: WR%, games, priority
+        if detail:
+            wr_str = str(detail.get("wr", "")).replace("%", "")
+            g_str  = str(detail.get("games", ""))
+            pri    = str(detail.get("priority", "")).upper()
+            sub    = f"{wr_str}% WR · {g_str}g" if wr_str and g_str else ""
+            if sub:
+                _txt(dl, bx+8, ban_y+28, sub,
+                     (*C["txt_dim"][:3], int(al*0.8)), 10, "raj_r_14")
+            pc = _PRIORITY_COLORS.get(pri, C["txt_dim"][:3])
+            if pri:
+                _txt(dl, bx+8, ban_y+42, pri, (*pc, int(al*0.9)), 10, "raj_r_14")
 
     if not bans:
         _txt(dl, px+24, ban_y+14, "Run analysis to compute",
@@ -701,11 +846,20 @@ def _draw_strategy_panel(dl, px, py, pw, ph, al, header, header_col, bans, comps
     _txt(dl, px+18, div_y+10, "TEAM COMPOSITIONS",
          (*C["txt2"][:3], al), 14, "raj_sb_16")
 
-    comp_y = div_y + 34
-    comp_h = max(36, (ph - (comp_y - py) - 18) // 5)
+    comp_y   = div_y + 34
+    has_rich = bool(comp_detail)
+    comp_h   = max(36, (ph - (comp_y - py) - 18) // 5)
+
+    _VIAB_COLORS = {
+        "STRONG":          (79, 168, 130),
+        "VIABLE":          C["txt"][:3],
+        "WEAK":            C["gold"][:3],
+        "NOT RECOMMENDED": C["loss"][:3],
+    }
 
     for i, comp in enumerate(comps[:5]):
-        cy2 = comp_y + i * (comp_h + 5)
+        cy2    = comp_y + i * (comp_h + 5)
+        detail = comp_detail[i] if has_rich and i < len(comp_detail) else None
         dpg.draw_rectangle((px+18, cy2),(px+pw-18, cy2+comp_h),
                             fill=(*C["card"][:3], al),
                             color=(*C["rule_dark"][:3], al),
@@ -715,13 +869,33 @@ def _draw_strategy_panel(dl, px, py, pw, ph, al, header, header_col, bans, comps
                             color=(0,0,0,0), rounding=2, parent=dl)
         dpg.draw_text((px+28, cy2+comp_h//2-11), str(i+1),
                       color=(*C["txt_dim"][:3], al), size=14, parent=dl)
-        _txt(dl, px+46, cy2+comp_h//2-11, comp, (*C["txt"][:3], al), 14, "raj_16")
+        if detail:
+            arch = detail.get("archetype", comp)
+            viab = detail.get("viability", "VIABLE")
+            syn  = int(detail.get("synergy", 0))
+            vc   = _VIAB_COLORS.get(viab, C["txt2"][:3])
+            _txt(dl, px+46, cy2 + 4, arch, (*C["txt"][:3], al), 13, "raj_16")
+            # Viability label right-aligned
+            viab_short = viab[:4] if viab == "NOT RECOMMENDED" else viab
+            vx = px + pw - 18 - len(viab_short) * 6 - 4
+            _txt(dl, vx, cy2 + 4, viab_short, (*vc, al), 10, "raj_r_14")
+            # Synergy dots
+            if comp_h >= 36:
+                dot_y = cy2 + comp_h - 13
+                for d in range(5):
+                    fc = (*C["gold"][:3], al) if d < syn else (*C["rule_dark"][:3], al)
+                    dpg.draw_circle((px+46 + d*12, dot_y), 4,
+                                    fill=fc, color=(0,0,0,0), parent=dl)
+        else:
+            _txt(dl, px+46, cy2+comp_h//2-11, comp, (*C["txt"][:3], al), 14, "raj_16")
 
 
 def _draw_blue_panel(dl, px, py, pw, ph, al):
     _draw_strategy_panel(dl, px, py, pw, ph, al,
                          "BLUE TEAM STRATEGY", C["platinum"],
-                         draft.blue_bans, draft.blue_comps)
+                         draft.blue_bans, draft.blue_comps,
+                         ban_detail=draft.ban_detail_blue or None,
+                         comp_detail=draft.comp_detail_blue or None)
 
 
 def _draw_pvp_panel(dl, px, py, pw, ph, al):
@@ -733,7 +907,9 @@ def _draw_pvp_panel(dl, px, py, pw, ph, al):
                   color=(*C["rule_dark"][:3], al), thickness=1, parent=dl)
 
     note_col = (*C["txt_dim"][:3], int(al * 0.6))
-    _txt(dl, px+18, py+52, "Score delta + role familiarity  ·  Blue win % per lane",
+    src_label = "Rank History + inhouse WR" if draft.prediction_src == "sheets" \
+                else "Score ratio (local)"
+    _txt(dl, px+18, py+52, f"Lane matchup  ·  Win % via {src_label}",
          note_col, 11, "raj_r_14")
 
     rows    = draft.pvp_rows
@@ -792,4 +968,6 @@ def _draw_pvp_panel(dl, px, py, pw, ph, al):
 def _draw_red_panel(dl, px, py, pw, ph, al):
     _draw_strategy_panel(dl, px, py, pw, ph, al,
                          "RED TEAM STRATEGY", (220, 90, 90, 255),
-                         draft.red_bans, draft.red_comps)
+                         draft.red_bans, draft.red_comps,
+                         ban_detail=draft.ban_detail_red or None,
+                         comp_detail=draft.comp_detail_red or None)
