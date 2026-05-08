@@ -369,23 +369,32 @@ class App(tk.Tk):
                  bg=C["panel"], fg=C["txt2"],
                  font=("Segoe UI", 9, "italic")).pack(pady=(6, 8))
 
-        shimmer_cv = tk.Canvas(body, bg=C["gold_dk"], highlightthickness=0, height=3)
-        shimmer_cv.pack(fill="x", padx=60, pady=(0, 22))
+        shimmer_cv = tk.Canvas(body, bg=C["gold_dk"], highlightthickness=0, height=6)
+        shimmer_cv.pack(fill="x", padx=40, pady=(0, 22))
 
-        _sx = [-120]
+        _sx = [-160]
         def _tick():
             if not shimmer_cv.winfo_exists():
                 return
             shimmer_cv.delete("all")
-            w = shimmer_cv.winfo_width() or 300
-            shimmer_cv.create_rectangle(0, 0, w, 3, fill=C["gold_dk"], outline="")
-            shimmer_cv.create_rectangle(_sx[0], 0, _sx[0] + 120, 3,
+            w = shimmer_cv.winfo_width()
+            if w < 10:
+                shimmer_cv.after(50, _tick)
+                return
+            shimmer_cv.create_rectangle(0, 0, w, 6, fill=C["gold_dk"], outline="")
+            # Bright core
+            shimmer_cv.create_rectangle(_sx[0] + 20, 1, _sx[0] + 140, 5,
                                         fill=C["gold_lt"], outline="")
-            _sx[0] += 10
-            if _sx[0] > w + 120:
-                _sx[0] = -120
-            shimmer_cv.after(30, _tick)
-        body.after(80, _tick)
+            # Soft edges
+            shimmer_cv.create_rectangle(_sx[0], 0, _sx[0] + 20, 6,
+                                        fill=C["gold"], outline="")
+            shimmer_cv.create_rectangle(_sx[0] + 140, 0, _sx[0] + 160, 6,
+                                        fill=C["gold"], outline="")
+            _sx[0] += 8
+            if _sx[0] > w + 160:
+                _sx[0] = -160
+            shimmer_cv.after(25, _tick)
+        shimmer_cv.after(200, _tick)
 
         tk.Frame(outer, bg=C["gold_dk"], height=1).pack(fill="x")
         tk.Frame(outer, bg=C["gold"], height=1).pack(fill="x", pady=(2, 0))
@@ -507,20 +516,7 @@ class App(tk.Tk):
         cell = tk.Frame(parent, bg=C["bg"])
         # Add top padding so 2nd/3rd appear lower than 1st
         top_pad = 0 if is_first else 36
-        _DROP = 55
-        cell.grid(row=0, column=col, padx=10, pady=(top_pad + _DROP, 0), sticky="ew")
-
-        # Y-drop entrance: slide up from dropped position over ~200ms
-        def _drop_step(step, _c=cell):
-            if not _c.winfo_exists():
-                return
-            if step >= 14:
-                _c.grid_configure(pady=(top_pad, 0))
-                return
-            ease = 1 - (1 - step / 14) ** 3
-            _c.grid_configure(pady=(top_pad + int(_DROP * (1 - ease)), 0))
-            _c.after(14, lambda: _drop_step(step + 1))
-        cell.after(0, lambda: _drop_step(0))
+        cell.grid(row=0, column=col, padx=10, pady=(top_pad, 0), sticky="ew")
 
         # Outer wrapper holds the top accent stripe + the body
         outer = tk.Frame(cell, bg=C["bg"])
@@ -529,9 +525,13 @@ class App(tk.Tk):
         # 3px top accent stripe in the rating color
         tk.Frame(outer, bg=rating_color, height=3).pack(fill="x")
 
-        # Card body — rule-color frame on the other three sides
+        # Podium medal border thickness: gold=4, silver/bronze=2
+        rank = player["rank"]
+        border_thick = 4 if rank == 1 else 2
+
+        # Card body — bordered frame, animated per rank
         card = tk.Frame(outer, bg=C["panel"],
-                        highlightthickness=1,
+                        highlightthickness=border_thick,
                         highlightbackground=C["rule"])
         card.pack(fill="x")
 
@@ -601,21 +601,27 @@ class App(tk.Tk):
                  bg=C["panel"], fg=C["txt2"],
                  font=("Segoe UI", 8, "bold")).pack(pady=(4, bottom_pad))
 
-        # Breathing glow on the champion card border
-        if is_first:
-            import math
+        # Breathing border glow — gold for #1, silver for #2, bronze for #3
+        import math
+        _MEDAL_COLORS = {
+            1: ((0x3a, 0x2d, 0x12), (0xff, 0xd7, 0x00)),  # dark rule → bright gold
+            2: ((0x2a, 0x2a, 0x2a), (0xe8, 0xe8, 0xe8)),  # dark → silver
+            3: ((0x2a, 0x18, 0x08), (0xcd, 0x7f, 0x32)),  # dark → bronze
+        }
+        if rank in _MEDAL_COLORS:
+            lo, hi = _MEDAL_COLORS[rank]
             _tick = [0]
-            def _breathe(_card=card):
+            def _breathe(_card=card, _lo=lo, _hi=hi):
                 if not _card.winfo_exists():
                     return
                 b = (math.sin(_tick[0] * 0.07) + 1) / 2
-                r = int(0x3a + (0xd4 - 0x3a) * b)
-                g = int(0x2d + (0xb0 - 0x2d) * b)
-                bl = int(0x12 + (0x6e - 0x12) * b)
+                r = int(_lo[0] + (_hi[0] - _lo[0]) * b)
+                g = int(_lo[1] + (_hi[1] - _lo[1]) * b)
+                bl = int(_lo[2] + (_hi[2] - _lo[2]) * b)
                 _card.configure(highlightbackground=f"#{r:02x}{g:02x}{bl:02x}")
                 _tick[0] += 1
                 _card.after(50, _breathe)
-            card.after(500, _breathe)
+            card.after(400, _breathe)
 
     def _build_rankings_divider(self, parent, title):
         """Cinematic divider: thin rule lines + caps title (no diamonds)."""
@@ -658,7 +664,7 @@ class App(tk.Tk):
         row.pack(fill="x")
 
         # Left rating-colored stripe
-        stripe = tk.Frame(row, bg=rating_color, width=4)
+        stripe = tk.Frame(row, bg=rating_color, width=6)
         stripe.pack(side="left", fill="y")
         stripe.pack_propagate(False)
 
@@ -667,13 +673,13 @@ class App(tk.Tk):
             if not _s.winfo_exists():
                 return
             if step == 0:
-                _s.configure(bg=C["gold_lt"])
-                _s.after(60, lambda: _stripe_flash(1))
+                _s.configure(bg=C["gold_lt"], width=8)
+                _s.after(80, lambda: _stripe_flash(1))
             elif step == 1:
-                _s.configure(bg=C["gold"])
-                _s.after(80, lambda: _stripe_flash(2))
+                _s.configure(bg=C["gold"], width=7)
+                _s.after(100, lambda: _stripe_flash(2))
             else:
-                _s.configure(bg=rating_color)
+                _s.configure(bg=rating_color, width=6)
         _stripe_flash(0)
 
         # NO.{rank} composite
