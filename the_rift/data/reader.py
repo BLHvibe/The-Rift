@@ -736,6 +736,312 @@ def read_draft_results(sh, on_done=None, on_error=None):
     threading.Thread(target=_bg, daemon=True, name="draft_read").start()
 
 
+# ---------------------------------------------------------------------------
+# Phase 3 — Scout: on-demand per-player sheet read
+# ---------------------------------------------------------------------------
+
+def load_scout_sheet(player_name, on_done=None, on_error=None):
+    """
+    Background fetch of 'Scout - {player_name}' sheet + 'Rank History' column.
+    on_done(data, history) — data = parsed scout dict, history = [(date_str, float), ...]
+    on_error(msg)          — called if sheet is missing or auth fails
+    Falls back gracefully: if Rank History unavailable, history=[]
+    """
+    def _bg():
+        try:
+            cfg  = load_config()
+            sh   = _gspread_connect(cfg)
+            sheet_name = f"Scout - {player_name}"[:30]
+            try:
+                ws = sh.worksheet(sheet_name)
+            except Exception:
+                if on_error:
+                    on_error(
+                        f"No scouting sheet found for {player_name}.\n"
+                        f"Run 'Full Scout' from the Commands tab first."
+                    )
+                return
+
+            data    = _parse_scouting_sheet(ws.get_all_values())
+            history = _read_rank_history_for_player(sh, player_name)
+
+            if on_done:
+                on_done(data, history)
+        except Exception as e:
+            if on_error:
+                on_error(f"Couldn't load scouting report: {e}")
+
+    threading.Thread(target=_bg, daemon=True,
+                     name=f"scout_{player_name[:12]}").start()
+
+
+def _read_rank_history_for_player(sh, player_name):
+    """
+    Return [(date_str, rank_value), ...] for a specific player from 'Rank History'.
+    Row 0 may be title; Row 1 = header; Row 2+ = data rows, col 0 = date.
+    """
+    try:
+        ws   = sh.worksheet("Rank History")
+        rows = ws.get_all_values()
+        if len(rows) < 3:
+            return []
+        header  = rows[1]
+        col_idx = None
+        for ci, col_name in enumerate(header):
+            if str(col_name).strip().lower() == player_name.strip().lower():
+                col_idx = ci
+                break
+        if col_idx is None:
+            return []
+        result = []
+        for row in rows[2:]:
+            if col_idx < len(row) and row[col_idx]:
+                try:
+                    result.append((str(row[0]).strip(), float(row[col_idx])))
+                except ValueError:
+                    pass
+        return result
+    except Exception:
+        return []
+
+
+def _parse_scouting_sheet(values):
+    """
+    Parse all rows of a 'Scout - PlayerName' sheet into a structured dict.
+    Ported from old launcher._parse_scouting_sheet().
+    """
+    import re
+    from datetime import datetime as _dt
+
+    _SECTION_MARKERS = (
+        "BAN THESE CHAMPIONS", "BAN IMPACT:", "FULL CHAMPION POOL",
+        "ROLE BREAKDOWN", "RECENT FORM:", "IN-HOUSE CUSTOM GAMES",
+        "POWER RANKING:",
+    )
+
+    def _is_section(cell):
+        return any(cell.startswith(m) for m in _SECTION_MARKERS)
+
+    def _cell(row, idx, default=""):
+        return str(row[idx]).strip() if len(row) > idx and row[idx] is not None else default
+
+    result = {
+        "player":           "",
+        "subtitle":         "",
+        "power_rating":     None,   # dict: position, score, rating, tier_score, rank_score
+        "overview_headers": [],
+        "overview_values":  [],
+        "must_bans":        [],     # [{name, games, wr, kda, threat, ...}]
+        "must_bans_msg":    None,
+        "ban_impact":       None,   # dict: text, wr, games
+        "champ_pool":       [],     # [{name, games, wins, losses, wr, kda, cs_min, damage}]
+        "roles":            [],     # [{role, games, pct, top_champs}]
+        "form_state":       "MIXED",
+        "matches":          [],     # [{game, result, champion, role, kda_str, cs_min, damage, gold, duration}]
+        "inhouse_champs":   [],     # in-sheet version (may be stale); prefer live.inhouse_champs
+        "scouted_at":       None,   # datetime or None
+    }
+
+    if not values:
+        return result
+
+    # Row 0: "SCOUTING REPORT: Name"  +  col L (idx 11) "Scouted: YYYY-MM-DD HH:MM"
+    if values[0] and values[0][0]:
+        m = re.match(r"SCOUTING REPORT:\s*(.+)", str(values[0][0]))
+        if m:
+            result["player"] = m.group(1).strip()
+        if len(values[0]) > 11 and values[0][11]:
+            ts_raw = str(values[0][11]).strip()
+            if ts_raw.startswith("Scouted:"):
+                try:
+                    result["scouted_at"] = _dt.strptime(
+                        ts_raw.replace("Scouted:", "").strip(), "%Y-%m-%d %H:%M")
+                except ValueError:
+                    pass
+
+    if len(values) > 1 and values[1]:
+        result["subtitle"] = _cell(values[1], 0)
+
+    i = 2
+    while i < len(values):
+        row  = values[i]
+        cell = _cell(row, 0) if row else ""
+
+        if not cell:
+            i += 1; continue
+
+        # ── Power ranking ─────────────────────────────────────────────────
+        if cell.startswith("POWER RANKING:"):
+            result["power_rating"] = _parse_power_rating_text(cell)
+            i += 1; continue
+
+        # ── Overview stats (header row starts with "KDA") ─────────────────
+        if cell == "KDA" and len(row) > 1 and _cell(row, 1) == "Avg Kills":
+            result["overview_headers"] = [_cell(row, c) for c in range(12)]
+            if i + 1 < len(values):
+                result["overview_values"] = [
+                    (_cell(values[i+1], c)) for c in range(12)]
+            i += 2; continue
+
+        # ── Ban targets ───────────────────────────────────────────────────
+        if cell == "BAN THESE CHAMPIONS":
+            i += 1
+            if i >= len(values):
+                continue
+            nxt = _cell(values[i], 0)
+            if nxt == "Champion":
+                i += 1
+                while i < len(values):
+                    r  = values[i]
+                    c0 = _cell(r, 0)
+                    if not c0 or _is_section(c0):
+                        break
+                    result["must_bans"].append({
+                        "name":    c0,
+                        "games":   _cell(r, 1), "wins":    _cell(r, 2),
+                        "losses":  _cell(r, 3), "wr":      _cell(r, 4),
+                        "kda":     _cell(r, 5), "kills":   _cell(r, 6),
+                        "deaths":  _cell(r, 7), "assists": _cell(r, 8),
+                        "cs_min":  _cell(r, 9), "damage":  _cell(r,10),
+                        "threat":  _cell(r,11),
+                    })
+                    i += 1
+            else:
+                result["must_bans_msg"] = nxt
+                i += 1
+            continue
+
+        # ── Ban impact ────────────────────────────────────────────────────
+        if cell.startswith("BAN IMPACT:"):
+            result["ban_impact"] = _parse_ban_impact_row(row)
+            i += 1; continue
+
+        # ── Full champion pool ────────────────────────────────────────────
+        if cell == "FULL CHAMPION POOL":
+            i += 1
+            if i < len(values) and _cell(values[i], 0) == "Champion":
+                i += 1
+            while i < len(values):
+                r  = values[i]
+                c0 = _cell(r, 0)
+                if not c0 or _is_section(c0):
+                    break
+                result["champ_pool"].append({
+                    "name":    c0,
+                    "games":   _cell(r, 1), "wins":    _cell(r, 2),
+                    "losses":  _cell(r, 3), "wr":      _cell(r, 4),
+                    "kda":     _cell(r, 5), "kills":   _cell(r, 6),
+                    "deaths":  _cell(r, 7), "assists": _cell(r, 8),
+                    "cs_min":  _cell(r, 9), "damage":  _cell(r,10),
+                    "gold":    _cell(r,11),
+                })
+                i += 1
+            continue
+
+        # ── Role breakdown ────────────────────────────────────────────────
+        if cell == "ROLE BREAKDOWN":
+            i += 1
+            if i < len(values) and _cell(values[i], 0) == "Role":
+                i += 1
+            while i < len(values):
+                r  = values[i]
+                c0 = _cell(r, 0)
+                if not c0 or _is_section(c0):
+                    break
+                result["roles"].append({
+                    "role":       c0,
+                    "games":      _cell(r, 1),
+                    "pct":        _cell(r, 2),
+                    "top_champs": _cell(r, 3),
+                })
+                i += 1
+            continue
+
+        # ── Recent form (last 10 matches) ─────────────────────────────────
+        if cell.startswith("RECENT FORM:"):
+            m = re.match(r"RECENT FORM:\s*(\S+)", cell)
+            if m:
+                fs = m.group(1).upper()
+                result["form_state"] = fs if fs in ("HOT","COLD","MIXED") else "MIXED"
+            i += 1
+            if i < len(values) and _cell(values[i], 0) == "Game":
+                i += 1
+            while i < len(values):
+                r  = values[i]
+                c0 = _cell(r, 0)
+                if not c0 or _is_section(c0):
+                    break
+                result["matches"].append({
+                    "game":     c0,
+                    "result":   _cell(r, 1),
+                    "champion": _cell(r, 2),
+                    "role":     _cell(r, 3),
+                    "kda_str":  _cell(r, 4),
+                    "kda":      _cell(r, 5),
+                    "cs_min":   _cell(r, 6),
+                    "damage":   _cell(r, 7),
+                    "vision":   _cell(r, 8),
+                    "gold":     _cell(r, 9),
+                    "duration": _cell(r,10),
+                })
+                i += 1
+            continue
+
+        # ── In-house customs (in-sheet version, prefer live.inhouse_champs) ─
+        if cell.startswith("IN-HOUSE CUSTOM GAMES"):
+            i += 1
+            if i < len(values) and _cell(values[i], 0) == "Champion":
+                i += 1
+            while i < len(values):
+                r  = values[i]
+                c0 = _cell(r, 0)
+                if not c0 or _is_section(c0):
+                    break
+                result["inhouse_champs"].append({
+                    "name":    c0,
+                    "games":   _cell(r, 1), "wins":    _cell(r, 2),
+                    "losses":  _cell(r, 3), "wr":      _cell(r, 4),
+                    "kda":     _cell(r, 5), "damage":  _cell(r, 9),
+                })
+                i += 1
+            continue
+
+        i += 1
+
+    return result
+
+
+def _parse_power_rating_text(text):
+    """Extract position/score/rating from a 'POWER RANKING: ...' cell string."""
+    import re
+    out = {"position": "", "score": "", "rating": "", "tier_score": "", "rank_score": ""}
+    m = re.search(r"#(\S+)", text)
+    if m: out["position"] = m.group(1)
+    m = re.search(r"Final Score:\s*([^|]+)", text)
+    if m: out["score"] = m.group(1).strip()
+    m = re.search(r"Rating:\s*([^|]+)", text)
+    if m: out["rating"] = m.group(1).strip()
+    m = re.search(r"Tier Score[^:]*:\s*([^|]+)", text)
+    if m: out["tier_score"] = m.group(1).strip()
+    m = re.search(r"Rank Score[^:]*:\s*([^|]+)", text)
+    if m: out["rank_score"] = m.group(1).strip()
+    return out
+
+
+def _parse_ban_impact_row(row):
+    """Parse the 'BAN IMPACT:' row into {text, wr, games}."""
+    import re
+    text = " ".join(str(c) for c in row if c)
+    out  = {"text": "", "wr": "", "games": ""}
+    m = re.match(r"(BAN IMPACT:[^|]*?)(?:Remaining|$)", text)
+    if m: out["text"] = m.group(1).strip()
+    m = re.search(r"Remaining WR:\s*(\d+(?:\.\d+)?%)", text)
+    if m: out["wr"] = m.group(1)
+    m = re.search(r"\((\d+)\s*games?\)", text)
+    if m: out["games"] = m.group(1)
+    return out
+
+
 def _parse_draft_sheet(values):
     """
     Parse rows from the 'Draft Tool' sheet into a structured results dict.

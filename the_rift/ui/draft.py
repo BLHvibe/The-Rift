@@ -328,7 +328,7 @@ def _open_team_builder(vw, vh):
 
     # Player names for dropdowns — use live rankings or config fallback
     pool  = _get_player_pool()
-    names = [p["name"] for p in pool] if pool else [f"Player {i}" for i in range(1, 11)]
+    names = [""] + ([p["name"] for p in pool] if pool else [f"Player {i}" for i in range(1, 11)])
 
     win_w = min(1000, vw - 160)
     win_h = 520
@@ -369,7 +369,7 @@ def _open_team_builder(vw, vh):
                         rt = dpg.add_text(f"{role:<3} ")
                         if "raj_sb_16" in _F: dpg.bind_item_font(rt, _F["raj_sb_16"])
                         dpg.add_combo(names, tag=f"tb_blue_{i}",
-                                      width=combo_w - 60, default_value=names[i % len(names)])
+                                      width=combo_w - 60, default_value="")
                     dpg.add_spacer(height=6)
 
             dpg.add_spacer(width=40)
@@ -383,10 +383,8 @@ def _open_team_builder(vw, vh):
                     with dpg.group(horizontal=True):
                         rl = dpg.add_text(f"{role:<3} ")
                         if "raj_sb_16" in _F: dpg.bind_item_font(rl, _F["raj_sb_16"])
-                        # Default to players 5-9 so both teams have different defaults
-                        default_idx = (i + 5) % len(names)
                         dpg.add_combo(names, tag=f"tb_red_{i}",
-                                      width=combo_w - 60, default_value=names[default_idx])
+                                      width=combo_w - 60, default_value="")
                     dpg.add_spacer(height=6)
 
         dpg.add_spacer(height=20)
@@ -407,8 +405,12 @@ def _on_begin_analysis():
 
     blue_players, red_players = [], []
     for i, role in enumerate(_ROLES):
-        bn = dpg.get_value(f"tb_blue_{i}")
-        rn = dpg.get_value(f"tb_red_{i}")
+        bn = (dpg.get_value(f"tb_blue_{i}") or "").strip()
+        rn = (dpg.get_value(f"tb_red_{i}") or "").strip()
+        if not bn:
+            bn = f"Blue {i+1}"
+        if not rn:
+            rn = f"Red {i+1}"
         bp = dict(pool_by_name.get(bn, {"name": bn, "tier": "Unranked",
                                          "final_score": 50.0, "score": 50.0}))
         rp = dict(pool_by_name.get(rn, {"name": rn, "tier": "Unranked",

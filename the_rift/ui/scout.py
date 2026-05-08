@@ -7,7 +7,7 @@ import math, time
 import dearpygui.dearpygui as dpg
 from theme import C, RANK_COLORS
 from core.animations import anim
-from data.reader import live
+from data.reader import live, load_scout_sheet
 
 # ---------------------------------------------------------------------------
 # Layout constants
@@ -255,6 +255,258 @@ def _rw_ban_targets(r):
     dpg.add_separator()
 
 
+def _rw_rank_history(r):
+    """Rank history graph — DPG drawlist inside a child window."""
+    history = r.get("rank_history", [])
+    if len(history) < 2:
+        return
+    dpg.add_spacer(height=8)
+    _rw_label("RANK HISTORY")
+    dpg.add_spacer(height=4)
+
+    GW, GH = 520, 160   # graph canvas size (will be clipped to panel width)
+    PAD_L, PAD_R, PAD_T, PAD_B = 36, 12, 10, 28
+
+    pw = GW - PAD_L - PAD_R
+    ph = GH - PAD_T - PAD_B
+
+    vals  = [v for _, v in history]
+    dates = [d for d, _ in history]
+    lo    = max(1.0, min(vals) - 0.5)
+    hi    = max(lo + 1.0, max(vals) + 0.5)
+
+    def _px(i):   return PAD_L + int(pw * i / max(len(vals) - 1, 1))
+    def _py(v):   return PAD_T + int(ph * (1.0 - (v - lo) / (hi - lo)))
+
+    with dpg.child_window(height=GH + 4, border=False,
+                          no_scrollbar=True, no_scroll_with_mouse=True):
+        dl = dpg.add_drawlist(width=GW, height=GH)
+
+        # Background
+        dpg.draw_rectangle((0, 0), (GW, GH),
+                            fill=(*C["card"][:3], 180), color=(0,0,0,0), parent=dl)
+
+        # Tier zone fills (approximate bands mapped to rank value ranges)
+        # Rank value ≈ position number; lower = better
+        _TIER_BANDS = [
+            (1,  3,  (200, 160,  80, 30)),   # gold tinge = top 3
+            (4,  6,  (100, 160, 100, 25)),   # green = top 6
+            (7, 10,  ( 80, 120, 160, 20)),   # blue = top 10
+            (11, 20, ( 80,  80,  80, 15)),   # grey = rest
+        ]
+        for band_lo, band_hi, band_col in _TIER_BANDS:
+            y1 = _py(min(hi, band_hi + 0.5))
+            y2 = _py(max(lo, band_lo - 0.5))
+            if y1 < y2:
+                dpg.draw_rectangle((PAD_L, y1), (PAD_L + pw, y2),
+                                   fill=band_col, color=(0,0,0,0), parent=dl)
+
+        # Grid lines (horizontal rank guides)
+        for rank_line in range(int(lo), int(hi) + 1):
+            if lo <= rank_line <= hi:
+                gy = _py(rank_line)
+                dpg.draw_line((PAD_L, gy), (PAD_L + pw, gy),
+                              color=(*C["rule_dark"][:3], 60), thickness=1, parent=dl)
+                dpg.draw_text((2, gy - 8), f"#{int(rank_line)}",
+                              color=(*C["txt_dim"][:3], 120), size=10, parent=dl)
+
+        # Polyline
+        pts = [(_px(i), _py(v)) for i, v in enumerate(vals)]
+        if len(pts) >= 2:
+            dpg.draw_polyline(pts, color=(*C["gold"][:3], 200),
+                              thickness=2, parent=dl)
+
+        # Data points + hover hint
+        for i, (x, y) in enumerate(pts):
+            dpg.draw_circle((x, y), 4,
+                            fill=(*C["gold_lt"][:3], 220),
+                            color=(*C["gold"][:3], 180), parent=dl)
+
+        # Date labels (every 4th point, or fewer if not many)
+        step = max(1, len(dates) // 6)
+        for i in range(0, len(dates), step):
+            lbl = str(dates[i])[-5:]   # "MM-DD" from "YYYY-MM-DD"
+            dpg.draw_text((_px(i) - 14, GH - PAD_B + 4), lbl,
+                          color=(*C["txt_dim"][:3], 140), size=9, parent=dl)
+
+        # Axes
+        dpg.draw_line((PAD_L, PAD_T), (PAD_L, PAD_T + ph),
+                      color=(*C["rule_dark"][:3], 140), thickness=1, parent=dl)
+        dpg.draw_line((PAD_L, PAD_T + ph), (PAD_L + pw, PAD_T + ph),
+                      color=(*C["rule_dark"][:3], 140), thickness=1, parent=dl)
+
+    dpg.add_spacer(height=6)
+    dpg.add_separator()
+
+
+def _rw_recent_form(r):
+    """Last 10 matches table."""
+    matches = r.get("matches", [])
+    if not matches:
+        return
+    dpg.add_spacer(height=8)
+    form_state = r.get("form_state", "MIXED")
+    form_col = {
+        "HOT":   (200, 100,  60),
+        "COLD":  ( 80, 130, 200),
+        "MIXED": C["txt2"][:3],
+    }.get(form_state, C["txt2"][:3])
+    _rw_label(f"RECENT FORM — {form_state}", color=form_col)
+    dpg.add_spacer(height=4)
+
+    hdrs   = ["#", "RES", "CHAMPION",    "ROLE", "KDA",  "CS/M", "DAMAGE", "GOLD", "TIME"]
+    widths = [24,   40,    118,           46,     60,     46,     76,       72,     52]
+
+    with dpg.child_window(height=226, border=True,
+                          no_scroll_with_mouse=False):
+        with dpg.group(horizontal=True):
+            dpg.add_spacer(width=6)
+            for h, w in zip(hdrs, widths):
+                t = dpg.add_text(h, color=C["txt_dim"][:3])
+                if "raj_sb_14" in _F: dpg.bind_item_font(t, _F["raj_sb_14"])
+                dpg.add_spacer(width=max(2, w - len(h)*7))
+        dpg.add_separator()
+        for idx, m in enumerate(matches[:10]):
+            res = str(m.get("result", "")).upper()
+            wl_col = C["win"][:3] if res == "W" else \
+                     C["loss"][:3] if res == "L" else C["txt_dim"][:3]
+            vals = [
+                str(idx + 1),
+                res,
+                str(m.get("champion", ""))[:12],
+                str(m.get("role", ""))[:4],
+                str(m.get("kda_str", m.get("kda", ""))),
+                str(m.get("cs_min", "")),
+                str(m.get("damage", "")),
+                str(m.get("gold", "")),
+                str(m.get("duration", "")),
+            ]
+            with dpg.group(horizontal=True):
+                dpg.add_spacer(width=6)
+                for i2, (v, w) in enumerate(zip(vals, widths)):
+                    col = C["txt_dim"][:3] if i2 == 0 \
+                        else wl_col         if i2 == 1 \
+                        else C["gold"][:3]  if i2 == 2 \
+                        else C["txt"][:3]
+                    t = dpg.add_text(str(v)[:12], color=col)
+                    if "raj_r_14" in _F: dpg.bind_item_font(t, _F["raj_r_14"])
+                    dpg.add_spacer(width=max(2, w - len(str(v))*7))
+    dpg.add_spacer(height=8)
+    dpg.add_separator()
+
+
+def _rw_role_breakdown(r):
+    """Role breakdown with horizontal bars."""
+    roles = r.get("roles", [])
+    if not roles:
+        return
+    dpg.add_spacer(height=8)
+    _rw_label("ROLE BREAKDOWN")
+    dpg.add_spacer(height=6)
+
+    role_col = {
+        "TOP": (180,100,60), "JGL": (80,160,80),
+        "MID": (100,120,200), "BOT": (180,160,60), "SUP": (100,180,180),
+    }
+    BAR_W = 200
+    for row in roles:
+        role = str(row.get("role", "")).upper()
+        pct_str = str(row.get("pct", "0")).replace("%", "")
+        try:    pct = float(pct_str) / 100.0
+        except: pct = 0.0
+        games = str(row.get("games", ""))
+        champs = str(row.get("top_champs", ""))
+        rc = role_col.get(role, (120,120,120))
+
+        with dpg.group(horizontal=True):
+            dpg.add_spacer(width=14)
+            t = dpg.add_text(f"{role:<3}", color=rc)
+            if "raj_sb_14" in _F: dpg.bind_item_font(t, _F["raj_sb_14"])
+            dpg.add_spacer(width=8)
+            # Bar via progress bar widget
+            dpg.add_progress_bar(default_value=pct, width=BAR_W, height=14,
+                                 overlay=f"{pct_str}%  {games}g")
+            dpg.add_spacer(width=8)
+            if champs:
+                tc = dpg.add_text(champs[:30], color=C["txt_dim"][:3])
+                if "raj_r_14" in _F: dpg.bind_item_font(tc, _F["raj_r_14"])
+        dpg.add_spacer(height=4)
+    dpg.add_spacer(height=4)
+    dpg.add_separator()
+
+
+def _rw_full_champ_pool(r):
+    """Full champion pool from the scout sheet (all ranked champions)."""
+    pool = r.get("champ_pool_full", [])
+    if not pool:
+        # Fallback to top_champs pills if no full pool available
+        _rw_top_champs(r)
+        return
+    dpg.add_spacer(height=8)
+    _rw_label("CHAMPION POOL")
+    dpg.add_spacer(height=4)
+
+    hdrs   = ["CHAMPION",  "G",  "W-L",  "W/R",  "KDA",  "CS/M",  "DMG"]
+    widths = [120,          34,   54,      50,      50,     46,      70]
+
+    with dpg.child_window(height=min(240, len(pool)*22 + 36),
+                          border=True, no_scroll_with_mouse=False):
+        with dpg.group(horizontal=True):
+            dpg.add_spacer(width=6)
+            for h, w in zip(hdrs, widths):
+                t = dpg.add_text(h, color=C["txt_dim"][:3])
+                if "raj_sb_14" in _F: dpg.bind_item_font(t, _F["raj_sb_14"])
+                dpg.add_spacer(width=max(2, w - len(h)*7))
+        dpg.add_separator()
+        for ch in pool:
+            wr_str = str(ch.get("wr","")).replace("%","")
+            try:    wr_f = float(wr_str)
+            except: wr_f = 50.0
+            wrc = C["win"][:3] if wr_f >= 52 else C["loss"][:3] if wr_f < 48 else C["txt"][:3]
+            wl  = f"{ch.get('wins','')}–{ch.get('losses','')}"
+            vals = [ch.get("name",""), str(ch.get("games","")), wl,
+                    f"{wr_str}%", str(ch.get("kda","")),
+                    str(ch.get("cs_min","")), str(ch.get("damage",""))]
+            with dpg.group(horizontal=True):
+                dpg.add_spacer(width=6)
+                for i2, (v, w) in enumerate(zip(vals, widths)):
+                    col = C["gold"][:3] if i2 == 0 \
+                        else wrc         if i2 == 3 \
+                        else C["txt"][:3]
+                    t = dpg.add_text(str(v)[:14], color=col)
+                    if "raj_r_14" in _F: dpg.bind_item_font(t, _F["raj_r_14"])
+                    dpg.add_spacer(width=max(2, w - len(str(v))*7))
+    dpg.add_spacer(height=8)
+    dpg.add_separator()
+
+
+def _rw_ban_impact(r):
+    """Ban impact score card."""
+    bi = r.get("ban_impact")
+    if not bi:
+        return
+    text = str(bi.get("text", "")).strip()
+    wr   = str(bi.get("wr", ""))
+    if not text:
+        return
+    dpg.add_spacer(height=8)
+    _rw_label("BAN IMPACT", color=C["loss"][:3])
+    dpg.add_spacer(height=4)
+    with dpg.group(horizontal=True):
+        dpg.add_spacer(width=14)
+        with dpg.child_window(width=-1, height=46, border=True,
+                              no_scrollbar=True, no_scroll_with_mouse=True):
+            dpg.add_spacer(height=4)
+            t1 = dpg.add_text(text, color=C["loss"][:3])
+            if "raj_r_14" in _F: dpg.bind_item_font(t1, _F["raj_r_14"])
+            if wr:
+                t2 = dpg.add_text(f"Remaining WR if banned: {wr}",
+                                  color=C["txt2"][:3])
+                if "raj_r_14" in _F: dpg.bind_item_font(t2, _F["raj_r_14"])
+    dpg.add_spacer(height=8)
+    dpg.add_separator()
+
+
 def _rw_inhouse(r):
     champs = r.get("inhouse_champs", [])
     dpg.add_spacer(height=8)
@@ -315,18 +567,50 @@ def _rebuild_report_window(vw, vh):
                     width=rw, height=vh,
                     no_title_bar=True, no_resize=True,
                     no_move=True, no_focus_on_appearing=True):
-        if r is None:
+
+        if r is None and not scout.report_loading:
             dpg.add_spacer(height=60)
             t = dpg.add_text("← Select a player to view their scouting report",
                              color=C["txt_dim"][:3])
             if "raj_r_14" in _F: dpg.bind_item_font(t, _F["raj_r_14"])
             return
 
+        # Loading indicator shown in header area while sheet fetch is pending
+        if scout.report_loading and r is None:
+            dpg.add_spacer(height=60)
+            t = dpg.add_text("Fetching scouting report…", color=C["gold_dk"][:3])
+            if "raj_r_14" in _F: dpg.bind_item_font(t, _F["raj_r_14"])
+            return
+
+        if r is None:
+            return
+
         _rw_header(r)
+
+        # Sheet fetch indicator (shown until sheet data arrives or errors)
+        if scout.report_loading:
+            with dpg.group(horizontal=True):
+                dpg.add_spacer(width=14)
+                t = dpg.add_text("⟳ Loading full report from sheet…",
+                                 color=C["gold_dk"][:3])
+                if "raj_r_14" in _F: dpg.bind_item_font(t, _F["raj_r_14"])
+            dpg.add_spacer(height=4)
+        elif r.get("sheet_error"):
+            with dpg.group(horizontal=True):
+                dpg.add_spacer(width=14)
+                t = dpg.add_text("⚠ Sheet unavailable — showing cached data",
+                                 color=C["txt_dim"][:3])
+                if "raj_r_14" in _F: dpg.bind_item_font(t, _F["raj_r_14"])
+            dpg.add_spacer(height=4)
+
         _rw_power_rating(r)
         _rw_overview(r)
-        _rw_top_champs(r)
+        _rw_rank_history(r)
+        _rw_ban_impact(r)
         _rw_ban_targets(r)
+        _rw_full_champ_pool(r)
+        _rw_role_breakdown(r)
+        _rw_recent_form(r)
         _rw_inhouse(r)
         dpg.add_spacer(height=24)
 
@@ -335,25 +619,28 @@ def _rebuild_report_window(vw, vh):
 # State
 # ---------------------------------------------------------------------------
 class ScoutPhase:
-    IDLE    = "idle"
-    LOADING = "loading"
-    REVEAL  = "reveal"
-    DONE    = "done"
+    IDLE           = "idle"
+    LOADING        = "loading"
+    REVEAL         = "reveal"
+    DONE           = "done"
+    LOADING_REPORT = "loading_report"   # fetching individual sheet
 
 
 class ScoutState:
     def __init__(self):
-        self.phase         = ScoutPhase.IDLE
-        self.players       = []
-        self.sort_col      = "score"
-        self.sort_asc      = False
-        self.selected      = None
+        self.phase          = ScoutPhase.IDLE
+        self.players        = []
+        self.sort_col       = "score"
+        self.sort_asc       = False
+        self.selected       = None
         self.current_report = None
-        self.report_dirty  = False
-        self.row_alpha     = {}
-        self.row_x_off     = {}
-        self.header_alpha  = 0
-        self._load_t       = 0.0
+        self.report_dirty   = False
+        self.report_loading = False   # True while background sheet fetch is in progress
+        self.report_error   = None    # error string from last failed fetch
+        self.row_alpha      = {}
+        self.row_x_off      = {}
+        self.header_alpha   = 0
+        self._load_t        = 0.0
 
     def reset(self):
         self.__init__()
@@ -390,9 +677,23 @@ class ScoutState:
         return sorted(self.players, key=lambda p: p.get(key, 0), reverse=not self.sort_asc)
 
     def select(self, name):
+        """
+        Select a player. Immediately builds a fast local report from cached data,
+        then kicks off a background sheet fetch for the full report.
+        """
         self.selected       = name
+        self.report_error   = None
+        # Show local report immediately so the panel isn't blank
         self.current_report = _build_full_report(name)
         self.report_dirty   = True
+
+        # Now fetch the rich per-player sheet in background
+        self.report_loading = True
+        load_scout_sheet(
+            name,
+            on_done  = lambda data, hist: _on_sheet_loaded(name, data, hist),
+            on_error = lambda msg:        _on_sheet_error(name, msg),
+        )
 
     def toggle_sort(self, col):
         if self.sort_col == col:
@@ -410,6 +711,78 @@ class ScoutState:
                 anim.tween(-40, 0,   160, "out_cubic", on_update=_x)
                 anim.tween(0,   255, 160, "out_cubic", on_update=_a)
             anim.tween(0, 1, 1, "linear", delay_ms=i*28, on_done=_make)
+
+
+def _on_sheet_loaded(name, sheet_data, history):
+    """
+    Called from background thread when a player's scout sheet is parsed.
+    Merges sheet data with live inhouse data and updates the report.
+    Thread-safe: only mutates Python objects, no DPG calls.
+    """
+    if scout.selected != name:
+        return  # user selected a different player while we were fetching
+
+    # Start from the local report base (has live ranking data)
+    base = _build_full_report(name) or {}
+
+    # Overlay sheet-sourced fields
+    scouted_at = sheet_data.get("scouted_at")
+    if scouted_at:
+        from datetime import datetime as _dt
+        delta = (_dt.now() - scouted_at).days
+        base["scouted_days_ago"] = delta
+
+    # Full champion pool from sheet (replaces top_champs if available)
+    if sheet_data.get("champ_pool"):
+        base["champ_pool_full"] = sheet_data["champ_pool"]
+
+    # Role breakdown
+    if sheet_data.get("roles"):
+        base["roles"] = sheet_data["roles"]
+
+    # Recent matches
+    if sheet_data.get("matches"):
+        base["matches"] = sheet_data["matches"]
+        base["form_state"] = sheet_data.get("form_state", base.get("form_state", "MIXED"))
+
+    # Ban targets from sheet (richer: has threat label + stats)
+    if sheet_data.get("must_bans"):
+        sheet_bans = []
+        for b in sheet_data["must_bans"]:
+            threat = str(b.get("threat", "")).upper()
+            if threat in ("HIGH", "PERMABAN", "ELEVATED"):
+                sheet_bans.append({
+                    "name":   b["name"],
+                    "games":  b.get("games", ""),
+                    "wr":     b.get("wr", ""),
+                    "kda":    b.get("kda", ""),
+                    "threat": threat,
+                })
+        if sheet_bans:
+            base["ban_targets"] = sheet_bans
+
+    # Ban impact score
+    if sheet_data.get("ban_impact"):
+        base["ban_impact"] = sheet_data["ban_impact"]
+
+    # Rank history (for the graph)
+    base["rank_history"] = history
+
+    scout.current_report  = base
+    scout.report_loading  = False
+    scout.report_dirty    = True
+
+
+def _on_sheet_error(name, msg):
+    """Called from background thread on fetch failure — keep local report, show note."""
+    if scout.selected != name:
+        return
+    scout.report_loading = False
+    scout.report_error   = msg
+    # Local report already showing; just mark it so the panel knows to show the error hint
+    if scout.current_report:
+        scout.current_report["sheet_error"] = msg
+    scout.report_dirty = True
 
 
 scout = ScoutState()
@@ -457,7 +830,7 @@ def draw_scout(dl, vw, vh, fonts=None):
     _draw_top_bar(dl, vw)
     _draw_table(dl, PAD, TOP_BAR_H + PAD, table_w - PAD*2, vh - TOP_BAR_H - PAD*2, vw, vh)
 
-    # Report panel — create once, rebuild when dirty
+    # Report panel — create once, rebuild when dirty or loading state changes
     if not dpg.does_item_exist(_REPORT_WIN):
         _rebuild_report_window(vw, vh)
     else:
