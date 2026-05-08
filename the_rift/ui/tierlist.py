@@ -1,36 +1,28 @@
 """
 Tier List Tab — Phase 6.
-Drag-and-drop champion cards into S/A/B/C/D tier rows.
-Card snaps into slot with scale-bounce on drop.
+Drag-and-drop player cards into S/A/B/C/D/F tier rows.
+Players loaded from config.json.
 """
 import math, time
 import dearpygui.dearpygui as dpg
 from theme import C
 from core.animations import anim
+from data.config import load_config
 
-# ---------------------------------------------------------------------------
-# Champion pool (demo)
-# ---------------------------------------------------------------------------
-_ALL_CHAMPS = [
-    "Aatrox","Ahri","Akali","Alistar","Ambessa","Amumu","Annie","Ashe",
-    "Blitzcrank","Camille","Caitlyn","Darius","Diana","Elise","Ezreal",
-    "Fiora","Garen","Gragas","Graves","Hecarim","Irelia","Janna","Jax",
-    "Jinx","Kai'Sa","Katarina","Kayn","Kennen","Khazix","Kindred",
-    "Lee Sin","Leona","Lulu","Lux","Malphite","Mel","Miss Fortune",
-    "Morgana","Nasus","Nautilus","Nidalee","Orianna","Pantheon","Pyke",
-    "Riven","Sejuani","Smolder","Sona","Soraka","Syndra","Talon","Thresh",
-    "Tristana","Twisted Fate","Veigar","Vi","Viego","Xin Zhao","Yasuo","Yone",
-    "Zed","Ziggs","Zilean","Zyra",
-]
+def _load_players():
+    cfg = load_config()
+    players = cfg.get("players", [])
+    return [p for p in players if p and str(p).strip()]
 
-TIERS = ["S","A","B","C","D"]
+TIERS = ["S", "A", "B", "C", "D", "F"]
 
 TIER_COLORS = {
-    "S": (200, 70,  60,  255),   # red-gold
+    "S": (200, 70,  60,  255),   # red
     "A": (200,155,  60,  255),   # amber
     "B": (160,136,  78,  255),   # gold
     "C": ( 92,138,  92,  255),   # muted green
     "D": ( 92,122, 156,  255),   # steel blue
+    "F": ( 90,  90,  90,  255),  # grey
 }
 
 # ---------------------------------------------------------------------------
@@ -38,9 +30,9 @@ TIER_COLORS = {
 # ---------------------------------------------------------------------------
 class TierListState:
     def __init__(self):
-        self.placements  = {t: [] for t in TIERS}   # tier → [champ_name, ...]
-        self.unplaced    = list(_ALL_CHAMPS)
-        self.drag_name   = None        # champion being dragged
+        self.placements  = {t: [] for t in TIERS}   # tier → [player_name, ...]
+        self.unplaced    = _load_players()
+        self.drag_name   = None        # player being dragged
         self.drag_pos    = (0, 0)      # current mouse pos during drag
         self.drag_origin_tier = None   # None = unplaced pool
         self.bounce      = {}          # name → scale factor (0.8→1.0 on drop)
@@ -66,25 +58,44 @@ class TierListState:
             self.unplaced.append(name)
 
     def reset(self):
-        self.__init__()
+        self.placements  = {t: [] for t in TIERS}
+        self.unplaced    = _load_players()
+        self.drag_name   = None
+        self.drag_pos    = (0, 0)
+        self.drag_origin_tier = None
+        self.bounce      = {}
+        self.scroll_off  = 0
+        self._pool_h     = 0
 
 
 tl = TierListState()
 _F = {}
 def set_fonts(f): global _F; _F = f
 
+_wheel_delta = [0]   # accumulated between frames; consumed in _draw_pool
+
+def _on_wheel(sender, app_data):
+    _wheel_delta[0] += app_data
+
+def register_wheel_handler():
+    """Call once after DPG context is created."""
+    if dpg.does_item_exist("tl_wheel_registry"):
+        return
+    with dpg.handler_registry(tag="tl_wheel_registry"):
+        dpg.add_mouse_wheel_handler(callback=_on_wheel)
+
 # ---------------------------------------------------------------------------
 # Layout constants
 # ---------------------------------------------------------------------------
-TIER_H      = 72     # height of each tier row
-CARD_W      = 110
-CARD_H      = 40
-CARD_PAD    = 6
+TIER_H      = 72     # height of each tier row (6 tiers now)
+CARD_W      = 150
+CARD_H      = 52
+CARD_PAD    = 8
 TIER_LBL_W  = 56
 TOP_BAR_H   = 52
 PAD         = 20
-POOL_CARD_W = 96
-POOL_CARD_H = 34
+POOL_CARD_W = 150
+POOL_CARD_H = 52
 POOL_COLS   = 7
 
 
@@ -130,7 +141,7 @@ def _draw_top_bar(dl, vw):
     dpg.draw_line((0,TOP_BAR_H-1),(vw,TOP_BAR_H-1),
                   color=C["rule_dark"], thickness=1, parent=dl)
     _txt(dl, PAD, 12, "TIER LIST BUILDER", (*C["gold"][:3],220), 22, "raj_24")
-    _txt(dl, PAD+270, 18, "Drag champions from the pool into tiers  ·  Right-click a card to remove",
+    _txt(dl, PAD+270, 18, "Drag players from the pool into tiers  ·  Right-click a card to remove",
          (*C["txt_dim"][:3],150), 13, "raj_r_14")
 
     # Reset button
@@ -195,10 +206,10 @@ def _tier_contains(tier, name):
 
 def _draw_pool_divider(dl, tx, dy, tw):
     dpg.draw_line((tx, dy),(tx+tw, dy), color=(*C["rule_dark"][:3],180), thickness=1, parent=dl)
-    _txt(dl, tx, dy+4, "CHAMPION POOL", (*C["gold_dk"][:3],220), 14, "raj_sb_16")
+    _txt(dl, tx, dy+4, "PLAYER POOL", (*C["gold_dk"][:3],220), 14, "raj_sb_16")
     placed_count = sum(len(v) for v in tl.placements.values())
-    total = len(_ALL_CHAMPS)
-    _txt(dl, tx+190, dy+8, f"{placed_count}/{total} placed",
+    total = placed_count + len(tl.unplaced)
+    _txt(dl, tx+170, dy+8, f"{placed_count}/{total} placed",
          (*C["txt_dim"][:3],180), 12, "raj_r_12")
 
 
@@ -212,16 +223,14 @@ def _draw_pool(dl, px, py, pw, ph, vw, vh):
     max_scroll = max(0, total_h - ph + PAD)
     tl.scroll_off = max(0, min(tl.scroll_off, max_scroll))
 
-    # Scroll via mouse wheel when hovering pool
-    if dpg.is_item_hovered("content_dl"):
+    # Consume accumulated wheel delta when mouse is over pool area
+    if _wheel_delta[0] != 0:
         mouse = dpg.get_mouse_pos(local=False)
         vp    = dpg.get_viewport_pos()
         ry2   = mouse[1]-vp[1]-52
         if ry2 >= py:
-            scroll = dpg.get_mouse_drag_delta(2)  # middle click drag fallback
-            wheel = dpg.get_mouse_wheel()  # actually works in DPG render loop
-            if wheel:
-                tl.scroll_off = max(0, min(tl.scroll_off - wheel*30, max_scroll))
+            tl.scroll_off = max(0, min(tl.scroll_off - _wheel_delta[0]*30, max_scroll))
+        _wheel_delta[0] = 0
 
     # Draw scissor region background
     dpg.draw_rectangle((px, py),(px+pw, py+ph),
@@ -254,8 +263,9 @@ def _draw_card(dl, cx, cy, name, ghost=False, scale=1.0, dragging=False):
     border   = (*C["gold"][:3],220)       if dragging else (*C["rule_dark"][:3],180)
     dpg.draw_rectangle((ox,oy),(ox+w,oy+h), fill=fill_col, color=border,
                         rounding=4, parent=dl)
-    fs = max(11, int(13*scale))
-    _txt(dl, ox+6, oy+h//2-fs//2, name[:14], (*C["txt"][:3],230), fs, "raj_14")
+    fs = max(16, int(20*scale))
+    fk = "raj_20" if scale >= 0.9 else "raj_18"
+    _txt(dl, ox+8, oy+h//2-fs//2, name, (*C["txt"][:3],230), fs, fk)
 
 
 def _draw_pool_card(dl, cx, cy, name, ghost=False):
@@ -267,7 +277,7 @@ def _draw_pool_card(dl, cx, cy, name, ghost=False):
     dpg.draw_rectangle((cx,cy),(cx+POOL_CARD_W,cy+POOL_CARD_H),
                         fill=(*C["card"][:3],210), color=(*C["rule_dark"][:3],160),
                         rounding=4, parent=dl)
-    _txt(dl, cx+6, cy+POOL_CARD_H//2-8, name[:12], (*C["txt"][:3],220), 12, "raj_14")
+    _txt(dl, cx+8, cy+POOL_CARD_H//2-10, name, (*C["txt"][:3],220), 20, "raj_20")
 
 
 def _handle_drag(vw, vh, content_y, pool_y):
