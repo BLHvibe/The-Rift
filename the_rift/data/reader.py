@@ -409,8 +409,8 @@ def _read_inhouse(sh, known_names=None):
         l = g - w
         wr = round(w / g * 100, 1)
         kda = round((pa["kills"] + pa["assists"]) / max(pa["deaths"], 1), 1)
-        avg_dmg = round(pa["damage"] / (g * 10))  # approximate per-game from summed records
-        avg_gold= round(pa["gold"] / (g * 10))
+        avg_dmg = round(pa["damage"] / g)
+        avg_gold= round(pa["gold"] / g)
 
         leaderboard.append({
             "player":  name,

@@ -43,6 +43,7 @@ DELAY_REST_EACH   = 55
 # Dynamic layout — recomputed every frame from actual content area
 # ---------------------------------------------------------------------------
 _L = {}   # populated by _compute_layout() at the top of draw_rankings()
+_name_hitboxes = []   # [(x1, y1, x2, y2, player_name), ...] rebuilt each frame
 
 def _compute_layout(content_w, content_h):
     inner_w = content_w - OUTER_PAD * 2
@@ -304,15 +305,30 @@ def _txt(dl, x, y, text, color, size, font_key=None):
         dpg.bind_item_font(tag, _F[font_key])
     return tag
 
+
+def _name_link(dl, x, y, name_upper, raw_name, color, size, font_key=None):
+    """Draw a player name as an underlined clickable link and register its hitbox."""
+    tag = _txt(dl, x, y, name_upper, color, size, font_key)
+    # Approximate text width: ~0.58 * size per char (Rajdhani proportional)
+    tw = int(len(name_upper) * size * 0.58)
+    # Underline — gold dot-dash hint that this is clickable
+    dpg.draw_line((x, y + size + 2), (x + tw, y + size + 2),
+                  color=(*C["gold_dk"][:3], color[3] if len(color) > 3 else 180),
+                  thickness=1, parent=dl)
+    _name_hitboxes.append((x, y, x + tw, y + size + 4, raw_name))
+    return tag
+
 # ---------------------------------------------------------------------------
 # Main draw entry
 # ---------------------------------------------------------------------------
 
 def draw_rankings(dl, vw, vh, fonts=None):
+    global _name_hitboxes
     if fonts:
         set_fonts(fonts)
 
     _compute_layout(vw, vh)
+    _name_hitboxes = []   # reset hitboxes each frame
 
     dpg.delete_item(dl, children_only=True)
     rankings.tick()
@@ -328,6 +344,17 @@ def draw_rankings(dl, vw, vh, fonts=None):
     _draw_podium_cards(dl)
     _draw_challenger_rows(dl)
     _draw_rest_rows(dl)
+
+    # Click-to-scout: detect clicks on player names
+    if dpg.is_mouse_button_clicked(0) and _name_hitboxes:
+        mouse = dpg.get_mouse_pos(local=False)
+        vp    = dpg.get_viewport_pos()
+        rx    = mouse[0] - vp[0] - 68   # subtract sidebar width
+        ry    = mouse[1] - vp[1] - 52   # subtract app titlebar
+        for (x1, y1, x2, y2, pname) in _name_hitboxes:
+            if x1 <= rx <= x2 and y1 <= ry <= y2:
+                state.nav_to_scout = pname
+                break
 
     # Ripple effects
     now_ms = time.monotonic() * 1000
@@ -487,8 +514,9 @@ def _draw_challenger_rows(dl):
              (*C["txt2"][:3], al), 18, "raj_20")
         _hex(dl, rx+xo+90, ry+CHAL_H//2, 26,
              C["panel"], C["rule_dark"], label=name[:2], alpha=al)
-        _txt(dl, rx+xo+122, ry+CHAL_H//2-18, name,
-             (*C["txt"][:3], al), 20, "raj_20")
+        raw = p.get("name", "")
+        _name_link(dl, rx+xo+122, ry+CHAL_H//2-18, name,
+                   raw, (*C["txt"][:3], al), 20, "raj_20")
         _txt(dl, rx+xo+122, ry+CHAL_H//2+6, f"AVG TIER {avg}  ·  RANK {rs}",
              (*C["txt_dim"][:3], al), 11, "raj_r_12")
         _txt(dl, rx+xo+row_w-110, ry+CHAL_H//2-14, fs,
@@ -528,10 +556,11 @@ def _draw_rest_rows(dl):
         fs     = str(p.get("final_score", p.get("score", "?")))
         rating = str(p.get("rating", tier[:1].upper()))
 
+        raw2 = p.get("name", "")
         _txt(dl, rx+xo+14, ry+ROW_H//2-11, f"#{rank}",
              (*C["txt2"][:3], al), 16, "raj_18")
-        _txt(dl, rx+xo+56, ry+ROW_H//2-11, name,
-             (*C["txt"][:3], al), 16, "raj_18")
+        _name_link(dl, rx+xo+56, ry+ROW_H//2-11, name,
+                   raw2, (*C["txt"][:3], al), 16, "raj_18")
         _txt(dl, rx+xo+row_w-90, ry+ROW_H//2-11, fs,
              (*C["gold"][:3], al), 16, "raj_18")
         _badge(dl, rx+xo+row_w-118, ry+ROW_H//2, rating, tier, al, r=20)

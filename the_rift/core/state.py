@@ -38,6 +38,7 @@ class AppState:
         # UI navigation
         self.active_tab      = "rankings"   # "rankings"|"draft"|"scout"|"inhouse"|"tierlist"|"settings"|"commands"
         self.prev_tab        = None
+        self.nav_to_scout    = None         # set to a player name to navigate → scout tab
 
         # Splash
         self.splash_done     = False

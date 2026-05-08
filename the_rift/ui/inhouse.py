@@ -53,6 +53,17 @@ _DEMO_SPARKLINES = {
 
 _BY_NAME = {p["player"]: p for p in _DEMO_LEADERBOARD}
 
+
+def update_live_data(players, champs):
+    """
+    Called from main.py after live data loads.
+    Replaces _BY_NAME and _DEMO_CHAMPS with real inhouse data so the detail
+    panel shows live stats instead of demo values.
+    """
+    global _BY_NAME
+    _BY_NAME = {p["player"]: p for p in players} if players else _BY_NAME
+    _DEMO_CHAMPS.update(champs)
+
 # ---------------------------------------------------------------------------
 # "Game Logged" notification
 # ---------------------------------------------------------------------------

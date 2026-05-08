@@ -654,6 +654,21 @@ def main():
                 rankings_state.begin_reveal(data)
             threading.Thread(target=_start_reveal, daemon=True).start()
 
+        # Rankings → Scout navigation (click player name on rankings page)
+        if state.nav_to_scout:
+            target = state.nav_to_scout
+            state.nav_to_scout = None
+            # Ensure scout has data loaded
+            if scout_state.phase == scout_state.__class__.__mro__[0] or \
+               not scout_state.players:
+                if live.loaded and live.scout:
+                    scout_state.begin_load(live.scout)
+            state.active_tab = "scout"
+            # Auto-select the player after a brief delay for the tab animation
+            def _nav_select(name=target):
+                scout_state.select(name)
+            anim.tween(0, 1, 1, "linear", delay_ms=200, on_done=_nav_select)
+
         # Populate scout + inhouse tabs with live data when available
         if live.loaded and not _scout_populated[0] and live.scout:
             _scout_populated[0] = True
@@ -661,8 +676,8 @@ def main():
 
         if live.loaded and not _inhouse_populated[0] and live.inhouse:
             _inhouse_populated[0] = True
-            from ui.inhouse import _DEMO_CHAMPS as _ih_demo_champs
-            _ih_demo_champs.update(live.inhouse_champs)
+            from ui.inhouse import update_live_data as _ih_update
+            _ih_update(live.inhouse, live.inhouse_champs)
             inhouse_state.begin_load(live.inhouse)
 
         # Splash overlay
