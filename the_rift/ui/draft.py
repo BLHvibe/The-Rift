@@ -11,6 +11,8 @@ import math, time
 import dearpygui.dearpygui as dpg
 from theme import C, RANK_COLORS
 from core.animations import anim, Ripple
+from data.reader import live
+from data.config import load_config
 
 # ---------------------------------------------------------------------------
 # Team builder window config
@@ -18,28 +20,25 @@ from core.animations import anim, Ripple
 _TB_WIN    = "draft_team_builder"
 _TB_BUILT  = [False]
 
-# ---------------------------------------------------------------------------
-# Demo data — replaced by real Sheets player list when wired
-# ---------------------------------------------------------------------------
-_ALL_PLAYERS = [
-    {"name": "Phantom",  "tier": "Challenger",  "score": 2840},
-    {"name": "Ironclad", "tier": "Grandmaster", "score": 2710},
-    {"name": "Vex",      "tier": "Master",      "score": 2590},
-    {"name": "Shroud",   "tier": "Diamond",     "score": 2440},
-    {"name": "Blaze",    "tier": "Diamond",     "score": 2310},
-    {"name": "Kira",     "tier": "Emerald",     "score": 2180},
-    {"name": "Dusk",     "tier": "Emerald",     "score": 2050},
-    {"name": "Nox",      "tier": "Platinum",    "score": 1920},
-    {"name": "Cinder",   "tier": "Platinum",    "score": 1800},
-    {"name": "Riven",    "tier": "Gold",        "score": 1670},
-    {"name": "Ember",    "tier": "Gold",        "score": 1540},
-    {"name": "Lyra",     "tier": "Silver",      "score": 1410},
-    {"name": "Torque",   "tier": "Silver",      "score": 1290},
-    {"name": "Flux",     "tier": "Bronze",      "score": 1160},
-    {"name": "Zeal",     "tier": "Bronze",      "score": 1040},
-]
-_PLAYER_NAMES = ["— Select —"] + [p["name"] for p in _ALL_PLAYERS]
-_PLAYER_BY_NAME = {p["name"]: p for p in _ALL_PLAYERS}
+
+def _get_player_pool():
+    """Return player list from live rankings, falling back to config players."""
+    if live.loaded and live.rankings:
+        return list(live.rankings)
+    cfg_players = load_config().get("players", [])
+    if cfg_players:
+        return [{"name": p if isinstance(p, str) else p.get("name", str(p)),
+                 "tier": "Unranked", "final_score": 50.0, "score": 50.0}
+                for p in cfg_players]
+    return []
+
+
+def _player_score(p):
+    """Return a float strength score for a player dict."""
+    try:
+        return float(p.get("final_score", p.get("score", 50.0)))
+    except (TypeError, ValueError):
+        return 50.0
 
 _ROLES = ["TOP", "JGL", "MID", "BOT", "SUP"]
 
@@ -105,6 +104,8 @@ class DraftState:
         self.analyse_t        = 0.0
         self._landed          = 0
         self._total           = 0
+        self.blue_avg         = 0.0  # average final_score for blue team
+        self.red_avg          = 0.0  # average final_score for red team
 
     def reset(self):
         self.__init__()
@@ -232,8 +233,9 @@ def _open_team_builder(vw, vh):
     if dpg.does_item_exist(_TB_WIN):
         return
 
-    # Player names for dropdowns (skip "— Select —" sentinel)
-    names = [p["name"] for p in _ALL_PLAYERS]
+    # Player names for dropdowns — use live rankings or config fallback
+    pool  = _get_player_pool()
+    names = [p["name"] for p in pool] if pool else [f"Player {i}" for i in range(1, 11)]
 
     win_w = min(1000, vw - 160)
     win_h = 520
@@ -307,20 +309,33 @@ def _open_team_builder(vw, vh):
 
 
 def _on_begin_analysis():
+    pool = _get_player_pool()
+    pool_by_name = {p["name"]: p for p in pool}
+
     blue_players, red_players = [], []
     for i, role in enumerate(_ROLES):
         bn = dpg.get_value(f"tb_blue_{i}")
         rn = dpg.get_value(f"tb_red_{i}")
-        bp = dict(_PLAYER_BY_NAME.get(bn, {"name": bn, "tier": "Unranked", "score": 0}))
-        rp = dict(_PLAYER_BY_NAME.get(rn, {"name": rn, "tier": "Unranked", "score": 0}))
+        bp = dict(pool_by_name.get(bn, {"name": bn, "tier": "Unranked", "final_score": 50.0, "score": 50.0}))
+        rp = dict(pool_by_name.get(rn, {"name": rn, "tier": "Unranked", "final_score": 50.0, "score": 50.0}))
         bp["role"] = role
         rp["role"] = role
         blue_players.append(bp)
         red_players.append(rp)
 
+    blue_avg = sum(_player_score(p) for p in blue_players) / max(len(blue_players), 1)
+    red_avg  = sum(_player_score(p) for p in red_players)  / max(len(red_players),  1)
+
+    total   = blue_avg + red_avg
+    win_pct = (blue_avg / total * 100) if total > 0 else 50.0
+    win_pct = max(25.0, min(75.0, win_pct))
+
+    draft.blue_avg = blue_avg
+    draft.red_avg  = red_avg
+
     if dpg.does_item_exist(_TB_WIN):
         dpg.delete_item(_TB_WIN)
-    draft.start_assembly(blue_players, red_players, _DEMO_WIN_PCT)
+    draft.start_assembly(blue_players, red_players, win_pct)
 
 
 def _close_team_builder():
@@ -423,9 +438,15 @@ def _draw_team_area(dl, vw, team_h):
         dpg.draw_rectangle((center + meter_half, 0),(vw, team_h),
                             fill=(58,10,10,rf), color=(0,0,0,0), parent=dl)
 
-    # Team labels
+    # Team labels + average scores (shown once results are in)
     _txt(dl, 24, 14, "BLUE TEAM", (*C["platinum"][:3], 220), 20, "raj_sb_22")
     _txt(dl, vw - 170, 14, "RED TEAM", (220, 90, 90, 220), 20, "raj_sb_22")
+    if draft.phase in (DraftPhase.RESULTS, DraftPhase.DONE) and draft.panel_alpha > 0:
+        al = draft.panel_alpha
+        _txt(dl, 24, 38, f"avg score: {draft.blue_avg:.1f}",
+             (*C["txt_dim"][:3], al), 14, "raj_r_14")
+        _txt(dl, vw - 170, 38, f"avg score: {draft.red_avg:.1f}",
+             (220, 90, 90, al), 14, "raj_r_14")
 
     # Center divider
     dpg.draw_line((center, 0),(center, team_h),

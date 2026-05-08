@@ -12,6 +12,7 @@ from core.animations import anim
 _OVERLAY_TAGS = {
     "settings": "settings_overlay_win",
     "commands": "commands_overlay_win",
+    "feed":     "feed_overlay_win",
 }
 
 def _cleanup_overlay(tab_id):
@@ -34,6 +35,7 @@ TABS = [
     ("tierlist",  "TIER LIST", "_draw_layers"),
     ("settings",  "SETTINGS",  "_draw_gear"),
     ("commands",  "COMMANDS",  "_draw_terminal"),
+    ("feed",      "ACTIVITY",  "_draw_feed_icon"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -150,6 +152,16 @@ def _draw_terminal(dl, cx, cy, size, color):
                   color=color, thickness=2, parent=dl)
 
 
+def _draw_feed_icon(dl, cx, cy, size, color):
+    """Three horizontal lines of decreasing width (Activity Feed)."""
+    w1 = size * 0.48
+    w2 = size * 0.36
+    w3 = size * 0.24
+    ys = [cy - size*0.22, cy, cy + size*0.22]
+    for y, hw in zip(ys, [w1, w2, w3]):
+        dpg.draw_line((cx - hw, y), (cx + hw, y), color=color, thickness=2, parent=dl)
+
+
 _DRAW_FNS = {
     "_draw_swords":         _draw_swords,
     "_draw_shield":         _draw_shield,
@@ -158,6 +170,7 @@ _DRAW_FNS = {
     "_draw_layers":         _draw_layers,
     "_draw_gear":           _draw_gear,
     "_draw_terminal":       _draw_terminal,
+    "_draw_feed_icon":      _draw_feed_icon,
 }
 
 # ---------------------------------------------------------------------------

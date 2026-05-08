@@ -267,14 +267,14 @@ def _hex(dl, cx, cy, r, fill, border, label="?", alpha=255):
                   color=(*C["txt"][:3], alpha), size=11, parent=dl)
 
 
-def _badge(dl, cx, cy, abbr, tier, alpha=255):
-    bc = RANK_COLORS.get(tier, RANK_COLORS["Unranked"])
-    r  = 18
-    pts = [(cx, cy-r), (cx+r, cy), (cx, cy+r), (cx-r, cy)]
-    dpg.draw_polygon(pts, fill=(*bc[:3], alpha),
-                     color=(*C["bg"][:3], alpha), thickness=1, parent=dl)
-    dpg.draw_text((cx - len(abbr)*4, cy - 7), abbr,
-                  color=(*C["txt"][:3], alpha), size=12, parent=dl)
+def _badge(dl, cx, cy, abbr, tier, alpha=255, r=28):
+    bc  = RANK_COLORS.get(tier, RANK_COLORS["Unranked"])
+    dpg.draw_circle((cx, cy), r, fill=(*bc[:3], alpha),
+                    color=(*C["bg"][:3], int(alpha*0.6)), thickness=2, parent=dl)
+    fs  = max(12, int(r * 0.72))
+    off = len(abbr) * int(fs * 0.32)
+    dpg.draw_text((cx - off, cy - fs//2), abbr,
+                  color=(*C["bg"][:3], alpha), size=fs, parent=dl)
 
 
 def _shimmer(dl, x1, y1, x2, y2, t, alpha=45):
@@ -412,17 +412,25 @@ def _draw_podium_cards(dl):
 
         name = p.get("name", "Unknown").upper()
 
+        ts     = str(p.get("tier_score", "?"))
+        rs     = str(p.get("rank_score", "?"))
+        fs     = str(p.get("final_score", p.get("score", "?")))
+        avg    = str(p.get("avg_tier", ""))
+        rating = str(p.get("rating", tier[:1].upper()))
+
         if rank == 1:
             label_col = (*accent_color[:3], al)
             _txt(dl, x1+20, y1+18, "CHAMPION", label_col, 14, "raj_sb_18")
             _txt(dl, x1+20, y1+44, "NO.", (*C["txt_dim"][:3], al), 18, "raj_sb_18")
             _txt(dl, x1+78, y1+28, "1", (*C["gold_lt"][:3], al), 90, "raj_72")
             _txt(dl, x1+20, y1+152, name, (*C["gold"][:3], al), 32, "raj_36")
-            _txt(dl, x2-150, y1+72, str(p.get("score", 0)),
+            _txt(dl, x2-150, y1+72, fs,
                  (*C["gold_lt"][:3], al), 44, "raj_44")
-            _badge(dl, x2-34, y1+28, tier[:2].upper(), tier, al)
+            _badge(dl, x2-44, y1+44, rating, tier, al, r=38)
             dpg.draw_line((x1+20, y1+192),(x1+col_w-30, y1+192),
                           color=(*C["gold_dk"][:3], al), thickness=1, parent=dl)
+            _txt(dl, x1+20, y1+202, f"TIER {ts}  ·  RANK {rs}",
+                 (*C["txt_dim"][:3], al), 12, "raj_r_12")
             _hex(dl, x2-70, y1+h-52, 44, C["card_hover"],
                  (*C["gold"][:3], al), label=name[:2], alpha=al)
         else:
@@ -431,9 +439,11 @@ def _draw_podium_cards(dl):
             _txt(dl, x1+16, y1+32, "NO.", (*C["txt_dim"][:3], al), 14, "raj_sb_14")
             _txt(dl, x1+66, y1+18, str(rank), (*C["gold_lt"][:3], al), 68, "raj_56")
             _txt(dl, x1+16, y1+118, name, (*C["txt"][:3], al), 24, "raj_28")
-            _txt(dl, x2-120, y1+56, str(p.get("score", 0)),
+            _txt(dl, x2-120, y1+56, fs,
                  (*C["gold_lt"][:3], al), 32, "raj_36")
-            _badge(dl, x2-30, y1+24, tier[:2].upper(), tier, al)
+            _txt(dl, x1+16, y1+168, f"TIER {ts}  ·  RANK {rs}",
+                 (*C["txt_dim"][:3], al), 11, "raj_r_12")
+            _badge(dl, x2-38, y1+34, rating, tier, al, r=30)
             _hex(dl, x2-58, y1+h-42, 36, C["card_hover"],
                  (*border_col[:3], al), label=name[:2], alpha=al)
 
@@ -465,18 +475,25 @@ def _draw_challenger_rows(dl):
                            fill=(*C["gold_dk"][:3], al),
                            color=(0,0,0,0), parent=dl)
 
-        name = p.get("name","Unknown").upper()
-        tier = p.get("tier","Unranked")
+        name   = p.get("name","Unknown").upper()
+        tier   = p.get("tier","Unranked")
+        avg    = str(p.get("avg_tier", ""))
+        fs     = str(p.get("final_score", p.get("score", "?")))
+        ts     = str(p.get("tier_score", "?"))
+        rs     = str(p.get("rank_score", "?"))
+        rating = str(p.get("rating", tier[:1].upper()))
 
-        _txt(dl, rx+xo+16, ry+CHAL_H//2-12, f"#{rank}",
+        _txt(dl, rx+xo+16, ry+CHAL_H//2-18, f"#{rank}",
              (*C["txt2"][:3], al), 18, "raj_20")
         _hex(dl, rx+xo+90, ry+CHAL_H//2, 26,
              C["panel"], C["rule_dark"], label=name[:2], alpha=al)
-        _txt(dl, rx+xo+122, ry+CHAL_H//2-12, name,
+        _txt(dl, rx+xo+122, ry+CHAL_H//2-18, name,
              (*C["txt"][:3], al), 20, "raj_20")
-        _txt(dl, rx+xo+row_w-100, ry+CHAL_H//2-12, str(p.get("score",0)),
+        _txt(dl, rx+xo+122, ry+CHAL_H//2+6, f"AVG TIER {avg}  ·  RANK {rs}",
+             (*C["txt_dim"][:3], al), 11, "raj_r_12")
+        _txt(dl, rx+xo+row_w-110, ry+CHAL_H//2-14, fs,
              (*C["gold"][:3], al), 22, "raj_24")
-        _badge(dl, rx+xo+row_w-136, ry+CHAL_H//2, tier[:2].upper(), tier, al)
+        _badge(dl, rx+xo+row_w-152, ry+CHAL_H//2, rating, tier, al, r=24)
 
 
 def _draw_rest_rows(dl):
@@ -506,13 +523,15 @@ def _draw_rest_rows(dl):
                            color=(0,0,0,0), rounding=2, parent=dl)
         if not p: continue
 
-        name = p.get("name","").upper()
-        tier = p.get("tier","Unranked")
+        name   = p.get("name","").upper()
+        tier   = p.get("tier","Unranked")
+        fs     = str(p.get("final_score", p.get("score", "?")))
+        rating = str(p.get("rating", tier[:1].upper()))
 
         _txt(dl, rx+xo+14, ry+ROW_H//2-11, f"#{rank}",
              (*C["txt2"][:3], al), 16, "raj_18")
         _txt(dl, rx+xo+56, ry+ROW_H//2-11, name,
              (*C["txt"][:3], al), 16, "raj_18")
-        _txt(dl, rx+xo+row_w-90, ry+ROW_H//2-11, str(p.get("score",0)),
+        _txt(dl, rx+xo+row_w-90, ry+ROW_H//2-11, fs,
              (*C["gold"][:3], al), 16, "raj_18")
-        _badge(dl, rx+xo+row_w-124, ry+ROW_H//2, tier[:2].upper(), tier, al)
+        _badge(dl, rx+xo+row_w-118, ry+ROW_H//2, rating, tier, al, r=20)

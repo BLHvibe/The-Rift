@@ -17,15 +17,18 @@ from core.animations import anim
 from core.state import state
 from ui.rankings import rankings as rankings_state, draw_rankings, RankRevealPhase
 from ui.draft import draw_draft
-from ui.scout import draw_scout
-from ui.inhouse import draw_inhouse
-from ui.tierlist import draw_tierlist
+from ui.scout import draw_scout, scout as scout_state
+from ui.inhouse import draw_inhouse, inhouse as inhouse_state
+from ui.tierlist import draw_tierlist, register_wheel_handler
 from ui.settings import draw_settings, close_settings_window
 from ui.commands import draw_commands
+from ui.feed import draw_feed
+from data.reader import live, load_live_data
 
 WIN_W, WIN_H = 1280, 800
 TITLE_H      = 52    # titlebar height
 SIDEBAR_W    = 68    # collapsed sidebar width
+SIDEBAR_EXP  = 200   # expanded sidebar width
 
 # ---------------------------------------------------------------------------
 # Texture loading — single registry, loaded before windows
@@ -372,43 +375,105 @@ def _wrap(text, w):
     return lines
 
 # ---------------------------------------------------------------------------
-# Sidebar (Phase 0 — static icon strip)
+# Sidebar — hover to expand
 # ---------------------------------------------------------------------------
-def _draw_sidebar(dl, h):
-    from ui.sidebar import TABS, ICON_SIZE, ITEM_H, TOP_PAD, _DRAW_FNS, COLLAPSED_W
+_sb_w          = [SIDEBAR_W]   # current animated width
+_sb_tween      = [None]
+_sb_last_w     = [SIDEBAR_W]   # detect width changes for content resize
+
+def _sidebar_tick(vw, vh):
+    """Animate expand/collapse; returns True if a tab was clicked."""
+    from ui.sidebar import TABS, ICON_SIZE, ITEM_H, TOP_PAD, _DRAW_FNS, COLLAPSED_W, _OVERLAY_TAGS
+
+    # Hover detection — mouse over the sidebar column
+    mouse = dpg.get_mouse_pos(local=False)
+    vp    = dpg.get_viewport_pos()
+    rx    = mouse[0] - vp[0]
+    ry    = mouse[1] - vp[1]
+    in_sb = (0 <= rx < _sb_w[0]) and (TITLE_H <= ry < vh)
+
+    if in_sb and _sb_w[0] < SIDEBAR_EXP:
+        if _sb_tween[0] is None or _sb_tween[0].done:
+            start = _sb_w[0]
+            def _on_exp(v):
+                _sb_w[0] = int(v)
+            _sb_tween[0] = anim.tween(start, SIDEBAR_EXP, 180, "out_cubic", on_update=_on_exp)
+    elif not in_sb and _sb_w[0] > COLLAPSED_W:
+        if _sb_tween[0] is None or _sb_tween[0].done:
+            start = _sb_w[0]
+            def _on_col(v):
+                _sb_w[0] = int(v)
+            _sb_tween[0] = anim.tween(start, COLLAPSED_W, 140, "out_cubic", on_update=_on_col)
+
+    # Resize sidebar_win + content_win if width changed
+    sw = _sb_w[0]
+    if sw != _sb_last_w[0]:
+        content_h = vh - TITLE_H
+        dpg.configure_item("sidebar_win", width=sw)
+        dpg.configure_item("sidebar_dl",  width=sw)
+        dpg.configure_item("content_win", width=vw - sw)
+        dpg.configure_item("content_dl",  width=vw - sw)
+        _sb_last_w[0] = sw
+
+    # Redraw sidebar
+    dl = "sidebar_dl"
     dpg.delete_item(dl, children_only=True)
 
-    dpg.draw_rectangle((0,0),(COLLAPSED_W,h), fill=C["panel"], color=(0,0,0,0), parent=dl)
-    dpg.draw_line((COLLAPSED_W-1,0),(COLLAPSED_W-1,h),
-                  color=C["rule_dark"], thickness=1, parent=dl)
+    label_alpha = max(0, int((sw - COLLAPSED_W - 8) / (SIDEBAR_EXP - COLLAPSED_W - 8) * 255))
+    h = vh - TITLE_H
+
+    dpg.draw_rectangle((0,0),(sw,h), fill=C["panel"], color=(0,0,0,0), parent=dl)
+    dpg.draw_line((sw-1,0),(sw-1,h), color=C["rule_dark"], thickness=1, parent=dl)
+
+    # Hovered tab index
+    hov_idx = -1
+    if in_sb:
+        idx = int((ry - vp[1] - TITLE_H - TOP_PAD) // ITEM_H)
+        if 0 <= idx < len(TABS):
+            hov_idx = idx
 
     for i, (tab_id, label, draw_fn_name) in enumerate(TABS):
         iy        = TOP_PAD + i * ITEM_H
         is_active = (tab_id == state.active_tab)
-        icon_col  = C["gold"] if is_active else C["txt2"]
+        is_hov    = (i == hov_idx)
+        icon_col  = C["gold"] if is_active else (C["txt"] if is_hov else C["txt2"])
 
         if is_active:
             dpg.draw_rectangle((0, iy+4),(3, iy+ITEM_H-4),
                                fill=C["gold"], color=(0,0,0,0), parent=dl)
-            dpg.draw_rectangle((3, iy+2),(COLLAPSED_W-2, iy+ITEM_H-2),
-                               fill=(*C["card"][:3], 160), color=(0,0,0,0),
+        if is_active or is_hov:
+            bg_a = 160 if is_active else 70
+            dpg.draw_rectangle((3, iy+2),(sw-2, iy+ITEM_H-2),
+                               fill=(*C["card"][:3], bg_a), color=(0,0,0,0),
                                rounding=4, parent=dl)
+
         fn = _DRAW_FNS.get(draw_fn_name)
         if fn:
             fn(dl, COLLAPSED_W//2, iy+ITEM_H//2, ICON_SIZE, (*icon_col[:3], 255))
 
+        # Labels — fade in as sidebar expands
+        if label_alpha > 0:
+            text_x   = COLLAPSED_W + 10
+            text_col = (*C["gold"][:3], label_alpha) if is_active else \
+                       (*C["txt"][:3],  label_alpha)
+            dpg.draw_text((text_x, iy + ITEM_H//2 - 9), label,
+                          color=text_col, size=16, parent=dl)
+
     # Click handling
-    if dpg.is_mouse_button_clicked(0):
-        mouse  = dpg.get_mouse_pos(local=False)
-        vp     = dpg.get_viewport_pos()
-        rel_x  = mouse[0] - vp[0]
-        rel_y  = mouse[1] - vp[1] - TITLE_H
-        if 0 <= rel_x < COLLAPSED_W:
-            idx = int((rel_y - TOP_PAD) // ITEM_H)
-            if 0 <= idx < len(TABS):
-                new_tab = TABS[idx][0]
-                if new_tab != state.active_tab:
-                    state.active_tab = new_tab
+    clicked = False
+    if dpg.is_mouse_button_clicked(0) and in_sb:
+        idx = int((ry - vp[1] - TITLE_H - TOP_PAD) // ITEM_H)
+        if 0 <= idx < len(TABS):
+            new_tab = TABS[idx][0]
+            if new_tab != state.active_tab:
+                # clean up overlay windows
+                old_tag = _OVERLAY_TAGS.get(state.active_tab)
+                if old_tag and dpg.does_item_exist(old_tag):
+                    dpg.delete_item(old_tag)
+                state.active_tab = new_tab
+                clicked = True
+
+    return clicked
 
 # ---------------------------------------------------------------------------
 # Content routing
@@ -428,6 +493,8 @@ def _draw_content(dl, w, h):
         draw_settings(dl, w, h, _FONTS)
     elif state.active_tab == "commands":
         draw_commands(dl, w, h, _FONTS)
+    elif state.active_tab == "feed":
+        draw_feed(dl, w, h, _FONTS)
     else:
         dpg.delete_item(dl, children_only=True)
         dpg.draw_rectangle((0,0),(w,h), fill=C["bg"], color=(0,0,0,0), parent=dl)
@@ -444,6 +511,7 @@ def main():
     _load_all_textures()
     setup_theme()
     _FONTS = setup_fonts()
+    register_wheel_handler()
 
     # Measure actual rendered width of splash title so centering is exact
     if "cinzel_52" in _FONTS:
@@ -472,7 +540,7 @@ def main():
             pass
         with dpg.group(horizontal=True):
             with dpg.child_window(tag="sidebar_win", width=SIDEBAR_W, height=WIN_H-TITLE_H,
-                                  border=False, no_scrollbar=True):
+                                  border=False, no_scrollbar=True, no_scroll_with_mouse=True):
                 with dpg.drawlist(tag="sidebar_dl", width=SIDEBAR_W, height=WIN_H-TITLE_H):
                     pass
             with dpg.child_window(tag="content_win", width=WIN_W-SIDEBAR_W, height=WIN_H-TITLE_H,
@@ -495,32 +563,33 @@ def main():
     splash = Splash()
     splash.start()
 
-    # Demo rankings data — will be replaced by real Sheets fetch
-    _DEMO_RANKS = [
-        {"name": "Phantom",   "score": 2840, "tier": "Challenger"},
-        {"name": "Ironclad",  "score": 2710, "tier": "Grandmaster"},
-        {"name": "Vex",       "score": 2590, "tier": "Master"},
-        {"name": "Shroud",    "score": 2440, "tier": "Diamond"},
-        {"name": "Blaze",     "score": 2310, "tier": "Diamond"},
-        {"name": "Kira",      "score": 2180, "tier": "Emerald"},
-        {"name": "Dusk",      "score": 2050, "tier": "Emerald"},
-        {"name": "Nox",       "score": 1920, "tier": "Platinum"},
-        {"name": "Cinder",    "score": 1800, "tier": "Platinum"},
-        {"name": "Riven",     "score": 1670, "tier": "Gold"},
-        {"name": "Ember",     "score": 1540, "tier": "Gold"},
-        {"name": "Lyra",      "score": 1410, "tier": "Silver"},
-        {"name": "Torque",    "score": 1290, "tier": "Silver"},
-        {"name": "Flux",      "score": 1160, "tier": "Bronze"},
-        {"name": "Zeal",      "score": 1040, "tier": "Bronze"},
+    # Fallback demo rankings if Sheets data not available
+    _DEMO_RANKS_FALLBACK = [
+        {"name": "Phantom",  "score": 95, "tier": "Challenger"},
+        {"name": "Ironclad", "score": 88, "tier": "Grandmaster"},
+        {"name": "Vex",      "score": 82, "tier": "Master"},
+        {"name": "Shroud",   "score": 74, "tier": "Diamond"},
+        {"name": "Blaze",    "score": 66, "tier": "Diamond"},
+        {"name": "Kira",     "score": 58, "tier": "Emerald"},
+        {"name": "Dusk",     "score": 52, "tier": "Emerald"},
+        {"name": "Nox",      "score": 46, "tier": "Platinum"},
+        {"name": "Cinder",   "score": 40, "tier": "Platinum"},
+        {"name": "Riven",    "score": 36, "tier": "Gold"},
     ]
 
-    # Fake data load (8s) — real load wired when Sheets is connected
-    def _fake_load():
-        time.sleep(8.0)
+    # Live data load — reads Rank Data + Player Stats + InhouseGameLog from Sheets
+    def _on_live_data_ready():
         splash.loading_done = True
-    threading.Thread(target=_fake_load, daemon=True).start()
 
-    _rankings_triggered = [False]
+    def _on_live_data_error(msg):
+        print(f"[live data] {msg}")
+        splash.loading_done = True   # unblock splash even on error; tabs fall back to demo
+
+    load_live_data(on_done=_on_live_data_ready, on_error=_on_live_data_error)
+
+    _rankings_triggered   = [False]
+    _scout_populated      = [False]
+    _inhouse_populated    = [False]
     _last_vp_size       = [0, 0]   # tracks resize
     _f11_was_down       = [False]  # edge-detect for F11
 
@@ -540,16 +609,18 @@ def main():
         # Resize: update all containers when viewport dimensions change
         if vw != _last_vp_size[0] or vh != _last_vp_size[1]:
             _last_vp_size[0], _last_vp_size[1] = vw, vh
-            content_w = vw - 48
+            sw        = _sb_w[0]
+            content_w = vw - sw
             content_h = vh - TITLE_H
             dpg.configure_item("titlebar_dl",  width=vw,        height=TITLE_H)
-            dpg.configure_item("sidebar_win",  width=SIDEBAR_W, height=content_h)
-            dpg.configure_item("sidebar_dl",   width=SIDEBAR_W, height=content_h)
+            dpg.configure_item("sidebar_win",  width=sw,        height=content_h)
+            dpg.configure_item("sidebar_dl",   width=sw,        height=content_h)
             dpg.configure_item("content_win",  width=content_w, height=content_h)
             dpg.configure_item("content_dl",   width=content_w, height=content_h)
-            dpg.configure_item("splash_win",   width=vw,       height=vh)
-            dpg.configure_item("splash_dl",    width=vw,       height=vh)
+            dpg.configure_item("splash_win",   width=vw,        height=vh)
+            dpg.configure_item("splash_dl",    width=vw,        height=vh)
             _draw_titlebar("titlebar_dl", vw)
+            _sb_last_w[0] = -1  # force content resize on next tick
 
         _handle_drag()
 
@@ -570,8 +641,8 @@ def main():
         _draw_titlebar("titlebar_dl", vw)
 
         # Sidebar & content
-        _draw_sidebar("sidebar_dl", vh-TITLE_H)
-        _draw_content("content_dl", vw-SIDEBAR_W, vh-TITLE_H)
+        _sidebar_tick(vw, vh)
+        _draw_content("content_dl", vw-_sb_w[0], vh-TITLE_H)
 
         # Kick off rankings reveal once splash is done
         if state.splash_done and not _rankings_triggered[0]:
@@ -579,8 +650,20 @@ def main():
             rankings_state.begin_loading()
             def _start_reveal():
                 time.sleep(0.5)
-                rankings_state.begin_reveal(_DEMO_RANKS)
+                data = live.rankings if live.loaded and live.rankings else _DEMO_RANKS_FALLBACK
+                rankings_state.begin_reveal(data)
             threading.Thread(target=_start_reveal, daemon=True).start()
+
+        # Populate scout + inhouse tabs with live data when available
+        if live.loaded and not _scout_populated[0] and live.scout:
+            _scout_populated[0] = True
+            scout_state.begin_load(live.scout)
+
+        if live.loaded and not _inhouse_populated[0] and live.inhouse:
+            _inhouse_populated[0] = True
+            from ui.inhouse import _DEMO_CHAMPS as _ih_demo_champs
+            _ih_demo_champs.update(live.inhouse_champs)
+            inhouse_state.begin_load(live.inhouse)
 
         # Splash overlay
         if not state.splash_done:

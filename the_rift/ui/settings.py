@@ -2,6 +2,7 @@
 Settings Tab — Phase 7.
 Config fields wired to data/config.py (reads/writes config.json).
 """
+import threading
 import dearpygui.dearpygui as dpg
 from theme import C
 from data.config import load_config, save_config
@@ -67,16 +68,16 @@ def draw_settings(dl, vw, vh, fonts=None):
     else:
         # Reposition if viewport resized
         dpg.configure_item(_SETTINGS_WIN,
-                           pos=(0, TOP_BAR_H),
-                           width=vw, height=vh-TOP_BAR_H)
+                           pos=(68, TOP_BAR_H),
+                           width=vw-68, height=vh-TOP_BAR_H)
 
 
 def _build_settings_window(vw, vh):
     with dpg.window(tag=_SETTINGS_WIN,
-                    pos=(0, TOP_BAR_H),
-                    width=vw, height=vh-TOP_BAR_H,
+                    pos=(68, TOP_BAR_H),
+                    width=vw-68, height=vh-TOP_BAR_H,
                     no_title_bar=True, no_resize=True,
-                    no_move=True, no_bring_to_display_on_focus=True):
+                    no_move=True, no_focus_on_appearing=True):
 
         dpg.add_spacer(height=PAD)
 
@@ -229,8 +230,30 @@ def _browse_icon():
 
 
 def _verify_riot():
-    dpg.configure_item("set_riot_verify_status",
-                        default_value="⟳  Verifying... (Riot API not yet wired)")
+    riot_id = dpg.get_value("set_icon_riot_id").strip()
+    api_key = dpg.get_value("set_api_key").strip() or settings.api_key
+    if not riot_id or "#" not in riot_id:
+        dpg.configure_item("set_riot_verify_status", default_value="⚠  Enter a Riot ID (Name#TAG)")
+        return
+    name, tag = riot_id.split("#", 1)
+    dpg.configure_item("set_riot_verify_status", default_value="⟳  Verifying...")
+    import requests
+    def _bg():
+        try:
+            url = f"https://{settings.routing}.api.riotgames.com/riot/account/v1/accounts/by-riot-id/{name}/{tag}"
+            r = requests.get(url, headers={"X-Riot-Token": api_key}, timeout=8)
+            if r.status_code == 200:
+                data = r.json()
+                dpg.configure_item("set_riot_verify_status",
+                    default_value=f"✓  Found: {data['gameName']}#{data['tagLine']}")
+            elif r.status_code == 404:
+                dpg.configure_item("set_riot_verify_status", default_value="✗  Riot ID not found.")
+            else:
+                dpg.configure_item("set_riot_verify_status",
+                    default_value=f"✗  API error {r.status_code}")
+        except Exception as e:
+            dpg.configure_item("set_riot_verify_status", default_value=f"✗  {e}")
+    threading.Thread(target=_bg, daemon=True).start()
 
 
 def _save_icon():

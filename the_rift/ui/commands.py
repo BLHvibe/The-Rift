@@ -5,7 +5,7 @@ Fetch Ranks and Log Inhouse run real subprocesses via data scripts.
 import threading, time, queue, subprocess, sys, os
 import dearpygui.dearpygui as dpg
 from theme import C
-from data.config import load_config, script_path
+from data.config import load_config, save_config, script_path
 
 _F = {}
 def set_fonts(f): global _F; _F = f
@@ -83,8 +83,8 @@ def draw_commands(dl, vw, vh, fonts=None):
         _build_commands_window(vw, vh)
     else:
         dpg.configure_item(_CMD_WIN,
-                           pos=(0, TOP_BAR_H),
-                           width=vw, height=vh-TOP_BAR_H)
+                           pos=(68, TOP_BAR_H),
+                           width=vw-68, height=vh-TOP_BAR_H)
 
     # Flush pending log lines into console widget
     if cmds.tick() and dpg.does_item_exist("cmd_console"):
@@ -93,10 +93,10 @@ def draw_commands(dl, vw, vh, fonts=None):
 
 def _build_commands_window(vw, vh):
     with dpg.window(tag=_CMD_WIN,
-                    pos=(0, TOP_BAR_H),
-                    width=vw, height=vh-TOP_BAR_H,
+                    pos=(68, TOP_BAR_H),
+                    width=vw-68, height=vh-TOP_BAR_H,
                     no_title_bar=True, no_resize=True,
-                    no_move=True, no_bring_to_display_on_focus=True):
+                    no_move=True, no_focus_on_appearing=True):
 
         dpg.add_spacer(height=PAD)
 
@@ -295,8 +295,16 @@ def _submit_join():
     if not name or not riot:
         dpg.configure_item("join_status", default_value="⚠  Both fields are required.")
         return
-    _log(f"▶  Joining tier list: {name}  ({riot})", C["gold"][:3])
-    _log("  (Stub: write to Google Sheet in Phase 7)", C["txt_dim"][:3])
-    dpg.configure_item("join_status",
-                        default_value=f"✓  {name} queued for addition.")
-    dpg.add_spacer(height=6, parent=_JOIN_WIN)
+    cfg = load_config()
+    players = cfg.get("players", [])
+    if name in players:
+        dpg.configure_item("join_status", default_value=f"⚠  {name} is already in the roster.")
+        return
+    players.append(name)
+    cfg["players"] = players
+    riot_map = cfg.get("riot_ids", {})
+    riot_map[name] = riot
+    cfg["riot_ids"] = riot_map
+    save_config(cfg)
+    _log(f"✓  {name} ({riot}) added to roster.", C["win"][:3])
+    dpg.configure_item("join_status", default_value=f"✓  {name} added.")

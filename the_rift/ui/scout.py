@@ -111,10 +111,52 @@ _DEMO_REPORTS = {p["name"]: _make_report(p) for p in _DEMO_PLAYERS}
 # ---------------------------------------------------------------------------
 _REPORT_WIN = "scout_report_win"
 
+def _build_live_report(name):
+    """Build a minimal report dict from live scout data when demo data is absent."""
+    p = next((x for x in scout.players if x["name"] == name), None)
+    if not p:
+        return None
+    score  = p.get("score", 0)
+    tier   = p.get("tier", "Unranked")
+    wr     = p.get("wr", 0)
+    kda    = p.get("kda", 0.0)
+    games  = p.get("games", 0)
+    form   = p.get("form", "MIXED")
+    rating = p.get("rating", "?")
+    try:
+        ts = float(p.get("tier_score") or 0)
+        rs = float(p.get("rank_score") or score)
+    except (ValueError, TypeError):
+        ts, rs = 0.0, float(score) if score else 0.0
+    rank = next((i+1 for i, x in enumerate(scout.players) if x["name"] == name), 0)
+    return {
+        "player":           name,
+        "tier":             tier,
+        "score":            score,
+        "power_position":   str(rank),
+        "rating_letter":    rating,
+        "tier_score":       ts,
+        "rank_score":       rs,
+        "scouted_days_ago": 0,
+        "overview": [
+            ("Win Rate",   f"{wr}%"),
+            ("KDA",        f"{kda:.1f}"),
+            ("Games",      str(games)),
+            ("Form",       form),
+        ],
+        "form":         form,
+        "matches":      [],
+        "ban_targets":  [],
+        "top_champs":   p.get("top_champs", []),
+        "roles":        [],
+        "inhouse_games": [],
+    }
+
+
 def _open_report(name, vw, vh):
     if dpg.does_item_exist(_REPORT_WIN):
         dpg.delete_item(_REPORT_WIN)
-    r  = _DEMO_REPORTS.get(name)
+    r = _DEMO_REPORTS.get(name) or _build_live_report(name)
     if not r:
         return
 
@@ -164,9 +206,12 @@ def _rw_header(r, rw):
                 dpg.configure_item(t2, color=bc[:3])
                 if "raj_sb_18" in _F: dpg.bind_item_font(t2, _F["raj_sb_18"])
                 dpg.add_spacer(width=16)
-                days = r["scouted_days_ago"]
-                age_col = (79,168,130) if days<=2 else (200,168,106) if days<=6 else (184,69,53)
-                ta = dpg.add_text(f"  Scouted {days}d ago", color=age_col)
+                days = r.get("scouted_days_ago", None)
+                if days is not None:
+                    age_col = (79,168,130) if days<=2 else (200,168,106) if days<=6 else (184,69,53)
+                    ta = dpg.add_text(f"  Scouted {days}d ago", color=age_col)
+                else:
+                    ta = dpg.add_text("  Live data", color=(79,168,130))
                 if "raj_r_14" in _F: dpg.bind_item_font(ta, _F["raj_r_14"])
     dpg.add_spacer(height=8)
 
@@ -239,6 +284,12 @@ def _rw_form(r):
             t = dpg.add_text(f"{h:<10}", color=C["txt_dim"][:3])
             if "raj_sb_14" in _F: dpg.bind_item_font(t, _F["raj_sb_14"])
     dpg.add_separator()
+
+    if not r.get("matches"):
+        dpg.add_text("  Match history not available for this player.",
+                     color=C["txt_dim"][:3])
+        dpg.add_spacer(height=6)
+        return
 
     for m in r["matches"]:
         win    = m["result"] == "WIN"
@@ -597,7 +648,11 @@ def _draw_table(dl, tx, ty, tw, th, vw, vh):
 
         tier = p.get("tier","Unranked")
         bc   = RANK_COLORS.get(tier,RANK_COLORS["Unranked"])
-        vals = [str(i+1), p["name"], str(p["score"]),
+        try:
+            score_disp = str(int(float(p["score"])))
+        except (ValueError, TypeError):
+            score_disp = str(p.get("score", "?"))
+        vals = [str(i+1), p["name"], score_disp,
                 f"{p['wr']}%", f"{p['kda']:.1f}", str(p["games"]),
                 "  ".join(p["top_champs"][:2])]
 
@@ -660,11 +715,20 @@ def _draw_graph(dl, gx, gy, gw, gh):
     dpg.draw_rectangle((gx+2,gy+2),(gx+gw-2,gy+6), fill=(*C["gold_dk"][:3],ha),
                         color=(0,0,0,0), rounding=2, parent=dl)
 
-    name = scout.selected or (_DEMO_PLAYERS[0]["name"] if _DEMO_PLAYERS else None)
+    name = scout.selected or (scout.players[0]["name"] if scout.players else None) \
+           or (_DEMO_PLAYERS[0]["name"] if _DEMO_PLAYERS else None)
     if not name: return
     history = _SCORE_HISTORY.get(name, [])
-    player  = _BY_NAME.get(name)
-    if not player or not history: return
+    player  = _BY_NAME.get(name) or next((p for p in scout.players if p["name"] == name), None)
+    if not player: return
+    if not history:
+        # Generate placeholder history from current score
+        sc = player.get("score", 0)
+        try:
+            sc = float(sc)
+        except (ValueError, TypeError):
+            sc = 0
+        history = [sc] * 5
 
     _txt(dl, gx+16, gy+14, name.upper(), (*C["gold"][:3],ha), 22, "raj_24")
     tier = player["tier"]
@@ -672,8 +736,9 @@ def _draw_graph(dl, gx, gy, gw, gh):
     _txt(dl, gx+16, gy+42, tier.upper(), (*bc[:3],ha), 14, "raj_sb_16")
 
     sx = gx+16
-    for lbl, val in [("SCORE",str(player["score"])),("W/R",f"{player['wr']}%"),
-                     ("KDA",f"{player['kda']:.1f}"),("GAMES",str(player["games"]))]:
+    sc_display = str(player.get("score", player.get("final_score", "?")))
+    for lbl, val in [("SCORE", sc_display), ("W/R", f"{player.get('wr',0)}%"),
+                     ("KDA", f"{player.get('kda',0.0):.1f}"), ("GAMES", str(player.get("games",0)))]:
         _txt(dl, sx, gy+68, lbl, (*C["txt_dim"][:3],ha), 11, "raj_sb_11")
         _txt(dl, sx, gy+84, val, (*C["txt"][:3],ha), 20, "raj_20")
         sx += gw//4
