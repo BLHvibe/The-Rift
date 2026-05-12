@@ -3,12 +3,61 @@ Tier List Tab — Phase 6.
 Drag-and-drop player cards into S/A/B/C/D/F tier rows.
 Players loaded from config.json.
 """
-import math, time
+import math, time, threading, os
 import dearpygui.dearpygui as dpg
 from theme import C
 from core.animations import anim
 from data.config import load_config, save_config
 from data.reader import write_tier_list
+
+
+def _detect_lcu_summoner():
+    """
+    Read the LCU lockfile and return the current summoner's displayName, or None.
+    Tries common League of Legends install locations on Windows.
+    """
+    candidates = []
+    local_app = os.environ.get("LOCALAPPDATA", "")
+    if local_app:
+        candidates.append(os.path.join(local_app, "Riot Games", "League of Legends", "lockfile"))
+    for drive in ("C:\\", "D:\\", "E:\\"):
+        candidates.append(os.path.join(drive, "Riot Games", "League of Legends", "lockfile"))
+        candidates.append(os.path.join(drive, "Program Files", "Riot Games", "League of Legends", "lockfile"))
+        candidates.append(os.path.join(drive, "Program Files (x86)", "Riot Games", "League of Legends", "lockfile"))
+
+    lockfile = None
+    for path in candidates:
+        if os.path.isfile(path):
+            lockfile = path
+            break
+
+    if not lockfile:
+        return None, "League client not running (lockfile not found)"
+
+    try:
+        with open(lockfile, "r") as f:
+            content = f.read().strip()
+        parts = content.split(":")
+        if len(parts) < 5:
+            return None, "Unexpected lockfile format"
+        _name, _pid, port, password, protocol = parts[0], parts[1], parts[2], parts[3], parts[4]
+    except Exception as e:
+        return None, f"Could not read lockfile: {e}"
+
+    try:
+        import requests
+        from requests.auth import HTTPBasicAuth
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        url = f"https://127.0.0.1:{port}/lol-summoner/v1/current-summoner"
+        r = requests.get(url, auth=HTTPBasicAuth("riot", password),
+                         verify=False, timeout=5)
+        if r.status_code == 200:
+            display = r.json().get("displayName", "")
+            return display or None, "" if display else "No displayName in response"
+        return None, f"LCU returned {r.status_code}"
+    except Exception as e:
+        return None, str(e)
 
 def _load_players():
     cfg = load_config()
@@ -114,6 +163,7 @@ CARD_H      = 52
 CARD_PAD    = 8
 TIER_LBL_W  = 56
 TOP_BAR_H   = 52
+_VP_TITLE_H = 52   # main window titlebar height in viewport coords
 PAD         = 20
 POOL_CARD_W = 150
 POOL_CARD_H = 52
@@ -140,7 +190,7 @@ def draw_tierlist(dl, vw, vh, fonts=None):
     _draw_top_bar(dl, vw)
     _ensure_rater_window(vw, vh)
 
-    rater_bar_h = 40 if not tl.rater_name else 0
+    rater_bar_h = 40  # identity bar is always shown; always reserve space
     content_y   = TOP_BAR_H + rater_bar_h + PAD
     tier_area_h = len(TIERS) * (TIER_H + 4)
     pool_y      = content_y + tier_area_h + 16
@@ -382,17 +432,54 @@ def _handle_drag(vw, vh, content_y, pool_y):
 # Rater identity bar
 # ---------------------------------------------------------------------------
 
+def _detect_identity_bg():
+    """Button callback — detects LCU summoner name in a background thread."""
+    if dpg.does_item_exist("tl_detect_status"):
+        dpg.configure_item("tl_detect_status", default_value="⟳ Detecting…",
+                           color=C["txt_dim"][:3])
+
+    def _bg():
+        display, err = _detect_lcu_summoner()
+        players = _load_players()
+        if display:
+            matched = display if display in players else None
+            if matched:
+                tl.rater_name = matched
+                _save_rater_name(matched)
+                if dpg.does_item_exist("tl_identity_text"):
+                    dpg.configure_item("tl_identity_text",
+                                       default_value=f"✓  {matched}",
+                                       color=C["win"][:3])
+                if dpg.does_item_exist("tl_detect_status"):
+                    dpg.configure_item("tl_detect_status",
+                                       default_value="",
+                                       color=C["txt_dim"][:3])
+            else:
+                if dpg.does_item_exist("tl_detect_status"):
+                    dpg.configure_item("tl_detect_status",
+                                       default_value=f"⚠ '{display}' not in player list",
+                                       color=C["gold_dk"][:3])
+        else:
+            if dpg.does_item_exist("tl_detect_status"):
+                dpg.configure_item("tl_detect_status",
+                                   default_value=f"✗ {err[:60]}",
+                                   color=C["loss"][:3])
+
+    threading.Thread(target=_bg, daemon=True).start()
+
+
 def _ensure_rater_window(vw, vh):
     """
-    Show a slim 'Rating as: [dropdown]' bar below the top bar.
-    Visible whenever a rater is set or needs to be set.
+    Show an identity bar below the top bar.
+    Identity is detected from the LoL client lockfile only — no manual dropdown.
     """
     if not dpg.does_item_exist(_TL_RATER_WIN):
-        players = _load_players()
-        rater   = tl.rater_name
+        rater = tl.rater_name
+        id_text  = f"✓  {rater}" if rater else "Not identified — detect below"
+        id_color = C["win"][:3] if rater else C["txt_dim"][:3]
         with dpg.window(tag=_TL_RATER_WIN,
-                        pos=(68, TOP_BAR_H),
-                        width=vw - 68, height=40,
+                        pos=(68, TOP_BAR_H + _VP_TITLE_H),
+                        width=vw, height=40,
                         no_title_bar=True, no_resize=True,
                         no_move=True, no_focus_on_appearing=True,
                         no_scrollbar=True):
@@ -400,34 +487,29 @@ def _ensure_rater_window(vw, vh):
                 dpg.add_spacer(width=PAD - 8)
                 lbl = dpg.add_text("Rating as:", color=C["txt_dim"][:3])
                 if "raj_sb_14" in _F: dpg.bind_item_font(lbl, _F["raj_sb_14"])
-                dpg.add_spacer(width=8)
-
-                def _on_rater_change(s, a):
-                    tl.rater_name = a
-                    _save_rater_name(a)
-
-                combo = dpg.add_combo(
-                    [""] + players,
-                    tag="tl_rater_combo",
-                    default_value=rater if rater in players else "",
-                    width=220,
-                    callback=_on_rater_change,
-                )
-                if "raj_r_14" in _F: dpg.bind_item_font(combo, _F["raj_r_14"])
-
+                dpg.add_spacer(width=10)
+                dpg.add_text(tag="tl_identity_text",
+                             default_value=id_text, color=id_color)
                 dpg.add_spacer(width=16)
-                if not tl.rater_name:
-                    warn = dpg.add_text("⚠  Select your name before submitting a tier list.",
-                                        color=(*C["gold_dk"][:3], 200))
-                    if "raj_r_12" in _F: dpg.bind_item_font(warn, _F["raj_r_12"])
+                detect_btn = dpg.add_button(
+                    label="Detect from LoL Client",
+                    callback=_detect_identity_bg,
+                    height=26,
+                )
+                if "raj_r_12" in _F: dpg.bind_item_font(detect_btn, _F["raj_r_12"])
+                dpg.add_spacer(width=8)
+                dpg.add_text(tag="tl_detect_status", default_value="",
+                             color=C["txt_dim"][:3])
     else:
         dpg.configure_item(_TL_RATER_WIN,
-                           pos=(68, TOP_BAR_H),
-                           width=vw - 68, height=40)
-        # Keep the combo in sync if tl.rater_name was updated
-        if dpg.does_item_exist("tl_rater_combo"):
-            if dpg.get_value("tl_rater_combo") != tl.rater_name:
-                dpg.set_value("tl_rater_combo", tl.rater_name)
+                           pos=(68, TOP_BAR_H + _VP_TITLE_H),
+                           width=vw, height=40)
+        # Keep the identity text in sync if tl.rater_name was updated externally
+        if dpg.does_item_exist("tl_identity_text"):
+            rater = tl.rater_name
+            dpg.configure_item("tl_identity_text",
+                               default_value=f"✓  {rater}" if rater else "Not identified — detect below",
+                               color=C["win"][:3] if rater else C["txt_dim"][:3])
 
 
 # ---------------------------------------------------------------------------
@@ -441,7 +523,7 @@ def _open_submit_dialog():
     # Require rater identity before allowing submission
     if not tl.rater_name:
         # Flash warning in the rater bar instead of opening dialog
-        tl.submit_status = "⚠  Select your name in the 'Rating as:' bar first."
+        tl.submit_status = "⚠  Detect your identity from the LoL client first."
         tl.submit_flash  = time.monotonic()
         return
 

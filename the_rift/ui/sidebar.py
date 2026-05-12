@@ -14,6 +14,7 @@ _OVERLAY_TAGS = {
     "commands": "commands_overlay_win",
     "feed":     "feed_overlay_win",
     "scout":    "scout_report_panel_win",
+    "tierlist": "tl_rater_win",
 }
 
 def _cleanup_overlay(tab_id):
