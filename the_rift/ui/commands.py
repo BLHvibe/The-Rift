@@ -2,10 +2,11 @@
 Commands / Admin Tab — Phase 7.
 Fetch Ranks and Log Inhouse run real subprocesses via data scripts.
 """
-import threading, time, queue, subprocess, sys, os
+import threading, time, queue, subprocess, sys, os, re
 import dearpygui.dearpygui as dpg
 from theme import C
 from data.config import load_config, save_config, script_path
+from data.reader import live
 
 _F = {}
 def set_fonts(f): global _F; _F = f
@@ -23,6 +24,7 @@ class CommandsState:
         self._max_lines = 500
         self._proc     = None   # current subprocess (for Stop button)
         self._last_run = {}     # script_name → "HH:MM:SS" timestamp string
+        self.progress  = 0.0   # 0.0–1.0, drives the progress bar
 
     def log(self, text, color=None):
         self._log_q.put((text, color or C["txt"][:3]))
@@ -156,7 +158,10 @@ def _build_commands_window(vw, vh):
                              color=C["txt_dim"][:3], wrap=BTN_W)
                 if "raj_r_12" in _F:
                     dpg.bind_item_font(dpg.last_item(), _F["raj_r_12"])
-                dpg.add_spacer(height=24)
+                dpg.add_spacer(height=10)
+                dpg.add_progress_bar(tag="cmd_progress", default_value=0.0,
+                                     width=BTN_W, height=14)
+                dpg.add_spacer(height=14)
 
                 _section_hdr("ROSTER")
                 _cmd_button("▶  JOIN TIER LIST",
@@ -250,7 +255,10 @@ def _run_script(label, script_name, extra_args=None):
         _log("[!] No Google Sheet URL set — configure it in Settings.", C["loss"][:3])
         return
 
-    cmds.running = True
+    cmds.running  = True
+    cmds.progress = 0.0
+    if dpg.does_item_exist("cmd_progress"):
+        dpg.set_value("cmd_progress", 0.0)
     _log(f"▶  {label}", C["gold"][:3])
 
     # Build timestamp-widget tag key
@@ -280,6 +288,7 @@ def _run_script(label, script_name, extra_args=None):
                 bufsize=1,
             )
             cmds._proc = proc
+            _PROGRESS_RE = re.compile(r'\[(\d+)/(\d+)\]')
             for line in proc.stdout:
                 line = line.rstrip()
                 if line:
@@ -287,6 +296,14 @@ def _run_script(label, script_name, extra_args=None):
                           else C["loss"][:3] if line.startswith("[ERR") or "error" in line.lower() \
                           else C["txt"][:3]
                     _log(line, col)
+                    m = _PROGRESS_RE.search(line)
+                    if m:
+                        n, total = int(m.group(1)), int(m.group(2))
+                        if total > 0:
+                            pct = n / total
+                            cmds.progress = pct
+                            if dpg.does_item_exist("cmd_progress"):
+                                dpg.set_value("cmd_progress", pct)
             try:
                 proc.wait(timeout=300)
             except subprocess.TimeoutExpired:
@@ -301,8 +318,14 @@ def _run_script(label, script_name, extra_args=None):
                 tag = _TS_TAG.get(ts_key)
                 if tag and dpg.does_item_exist(tag):
                     dpg.configure_item(tag, default_value=ts_str)
+                cmds.progress = 1.0
+                if dpg.does_item_exist("cmd_progress"):
+                    dpg.set_value("cmd_progress", 1.0)
             else:
                 _log(f"[!] Exited with code {proc.returncode}.", C["loss"][:3])
+                cmds.progress = 0.0
+                if dpg.does_item_exist("cmd_progress"):
+                    dpg.set_value("cmd_progress", 0.0)
         except FileNotFoundError:
             _log(f"[ERR] Script not found: {script_name}", C["loss"][:3])
         except Exception as e:
@@ -389,16 +412,23 @@ def _submit_join():
     if not name or not riot:
         dpg.configure_item("join_status", default_value="⚠  Both fields are required.")
         return
-    cfg = load_config()
-    players = cfg.get("players", [])
-    if name in players:
+    # Check against live sheet roster first, fall back to config
+    current_players = list(live.players) if (live.loaded and live.players) \
+                      else load_config().get("players", [])
+    if name in current_players:
         dpg.configure_item("join_status", default_value=f"⚠  {name} is already in the roster.")
         return
-    players.append(name)
+    # Persist to config as local cache (sheet is the authoritative source)
+    cfg = load_config()
+    players = cfg.get("players", [])
+    if name not in players:
+        players.append(name)
     cfg["players"] = players
-    riot_map = cfg.get("riot_ids", {})
-    riot_map[name] = riot
-    cfg["riot_ids"] = riot_map
+    riot_map = cfg.get("summoner_map", {})
+    game_name = riot.split("#")[0].strip() if "#" in riot else riot
+    if game_name:
+        riot_map[game_name] = name
+    cfg["summoner_map"] = riot_map
     save_config(cfg)
     _log(f"✓  {name} ({riot}) added to roster.", C["win"][:3])
     dpg.configure_item("join_status", default_value=f"✓  {name} added.")

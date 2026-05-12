@@ -237,7 +237,7 @@ def draw_feed(dl, vw, vh, fonts=None):
 
     # Loading spinner hint
     if _feed.loading:
-        _txt(dl, PAD + 240, 18, "loading…", (*C["txt_dim"][:3], 160), 13, "raj_r_14")
+        _txt(dl, PAD + 240, 18, "loading…", (*C["txt_dim"][:3], 160), 16, "raj_r_16")
 
     # REFRESH button
     bw, bh = 140, 34
@@ -246,7 +246,7 @@ def draw_feed(dl, vw, vh, fonts=None):
     dpg.draw_rectangle((bx, by), (bx + bw, by + bh),
                         fill=(*C["gold_dk"][:3], 200),
                         color=(*C["gold"][:3], 200), rounding=4, parent=dl)
-    _txt(dl, bx + 14, by + 8, "◆  REFRESH", (*C["gold_lt"][:3], 240), 15, "raj_sb_16")
+    _txt(dl, bx + 14, by + 8, "◆  REFRESH", (*C["gold_lt"][:3], 240), 17, "raj_sb_18")
 
     # Click — refresh from sheet first, fallback to local
     if dpg.is_mouse_button_clicked(0):

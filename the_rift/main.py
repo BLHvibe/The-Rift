@@ -2,7 +2,7 @@
 The Rift — main entry point.
 Phase 0: foundation shell with splash screen overlay.
 """
-import sys, os, time, math, threading
+import sys, os, time, math, threading, random as _random
 
 _here = os.path.dirname(os.path.abspath(__file__))
 if _here not in sys.path:
@@ -13,6 +13,7 @@ from PIL import Image
 import numpy as np
 
 from theme import C, setup_theme, setup_fonts
+from data.tips import TIPS as _TIPS
 from core.animations import anim
 from core.state import state
 from ui.rankings import rankings as rankings_state, draw_rankings, RankRevealPhase
@@ -25,7 +26,7 @@ from ui.commands import draw_commands
 from ui.feed import draw_feed
 from data.reader import live, load_live_data, check_for_update
 
-__version__ = "1.0.0"   # bump this on each release
+__version__ = "2.0.0"   # bump this on each release
 
 WIN_W, WIN_H = 1280, 800
 TITLE_H      = 52    # titlebar height
@@ -227,7 +228,7 @@ class Splash:
         self.fact_alpha   = 0.0
         self.pulse_t      = 0.0
         self.fade_alpha   = 255.0
-        self.fun_fact     = "The term 'The Rift' refers to the divide between victory and defeat."
+        self.fun_fact     = _random.choice(_TIPS)
         self.loading_done = False
 
     def start(self):
@@ -345,11 +346,13 @@ def _draw_splash(dl, sp: Splash, vw, vh):
                            color=(*C["rule_gold"][:3], fa2),
                            rounding=4, parent=dl)
         lbl = dpg.draw_text((crd_x+14, crd_y+10), "DID YOU KNOW",
-                            color=(*C["gold_dk"][:3], fa2), size=10, parent=dl)
-        lines = _wrap(sp.fun_fact, 54)
-        for i, line in enumerate(lines[:2]):
-            ft = dpg.draw_text((crd_x+14, crd_y+25+i*18), line,
-                               color=(*C["txt2"][:3], fa2), size=12, parent=dl)
+                            color=(*C["gold_dk"][:3], fa2), size=14, parent=dl)
+        if "raj_sb_14" in _FONTS: dpg.bind_item_font(lbl, _FONTS["raj_sb_14"])
+        lines = _wrap(sp.fun_fact, 48)
+        for i, line in enumerate(lines[:3]):
+            ft = dpg.draw_text((crd_x+14, crd_y+30+i*20), line,
+                               color=(*C["txt2"][:3], fa2), size=16, parent=dl)
+            if "raj_r_16" in _FONTS: dpg.bind_item_font(ft, _FONTS["raj_r_16"])
 
     # --- Loading bar ---
     if sp.phase in (SplashPhase.LOADING, SplashPhase.FADE_OUT):

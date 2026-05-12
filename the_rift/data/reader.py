@@ -18,16 +18,21 @@ class LiveData:
         self.inhouse_champs = {}   # player_name → list of champ dicts
         self.primary_roles  = {}   # player_name → "TOP"/"JGL"/"MID"/"BOT"/"SUP"
         self.activity       = []   # list of activity event dicts (newest first)
+        self.players        = []   # ordered list of real player display names (from Players sheet)
+        self.summoner_map   = {}   # gameName (Riot ID game part) → display name
         self.loaded     = False
         self.loading    = False
         self.error      = None
         self._lock      = threading.Lock()
 
-    def set(self, rankings, scout, inhouse, inhouse_champs, primary_roles=None):
+    def set(self, rankings, scout, inhouse, inhouse_champs, primary_roles=None,
+            players=None, summoner_map=None):
         with self._lock:
             self.rankings        = rankings
             self.scout           = scout
             self.inhouse         = inhouse
+            if players      is not None: self.players      = players
+            if summoner_map is not None: self.summoner_map = summoner_map
             self.inhouse_champs  = inhouse_champs
             self.primary_roles   = primary_roles or {}
             self.loaded          = True
@@ -61,8 +66,9 @@ def load_live_data(on_done=None, on_error=None):
     def _bg():
         try:
             cfg = load_config()
-            rankings, scout, inhouse, inhouse_champs, primary_roles = _read_sheets(cfg)
-            live.set(rankings, scout, inhouse, inhouse_champs, primary_roles)
+            rankings, scout, inhouse, inhouse_champs, primary_roles, players, summoner_map = _read_sheets(cfg)
+            live.set(rankings, scout, inhouse, inhouse_champs, primary_roles,
+                     players=players, summoner_map=summoner_map)
             if on_done:
                 on_done()
         except Exception as e:
@@ -87,11 +93,76 @@ def _read_sheets(cfg):
     sh   = gc.open_by_url(cfg["sheet_url"]) if cfg["sheet_url"].startswith("http") \
            else gc.open(cfg["sheet_url"])
 
-    rankings                  = _read_final_rankings(sh)
-    scout                     = _read_player_stats(sh, rankings)
-    known_names               = {r["name"] for r in rankings}
+    players, summoner_map      = _read_players_sheet(sh)
+    rankings = _read_final_rankings(sh)
+    # Supplement rankings with games count from Rank Data if Final Rankings has none
+    if not any(r.get("games", 0) for r in rankings):
+        rank_games = _read_rank_data_games(sh)
+        for r in rankings:
+            if r["name"] in rank_games:
+                r["games"] = rank_games[r["name"]]
+    scout                      = _read_player_stats(sh, rankings)
+    known_names                = {r["name"] for r in rankings}
     inhouse, ih_ch, prim_roles = _read_inhouse(sh, known_names)
-    return rankings, scout, inhouse, ih_ch, prim_roles
+    return rankings, scout, inhouse, ih_ch, prim_roles, players, summoner_map
+
+
+def _read_rank_data_games(sh):
+    """Read games count per player from Rank Data tab (supplemental source)."""
+    try:
+        ws   = sh.worksheet("Rank Data")
+        rows = ws.get_all_values()
+        result = {}
+        for row in rows[2:]:
+            if len(row) < 11 or not row[1]:
+                continue
+            name = str(row[1]).strip()
+            try:
+                games = int(float(row[10]))
+                if games > 0:
+                    result[name] = games
+            except (ValueError, IndexError):
+                pass
+        return result
+    except Exception:
+        return {}
+
+
+# ---------------------------------------------------------------------------
+# Players tab → roster + summoner map
+# ---------------------------------------------------------------------------
+
+def _read_players_sheet(sh):
+    """
+    Read the 'Players' sheet.
+    Expected columns: [index, display_name, riot_id, ...]
+    Only rows with a '#' in the riot_id column are real players (others are placeholders).
+    Returns:
+        players     – ordered list of display names
+        summoner_map – {gameName (part before '#'): display_name}
+    """
+    try:
+        ws   = sh.worksheet("Players")
+        rows = ws.get_all_values()
+    except Exception:
+        return [], {}
+
+    players      = []
+    summoner_map = {}
+    for row in rows:
+        if len(row) < 3:
+            continue
+        name    = str(row[1]).strip()
+        riot_id = str(row[2]).strip()
+        if not name or not riot_id or "#" not in riot_id:
+            continue
+        if name.upper() in ("PLAYER NAME", "NAME", "PLAYER", "TBD", "TBA", ""):
+            continue
+        players.append(name)
+        game_name = riot_id.split("#")[0].strip()
+        if game_name:
+            summoner_map[game_name] = name
+    return players, summoner_map
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +192,8 @@ def _read_final_rankings(sh):
         r = [str(c).strip() for c in row[:8]]
         rank_str, name, avg_tier, tier_score, rank_score_raw, rank_score, final, rating = r
 
-        if not name or name.lower() in ("name", "player"):
+        if not name or name.lower() in ("name", "player", "tbd", "tba") \
+                or name.upper().startswith("PLAYER"):
             continue
         # Stop at blank rank or separator rows
         if not rank_str and not name:
@@ -255,7 +327,7 @@ def _read_player_stats(sh, rankings):
         #       TopChamp3, Mastery3, Recent W-L, Recent WR%, Avg KDA,
         #       Avg Kills, Avg Deaths, Avg Assists, Hot/Cold
         for row in rows[2:]:
-            if len(row) < 12 or not row[1]:
+            if len(row) < 2 or not row[1]:
                 continue
             name = str(row[1]).strip()
             top_champs = []
@@ -264,16 +336,40 @@ def _read_player_stats(sh, rankings):
                 if cn and cn != "-":
                     top_champs.append(cn)
             try:
-                kda = float(row[11]) if row[11] else 0.0
+                kda = float(row[11]) if len(row) > 11 and row[11] else 0.0
             except ValueError:
                 kda = 0.0
             form = str(row[15]).strip().upper() if len(row) > 15 else "MIXED"
             if form not in ("HOT","COLD","MIXED"):
                 form = "MIXED"
+            # Parse WR% from col 2
+            wr_from_stats = 0
+            try:
+                wr_raw = str(row[2]).strip().replace("%", "") if len(row) > 2 else ""
+                if wr_raw:
+                    wr_from_stats = int(float(wr_raw))
+            except (ValueError, TypeError):
+                pass
+            # Parse games from "Recent W-L" column (e.g. "24-16")
+            games_fallback = 0
+            wins_fallback  = 0
+            recent_wl = str(row[9]).strip() if len(row) > 9 else ""
+            if recent_wl and "-" in recent_wl:
+                try:
+                    parts = recent_wl.split("-", 1)
+                    w2 = int(parts[0].strip())
+                    l2 = int(parts[1].strip())
+                    games_fallback = w2 + l2
+                    wins_fallback  = w2
+                except (ValueError, IndexError):
+                    pass
             stats_by_name[name] = {
-                "top_champs": top_champs,
-                "kda":        kda,
-                "form":       form,
+                "top_champs":      top_champs,
+                "kda":             kda,
+                "form":            form,
+                "wr_from_stats":   wr_from_stats,
+                "games_fallback":  games_fallback,
+                "wins_fallback":   wins_fallback,
             }
     except Exception:
         pass
@@ -288,10 +384,15 @@ def _read_player_stats(sh, rankings):
             score = float(r.get("final_score") or r.get("score") or 0)
         except (ValueError, TypeError):
             score = 0.0
+        # WR: prefer rankings value, then Player Stats WR%, then 0
         try:
             wr = int(float(r.get("wr") or 0))
         except (ValueError, TypeError):
             wr = 0
+        if wr == 0:
+            wr = stats.get("wr_from_stats", 0)
+        # Games: prefer rankings supplement, then Player Stats W-L parse
+        games_val = r.get("games", 0) or stats.get("games_fallback", 0)
         scout.append({
             "name":        name,
             "tier":        r["tier"],
@@ -303,7 +404,7 @@ def _read_player_stats(sh, rankings):
             "rank":        r.get("rank", 0),
             "wr":          wr,
             "kda":         round(stats.get("kda", 0.0), 1),
-            "games":       r.get("games", 0),
+            "games":       games_val,
             "top_champs":  stats.get("top_champs", []),
             "form":        stats.get("form", "MIXED"),
         })
@@ -352,14 +453,14 @@ def _read_inhouse(sh, known_names=None):
     if not records:
         return [], {}, {}
 
-    # Only count full 5v5 games (10 players per gameId)
+    # Group records by gameId; accept games with 2–10 players (relaxed from strict 10)
     games_by_id = defaultdict(list)
     for r in records:
         games_by_id[r["gameId"]].append(r)
 
     valid_records = []
     for gid, recs in games_by_id.items():
-        if len(recs) == 10:
+        if 2 <= len(recs) <= 10:
             valid_records.extend(recs)
 
     if not valid_records:
@@ -369,6 +470,7 @@ def _read_inhouse(sh, known_names=None):
     player_agg = defaultdict(lambda: {
         "games": set(), "wins": 0, "kills": 0, "deaths": 0,
         "assists": 0, "damage": 0, "gold": 0,
+        "game_results": [],  # chronological list of 1=win / 0=loss
     })
     champ_agg = defaultdict(lambda: defaultdict(lambda: {
         "games": 0, "wins": 0, "kills": 0, "deaths": 0,
@@ -380,6 +482,7 @@ def _read_inhouse(sh, known_names=None):
         name = r["player"]
         pa   = player_agg[name]
         pa["games"].add(r["gameId"])
+        pa["game_results"].append(1 if r["win"] else 0)
         if r["win"]:
             pa["wins"] += 1
         pa["kills"]   += r["kills"]
@@ -414,15 +517,16 @@ def _read_inhouse(sh, known_names=None):
         avg_gold= round(pa["gold"] / g)
 
         leaderboard.append({
-            "player":  name,
-            "games":   g,
-            "wins":    w,
-            "losses":  l,
-            "wr":      f"{wr}%",
-            "kda":     kda,
-            "cs_min":  "—",
-            "damage":  f"{avg_dmg:,}",
-            "gold":    f"{avg_gold:,}",
+            "player":         name,
+            "games":          g,
+            "wins":           w,
+            "losses":         l,
+            "wr":             f"{wr}%",
+            "kda":            kda,
+            "cs_min":         "—",
+            "damage":         f"{avg_dmg:,}",
+            "gold":           f"{avg_gold:,}",
+            "recent_results": pa["game_results"][-10:],
         })
 
         # Champion breakdown
@@ -618,10 +722,17 @@ def _find_draft_script():
     return None
 
 
+_ROLE_DISPLAY = {
+    "TOP": "Top", "JGL": "Jungle", "MID": "Mid", "BOT": "Bot", "SUP": "Support",
+    # pass-through for already-display-format values
+    "Top": "Top", "Jungle": "Jungle", "Mid": "Mid", "Bot": "Bot", "Support": "Support",
+}
+
+
 def write_draft_picks(blue_players, red_players, on_done=None, on_error=None):
     """
     Write blue/red team selections to 'Draft Tool' sheet (rows 6–10).
-    Columns A–C = slot#, player, tier/rank  |  H–J = slot#, player, tier/rank
+    Columns A–C = slot#, player, role  |  H–J = slot#, player, role
     blue_players / red_players: list of dicts with keys 'name', 'tier', 'role'.
     on_done() called on success; on_error(msg) called on failure.
     """
@@ -634,9 +745,11 @@ def write_draft_picks(blue_players, red_players, on_done=None, on_error=None):
                 row = i + 6
                 bp  = blue_players[i] if i < len(blue_players) else {}
                 rp  = red_players[i]  if i < len(red_players)  else {}
-                ws.update(values=[[i + 1, bp.get("name",""), bp.get("tier","")]],
+                b_role = _ROLE_DISPLAY.get(bp.get("role", ""), bp.get("role", ""))
+                r_role = _ROLE_DISPLAY.get(rp.get("role", ""), rp.get("role", ""))
+                ws.update(values=[[i + 1, bp.get("name",""), b_role]],
                           range_name=f"A{row}:C{row}")
-                ws.update(values=[[i + 1, rp.get("name",""), rp.get("tier","")]],
+                ws.update(values=[[i + 1, rp.get("name",""), r_role]],
                           range_name=f"H{row}:J{row}")
             if on_done:
                 on_done()
@@ -1053,7 +1166,10 @@ def _parse_draft_sheet(values):
       blue_comps, red_comps
     """
     import re
-    ROLES = {"TOP", "JGL", "MID", "BOT", "SUP"}
+    # All known role spellings across sheet variants
+    ROLES = {"TOP", "JGL", "MID", "BOT", "SUP",
+             "Top", "Jungle", "Mid", "Bot", "Support"}
+    _SKIP = {"", "Player", "Role", "Champion", "player", "role", "champion"}
 
     team1_roster, team2_roster = [], []
     bans_blue,    bans_red     = [], []
@@ -1141,8 +1257,12 @@ def _parse_draft_sheet(values):
         if first == "Player" and r[1].strip() == "Role":
             continue
 
-        # Pick data rows
-        if current_comp is not None and r[1].strip() in ROLES:
+        # Pick data rows — detect by non-empty player name + non-empty champion,
+        # regardless of what is in the "Role" column (may be rank tier or lane name)
+        if (current_comp is not None
+                and r[0].strip() not in _SKIP
+                and r[2].strip() not in _SKIP
+                and r[2].strip()):
             current_comp["picks"].append({
                 "player":   r[0], "role": r[1], "champion": r[2],
                 "games":    r[3], "wr":   r[4], "kda":      r[5], "fit": r[6],
@@ -1205,55 +1325,342 @@ def load_activity(on_done=None, on_error=None):
     threading.Thread(target=_bg, daemon=True, name="activity_loader").start()
 
 
+def write_activity_event(event_type, player, details, on_done=None, on_error=None):
+    """Append one event row to _Activity sheet and refresh live.activity."""
+    from datetime import datetime as _dt
+    def _bg():
+        try:
+            cfg = load_config()
+            sh  = _gspread_connect(cfg)
+            try:
+                ws = sh.worksheet("_Activity")
+            except Exception:
+                ws = sh.add_worksheet(title="_Activity", rows=500, cols=5)
+                ws.update(values=[["Timestamp","Event Type","Player","Details","Related Player"]],
+                          range_name="A1")
+            ts = _dt.now().strftime("%Y-%m-%d %H:%M")
+            ws.append_row([ts, event_type, player or "", details or "", ""],
+                          value_input_option="RAW")
+            # Refresh live activity
+            events = _read_activity(sh)
+            with live._lock:
+                live.activity = events
+            if on_done:
+                on_done()
+        except Exception as e:
+            if on_error:
+                on_error(str(e))
+    threading.Thread(target=_bg, daemon=True, name="activity_write").start()
+
+
+def get_most_games_logged(on_done=None, on_error=None):
+    """
+    Read _InhouseGameLog and find which logged_by name appears most.
+    Calls on_done(player_name, count) or on_error(msg).
+    """
+    def _bg():
+        try:
+            cfg = load_config()
+            sh  = _gspread_connect(cfg)
+            ws  = sh.worksheet("_InhouseGameLog")
+            rows = ws.get_all_values()
+            counts = {}
+            for row in rows[1:]:
+                if len(row) < 16 or not row[15]:
+                    continue
+                lb = str(row[15]).strip()
+                counts[lb] = counts.get(lb, 0) + 1
+            if counts:
+                top = max(counts, key=counts.get)
+                if on_done:
+                    on_done(top, counts[top])
+            else:
+                if on_done:
+                    on_done(None, 0)
+        except Exception as e:
+            if on_error:
+                on_error(str(e))
+    threading.Thread(target=_bg, daemon=True, name="most_games_logged").start()
+
+
+def log_inhouse_games_from_client(on_progress=None, on_done=None, on_error=None):
+    """
+    Connect to the League client, fetch recent custom games, append only NEW
+    records to _InhouseGameLog (duplicate-safe by gameId), then reload inhouse data.
+
+    on_progress(msg) — called with status updates during the operation
+    on_done(new_count) — called with the number of new games added
+    on_error(msg) — called on failure
+    """
+    import os, re, subprocess, urllib3, requests
+    from datetime import datetime as _dt, timedelta
+    from collections import defaultdict
+
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    def _find_lockfile():
+        candidates = []
+        local_app = os.environ.get("LOCALAPPDATA", "")
+        if local_app:
+            candidates.append(os.path.join(local_app, "Riot Games", "League of Legends", "lockfile"))
+        for drive in ("C:\\", "D:\\", "E:\\"):
+            for sub in ("Riot Games", "Program Files\\Riot Games", "Program Files (x86)\\Riot Games"):
+                candidates.append(os.path.join(drive, sub, "League of Legends", "lockfile"))
+        for p in candidates:
+            if os.path.isfile(p):
+                return p
+        try:
+            out = subprocess.check_output(
+                'wmic process where "name=\'LeagueClientUx.exe\'" get commandline',
+                shell=True, text=True, stderr=subprocess.DEVNULL)
+            m = re.search(r'"([^"]*LeagueClientUx\.exe)"', out)
+            if m:
+                lf = os.path.join(os.path.dirname(m.group(1)), "lockfile")
+                if os.path.isfile(lf):
+                    return lf
+        except Exception:
+            pass
+        return None
+
+    def _load_champion_map():
+        try:
+            v    = requests.get("https://ddragon.leagueoflegends.com/api/versions.json", timeout=8).json()
+            data = requests.get(f"https://ddragon.leagueoflegends.com/cdn/{v[0]}/data/en_US/champion.json", timeout=8).json()
+            return {int(d["key"]): d["name"] for d in data["data"].values()}
+        except Exception:
+            return {}
+
+    def _bg():
+        try:
+            if on_progress: on_progress("Finding League client…")
+            lockfile = _find_lockfile()
+            if not lockfile:
+                if on_error: on_error("League client not running — open the client first.")
+                return
+
+            with open(lockfile) as f:
+                parts = f.read().strip().split(":")
+            if len(parts) < 5:
+                if on_error: on_error("Unexpected lockfile format.")
+                return
+
+            port, password, protocol = parts[2], parts[3], parts[4]
+            base_url = f"{protocol}://127.0.0.1:{port}"
+            auth     = ("riot", password)
+
+            r = requests.get(f"{base_url}/lol-summoner/v1/current-summoner",
+                             auth=auth, verify=False, timeout=5)
+            if r.status_code != 200:
+                if on_error: on_error(f"Could not get summoner (status {r.status_code}).")
+                return
+            summoner    = r.json()
+            logged_by   = summoner.get("gameName") or summoner.get("displayName") or "Unknown"
+            if on_progress: on_progress(f"Connected as {logged_by} — loading champions…")
+
+            champ_map = _load_champion_map()
+
+            cfg = load_config()
+            sh  = _gspread_connect(cfg)
+
+            # Load existing game IDs to prevent duplicates
+            if on_progress: on_progress("Checking existing game log…")
+            try:
+                ws_log  = sh.worksheet("_InhouseGameLog")
+                all_rows = ws_log.get_all_values()
+                existing_ids = set()
+                for row in all_rows[1:]:
+                    if row and row[0]:
+                        try:    existing_ids.add(int(row[0]))
+                        except Exception: existing_ids.add(row[0])
+            except Exception:
+                ws_log      = None
+                existing_ids = set()
+                all_rows     = []
+
+            if on_progress: on_progress(f"{len(existing_ids)} games already logged — fetching history…")
+
+            # Fetch match history
+            cutoff = int((_dt.now() - timedelta(days=180)).timestamp() * 1000)
+            url = f"{base_url}/lol-match-history/v1/products/lol/current-summoner/matches?begIndex=0&endIndex=500"
+            try:
+                resp   = requests.get(url, auth=auth, verify=False, timeout=30)
+                games  = resp.json().get("games", {}).get("games", []) if resp.status_code == 200 else []
+            except Exception:
+                games = []
+
+            customs = [g for g in games
+                       if g.get("gameCreation", 0) >= cutoff
+                       and (g.get("queueId") in (0, 3130) or g.get("gameType") == "CUSTOM_GAME")
+                       and g.get("gameId") not in existing_ids]
+
+            if not customs:
+                if on_done: on_done(0)
+                return
+
+            if on_progress: on_progress(f"Processing {len(customs)} new custom games…")
+
+            role_map = {"TOP":"TOP","JUNGLE":"JGL","MIDDLE":"MID","BOTTOM":"BOT",
+                        "UTILITY":"SUP","SUPPORT":"SUP","NONE":"","UNKNOWN":"","":""}
+            new_records = []
+            seen = set()
+            for g in customs:
+                gid = g.get("gameId")
+                if not gid or gid in seen: continue
+                seen.add(gid)
+                try:
+                    dr = requests.get(f"{base_url}/lol-match-history/v1/games/{gid}",
+                                      auth=auth, verify=False, timeout=15)
+                    d  = dr.json() if dr.status_code == 200 else {}
+                except Exception:
+                    continue
+                participants = d.get("participants", [])
+                identities   = d.get("participantIdentities", [])
+                if len(participants) != 10: continue
+                duration  = max(d.get("gameDuration", 1), 1)
+                timestamp = _dt.fromtimestamp(d.get("gameCreation", 0) / 1000).strftime("%Y-%m-%d %H:%M")
+                for idx, p in enumerate(participants):
+                    pname = "Unknown"
+                    if idx < len(identities):
+                        pl    = identities[idx].get("player", {})
+                        pname = pl.get("gameName") or pl.get("summonerName") or f"Player_{idx}"
+                    stats  = p.get("stats", {})
+                    cid    = p.get("championId", 0)
+                    cname  = champ_map.get(cid, f"Champ#{cid}")
+                    lane   = str(p.get("timeline", {}).get("lane", "")).upper()
+                    role   = role_map.get(lane, "")
+                    cs     = stats.get("totalMinionsKilled", 0) + stats.get("neutralMinionsKilled", 0)
+                    new_records.append({
+                        "gameId":    gid,
+                        "timestamp": timestamp,
+                        "player":    pname,
+                        "champion":  cname,
+                        "teamId":    p.get("teamId", 0),
+                        "win":       stats.get("win", False),
+                        "kills":     stats.get("kills", 0),
+                        "deaths":    stats.get("deaths", 0),
+                        "assists":   stats.get("assists", 0),
+                        "cs":        cs,
+                        "damage":    stats.get("totalDamageDealtToChampions", 0),
+                        "gold":      stats.get("goldEarned", 0),
+                        "vision":    stats.get("visionScore", 0),
+                        "role":      role,
+                        "duration":  round(duration / 60, 1),
+                        "logged_by": logged_by,
+                    })
+
+            if not new_records:
+                if on_done: on_done(0)
+                return
+
+            # Append to sheet (create if needed, never overwrite existing)
+            if on_progress: on_progress(f"Saving {len(new_records)//10} new games to sheet…")
+            if ws_log is None:
+                ws_log = sh.add_worksheet(title="_InhouseGameLog", rows=5000, cols=16)
+                ws_log.update(values=[["gameId","timestamp","player","champion","teamId",
+                                        "win","kills","deaths","assists","cs","damage",
+                                        "gold","vision","role","duration","logged_by"]],
+                              range_name="A1")
+                all_rows = [["header"]]
+            next_row = len(all_rows) + 1
+            rows_to_write = []
+            for rec in new_records:
+                rows_to_write.append([
+                    rec["gameId"], rec["timestamp"], rec["player"], rec["champion"],
+                    rec["teamId"], str(rec["win"]), rec["kills"], rec["deaths"],
+                    rec["assists"], rec["cs"], rec["damage"], rec["gold"],
+                    rec["vision"], rec["role"], rec["duration"], rec["logged_by"],
+                ])
+            for i in range(0, len(rows_to_write), 500):
+                chunk = rows_to_write[i:i+500]
+                ws_log.update(values=chunk, range_name=f"A{next_row + i}")
+
+            new_game_count = len(new_records) // 10
+
+            # Write activity event
+            write_activity_event("INHOUSE", logged_by,
+                                 f"Logged {new_game_count} new inhouse game{'s' if new_game_count!=1 else ''}")
+
+            # Reload inhouse data into live
+            known_names = {r["name"] for r in live.rankings}
+            ib, ic, pr  = _read_inhouse(sh, known_names if known_names else None)
+            with live._lock:
+                live.inhouse        = ib
+                live.inhouse_champs = ic
+                if pr:
+                    live.primary_roles.update(pr)
+
+            if on_done: on_done(new_game_count)
+
+        except Exception as e:
+            if on_error: on_error(str(e))
+
+    threading.Thread(target=_bg, daemon=True, name="log_inhouse").start()
+
+
 # ---------------------------------------------------------------------------
 # Tier list sheet persistence
 # ---------------------------------------------------------------------------
 
 def write_tier_list(placements, submitter_name, on_done=None, on_error=None):
     """
-    Write a player's tier list ratings to 'Tier Lists' sheet.
-    placements: dict {tier: [player_names]}
-    submitter_name: the display name of the person submitting this list.
-    Column per submitter, row per rated player, cell = tier letter.
+    Write a player's tier list ratings to the 'Tier Lists' sheet.
+
+    Sheet layout (as exported from Google Sheets):
+      Row 1 : "Player" label  (ignored)
+      Row 2 : Tier value legend  (ignored)
+      Row 3 : "#, Player Name, Ben, Luke, Chips, …"  ← rater names header
+      Row 4+ : "#, <player name>, <Ben rating>, <Luke rating>, …"
+               col A = row #, col B = player display name, col C+ = tier ratings
+
+    placements : dict  {tier_letter: [player_names]}
+    submitter_name : must match a column header in row 3 of the sheet.
     """
+    _HEADER_ROW = 3   # 1-based row that contains rater names
+    _PLAYER_COL = 2   # 1-based column B — player display names
+
     def _bg():
         try:
+            import gspread
             cfg = load_config()
             sh  = _gspread_connect(cfg)
-            try:
-                ws = sh.worksheet("Tier Lists")
-            except Exception:
-                ws = sh.add_worksheet(title="Tier Lists", rows=50, cols=30)
+            ws  = sh.worksheet("Tier Lists")
 
-            # Row 1 = headers: col A = "Player", col B+ = submitter names
-            header = ws.row_values(1) or []
-            if submitter_name in header:
-                col_idx = header.index(submitter_name) + 1   # 1-based
-            else:
-                col_idx = len(header) + 1
-                ws.update_cell(1, col_idx, submitter_name)
-                header.append(submitter_name)
-            # Ensure col A header exists
-            if not header or header[0] != "Player":
-                ws.update_cell(1, 1, "Player")
+            # --- Locate the submitter's column from row 3 ---
+            header = ws.row_values(_HEADER_ROW)
+            if submitter_name not in header:
+                if on_error:
+                    on_error(
+                        f"'{submitter_name}' not found in Tier Lists header (row 3). "
+                        f"Add their name to row 3 of the sheet first."
+                    )
+                return
+            col_idx = header.index(submitter_name) + 1   # convert to 1-based
 
-            # Build player → tier lookup
+            # --- Build player → tier letter lookup ---
             player_to_tier = {}
-            for tier, names in placements.items():
+            for tier_letter, names in placements.items():
                 for n in names:
-                    player_to_tier[n] = tier
+                    player_to_tier[n] = tier_letter
 
-            # Read existing player list from col A (rows 2+)
-            col_a = ws.col_values(1)   # 1-based rows including header
+            # --- Read column B to find each player's row ---
+            col_b = ws.col_values(_PLAYER_COL)   # index 0 = row 1
 
+            # --- Batch all cell writes into one API call ---
+            updates = []
+            missing = []
             for pname, tier_letter in player_to_tier.items():
-                if pname in col_a:
-                    row_idx = col_a.index(pname) + 1   # 1-based
+                if pname in col_b:
+                    row_idx = col_b.index(pname) + 1   # 1-based
+                    cell    = gspread.utils.rowcol_to_a1(row_idx, col_idx)
+                    updates.append({"range": cell, "values": [[tier_letter]]})
                 else:
-                    row_idx = len(col_a) + 1
-                    ws.update_cell(row_idx, 1, pname)
-                    col_a.append(pname)
-                ws.update_cell(row_idx, col_idx, tier_letter)
+                    missing.append(pname)
+
+            if updates:
+                ws.batch_update(updates)
+
+            if missing:
+                print(f"[tier_list write] players not found in sheet col B: {missing}")
 
             if on_done:
                 on_done()
@@ -1294,6 +1701,176 @@ def test_sheets_connection(on_done=None, on_error=None):
 
 
 # ---------------------------------------------------------------------------
+# Player avatar sync — Google Sheets "Player Avatars" tab
+# ---------------------------------------------------------------------------
+_AVATAR_SHEET = "Player Avatars"
+_AVATAR_COLS  = [["Player Name", "Image Data (base64)", "Last Updated"]]
+
+
+def upload_player_avatar(player_name, image_path, on_done=None, on_error=None):
+    """
+    Hex-crop image_path to 128×128, encode as base64 JPEG, write/update
+    the "Player Avatars" sheet row for player_name.
+    Also saves the cropped PNG locally to assets/profile_icons/<name>.png.
+    on_done() or on_error(msg).
+    """
+    import base64, os
+    from io import BytesIO
+
+    def _bg():
+        try:
+            from PIL import Image, ImageDraw
+            size = 128
+            img  = Image.open(image_path).convert("RGBA")
+            img  = img.resize((size, size), Image.LANCZOS)
+
+            # Hex mask
+            mask = Image.new("L", (size, size), 0)
+            draw = ImageDraw.Draw(mask)
+            import math as _m
+            cx2, cy2, r = size // 2, size // 2, size // 2 - 2
+            pts = [
+                (cx2 + r * _m.cos(_m.pi / 6 + i * _m.pi / 3),
+                 cy2 + r * _m.sin(_m.pi / 6 + i * _m.pi / 3))
+                for i in range(6)
+            ]
+            draw.polygon(pts, fill=255)
+            result = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+            result.paste(img, mask=mask)
+
+            # Save locally
+            safe = "".join(c for c in player_name if c.isalnum() or c in " _-").strip()
+            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            local_path = os.path.join(root, "assets", "profile_icons", f"{safe}.png")
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            result.save(local_path, "PNG")
+
+            # Encode for Sheets (as JPEG for size, with transparent bg turned white)
+            rgb = Image.new("RGB", (size, size), (20, 16, 32))
+            rgb.paste(result, mask=result.split()[3])
+            buf = BytesIO()
+            rgb.save(buf, format="JPEG", quality=80)
+            b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+
+            # Write to sheet
+            from datetime import datetime as _dt
+            ts  = _dt.now().strftime("%Y-%m-%d %H:%M")
+            cfg = load_config()
+            sh  = _gspread_connect(cfg)
+            try:
+                ws = sh.worksheet(_AVATAR_SHEET)
+            except Exception:
+                ws = sh.add_worksheet(title=_AVATAR_SHEET, rows=200, cols=3)
+                ws.update(values=_AVATAR_COLS, range_name="A1")
+
+            rows = ws.get_all_values()
+            for idx, row in enumerate(rows[1:], start=2):
+                if row and row[0].strip().lower() == player_name.strip().lower():
+                    ws.update(values=[[player_name, b64, ts]], range_name=f"A{idx}")
+                    if on_done: on_done(local_path)
+                    return
+            ws.append_row([player_name, b64, ts], value_input_option="RAW")
+            if on_done: on_done(local_path)
+
+        except ImportError:
+            if on_error: on_error("Pillow not installed — run: pip install Pillow")
+        except Exception as e:
+            if on_error: on_error(str(e))
+
+    threading.Thread(target=_bg, daemon=True, name="avatar_upload").start()
+
+
+def download_all_avatars(on_done=None, on_error=None):
+    """
+    Read every row in "Player Avatars" sheet, decode base64, save to
+    assets/profile_icons/<name>.png.  Calls on_done({name: local_path}) or
+    on_error(msg).  Safe to call repeatedly — skips rows with no data.
+    """
+    import base64, os
+
+    def _bg():
+        try:
+            cfg = load_config()
+            sh  = _gspread_connect(cfg)
+            try:
+                ws = sh.worksheet(_AVATAR_SHEET)
+            except Exception:
+                if on_done: on_done({})
+                return
+
+            rows  = ws.get_all_values()
+            root  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            adir  = os.path.join(root, "assets", "profile_icons")
+            os.makedirs(adir, exist_ok=True)
+
+            result = {}
+            for row in rows[1:]:
+                if len(row) < 2 or not row[0] or not row[1]:
+                    continue
+                name = row[0].strip()
+                b64  = row[1].strip()
+                try:
+                    data = base64.b64decode(b64)
+                    safe = "".join(c for c in name if c.isalnum() or c in " _-").strip()
+                    # Save as .jpg (decoded data is JPEG)
+                    path = os.path.join(adir, f"{safe}.jpg")
+                    with open(path, "wb") as f:
+                        f.write(data)
+                    result[name] = path
+                except Exception:
+                    pass
+
+            if on_done: on_done(result)
+        except Exception as e:
+            if on_error: on_error(str(e))
+
+    threading.Thread(target=_bg, daemon=True, name="avatar_download").start()
+
+
+def detect_lcu_summoner():
+    """
+    Synchronous LCU lockfile read → returns (display_name, error_str).
+    Safe to call from a background thread.
+    """
+    import os, requests, urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    candidates = []
+    local_app = os.environ.get("LOCALAPPDATA", "")
+    if local_app:
+        candidates.append(os.path.join(local_app, "Riot Games", "League of Legends", "lockfile"))
+    for drive in ("C:\\", "D:\\", "E:\\"):
+        for sub in ("Riot Games", os.path.join("Program Files", "Riot Games"),
+                    os.path.join("Program Files (x86)", "Riot Games")):
+            candidates.append(os.path.join(drive, sub, "League of Legends", "lockfile"))
+
+    lockfile = next((p for p in candidates if os.path.isfile(p)), None)
+    if not lockfile:
+        return None, "League client not running (lockfile not found)"
+
+    try:
+        with open(lockfile) as f:
+            parts = f.read().strip().split(":")
+        if len(parts) < 5:
+            return None, "Unexpected lockfile format"
+        port, password = parts[2], parts[3]
+    except Exception as e:
+        return None, f"Could not read lockfile: {e}"
+
+    try:
+        url = f"https://127.0.0.1:{port}/lol-summoner/v1/current-summoner"
+        from requests.auth import HTTPBasicAuth
+        r = requests.get(url, auth=HTTPBasicAuth("riot", password), verify=False, timeout=5)
+        if r.status_code == 200:
+            j    = r.json()
+            name = j.get("gameName") or j.get("displayName") or ""
+            return (name or None), ("" if name else "No name in LCU response")
+        return None, f"LCU returned {r.status_code}"
+    except Exception as e:
+        return None, str(e)
+
+
+# ---------------------------------------------------------------------------
 # Auto-update: check GitHub Releases
 # ---------------------------------------------------------------------------
 
@@ -1304,8 +1881,12 @@ def check_for_update(current_version, repo="BLHvibe/The-Rift", on_done=None):
     on_done(None, None) if up-to-date or check fails.
     Versions compared as raw strings; tags like 'v1.2' match '1.2'.
     """
-    def _normalise(v):
-        return v.lstrip("v")
+    def _parse(v):
+        parts = v.lstrip("v").split(".")
+        try:
+            return tuple(int(x) for x in parts)
+        except ValueError:
+            return (0,)
 
     def _bg():
         try:
@@ -1318,7 +1899,7 @@ def check_for_update(current_version, repo="BLHvibe/The-Rift", on_done=None):
             latest_tag   = data.get("tag_name", "")
             assets       = data.get("assets", [])
             download_url = assets[0]["browser_download_url"] if assets else data.get("html_url", "")
-            if latest_tag and _normalise(latest_tag) != _normalise(current_version):
+            if latest_tag and _parse(latest_tag) > _parse(current_version):
                 if on_done:
                     on_done(latest_tag, download_url)
             else:

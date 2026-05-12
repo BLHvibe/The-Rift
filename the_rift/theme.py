@@ -158,8 +158,8 @@ def setup_fonts():
                 fonts[key] = dpg.add_font(path, size)
 
         # Rajdhani Regular — supporting UI text
-        for size, key in [(16, "raj_r_16"), (14, "raj_r_14"),
-                          (12, "raj_r_12"), (11, "raj_r_11")]:
+        for size, key in [(20, "raj_r_20"), (18, "raj_r_18"), (16, "raj_r_16"),
+                          (14, "raj_r_14"), (12, "raj_r_12"), (11, "raj_r_11")]:
             path = os.path.join(font_dir, "Rajdhani-Regular.ttf")
             if os.path.exists(path):
                 fonts[key] = dpg.add_font(path, size)

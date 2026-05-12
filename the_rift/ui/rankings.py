@@ -4,9 +4,10 @@ Podium layout mirrors old launcher: #2 left / #1 center (raised) / #3 right.
 Reveal order: #1 first with max fanfare → #2 → #3 → #4–#10 → #11+
 All layout is computed dynamically from the actual content area each frame.
 """
-import math, time
+import math, time, random as _rnd
 import dearpygui.dearpygui as dpg
 from theme import C, RANK_COLORS, MEDAL_PARTICLE
+from data.tips import TIPS as _TIPS
 from core.state import state
 from core.animations import anim, ParticleSystem, Ripple
 
@@ -97,12 +98,15 @@ class RankingsState:
 
         self._chal_idx   = 0
         self._rest_idx   = 0
+        self._load_t     = 0.0
+        self._tip        = _rnd.choice(_TIPS)
 
     def reset(self):
         self.__init__()
 
     def tick(self):
         self.shimmer_t += 0.007
+        self._load_t   += 0.04
 
     def begin_loading(self):
         self.phase = RankRevealPhase.LOADING
@@ -265,11 +269,40 @@ def _hex(dl, cx, cy, r, fill, border, label="?", alpha=255):
     dpg.draw_polygon(pts, fill=(*fill[:3], alpha),
                      color=(*border[:3], alpha), thickness=1.5, parent=dl)
     dpg.draw_text((cx - len(label)*3 - 1, cy - 6), label,
-                  color=(*C["txt"][:3], alpha), size=11, parent=dl)
+                  color=(*C["txt"][:3], alpha), size=16, parent=dl)
 
+
+def _avatar_or_hex(dl, cx, cy, r, raw_name, fill, border, label="?", alpha=255):
+    """Draw the player's uploaded pfp (hex-cropped) if available, otherwise _hex.
+    The image is already hex-cropped with transparent pixels, so no extra clipping needed."""
+    try:
+        from ui.inhouse import _get_avatar_tex
+        tex = _get_avatar_tex(raw_name)
+    except Exception:
+        tex = None
+    if tex:
+        # draw_image doesn't support a color/alpha tint — but _avatar_or_hex is
+        # only called when al > 0 (cards with al<=0 are skipped before we get here),
+        # so the image will always be at a visible stage of the fade-in.
+        try:
+            dpg.draw_image(tex, (cx - r, cy - r), (cx + r, cy + r), parent=dl)
+        except Exception:
+            _hex(dl, cx, cy, r, fill, border, label, alpha)
+    else:
+        _hex(dl, cx, cy, r, fill, border, label, alpha)
+
+
+_RATING_COLORS = {
+    "S": (210, 40,  40,  255),
+    "A": (200, 155, 60,  255),
+    "B": (160, 136, 78,  255),
+    "C": ( 92, 138, 92,  255),
+    "D": ( 92, 122, 156, 255),
+    "F": ( 90,  90, 90,  255),
+}
 
 def _badge(dl, cx, cy, abbr, tier, alpha=255, r=28):
-    bc  = RANK_COLORS.get(tier, RANK_COLORS["Unranked"])
+    bc  = _RATING_COLORS.get(abbr) or RANK_COLORS.get(tier, RANK_COLORS["Unranked"])
     dpg.draw_circle((cx, cy), r, fill=(*bc[:3], alpha),
                     color=(*C["bg"][:3], int(alpha*0.6)), thickness=2, parent=dl)
     fs  = max(12, int(r * 0.72))
@@ -326,6 +359,14 @@ def draw_rankings(dl, vw, vh, fonts=None):
     global _name_hitboxes
     if fonts:
         set_fonts(fonts)
+
+    # Flush any newly uploaded avatars so cards can display them
+    try:
+        from ui.inhouse import _scan_local_avatars, _flush_pending
+        _scan_local_avatars()
+        _flush_pending()
+    except Exception:
+        pass
 
     _compute_layout(vw, vh)
     _name_hitboxes = []   # reset hitboxes each frame
@@ -387,10 +428,25 @@ def draw_rankings(dl, vw, vh, fonts=None):
 
 def _draw_loading(dl, vw, vh):
     cx, cy = vw // 2, vh // 2
-    t  = (math.sin(time.monotonic() * 1.6) + 1) / 2
-    a  = int(80 + t * 100)
-    _txt(dl, cx-110, cy-10, "LOADING RANKINGS...",
-         (*C["gold_dk"][:3], a), 14, "raj_14")
+    t  = (math.sin(rankings._load_t * 2.0) + 1) / 2
+    a  = int(80 + t * 130)
+    dots = "." * (int(rankings._load_t * 2) % 4)
+    label = f"LOADING RANKINGS{dots}"
+    _txt(dl, cx - len(label) * 7, cy - 30, label, (*C["gold_dk"][:3], a), 26, "raj_28")
+    tip = rankings._tip
+    tip_x = max(40, cx - len(tip) * 5)
+    _txt(dl, tip_x, cy + 16, tip, (*C["txt_dim"][:3], int(a * 0.8)), 18, "raj_r_18")
+    # Animated loading bar
+    bar_w = min(400, vw - 120)
+    bar_x = cx - bar_w // 2
+    bar_y = cy + 62
+    prog  = (rankings._load_t % 1.8) / 1.8
+    fill  = int(bar_w * prog)
+    dpg.draw_rectangle((bar_x, bar_y), (bar_x + bar_w, bar_y + 4),
+                        fill=(*C["card"][:3], int(a * 0.5)), color=(0, 0, 0, 0), parent=dl)
+    if fill > 0:
+        dpg.draw_rectangle((bar_x, bar_y), (bar_x + fill, bar_y + 4),
+                            fill=(*C["gold_dk"][:3], a), color=(0, 0, 0, 0), parent=dl)
 
 
 def _draw_podium_cards(dl):
@@ -445,12 +501,13 @@ def _draw_podium_cards(dl):
         avg    = str(p.get("avg_tier", ""))
         rating = str(p.get("rating", tier[:1].upper()))
 
+        raw_name = p.get("name", "Unknown")
         if rank == 1:
             label_col = (*accent_color[:3], al)
             _txt(dl, x1+20, y1+18, "CHAMPION", label_col, 14, "raj_sb_18")
             _txt(dl, x1+20, y1+44, "NO.", (*C["txt_dim"][:3], al), 18, "raj_sb_18")
             _txt(dl, x1+78, y1+28, "1", (*C["gold_lt"][:3], al), 90, "raj_72")
-            _txt(dl, x1+20, y1+152, name, (*C["gold"][:3], al), 32, "raj_36")
+            _name_link(dl, x1+20, y1+152, name, raw_name, (*C["gold"][:3], al), 32, "raj_36")
             _txt(dl, x2-150, y1+72, fs,
                  (*C["gold_lt"][:3], al), 44, "raj_44")
             _badge(dl, x2-44, y1+44, rating, tier, al, r=38)
@@ -458,21 +515,23 @@ def _draw_podium_cards(dl):
                           color=(*C["gold_dk"][:3], al), thickness=1, parent=dl)
             _txt(dl, x1+20, y1+202, f"TIER {ts}  ·  RANK {rs}",
                  (*C["txt_dim"][:3], al), 12, "raj_r_12")
-            _hex(dl, x2-70, y1+h-52, 44, C["card_hover"],
-                 (*C["gold"][:3], al), label=name[:2], alpha=al)
+            _avatar_or_hex(dl, x2-70, y1+h-52, 44, raw_name,
+                           C["card_hover"], (*C["gold"][:3], al),
+                           label=name[:2], alpha=al)
         else:
             label = "RUNNER-UP" if rank == 2 else "THIRD"
             _txt(dl, x1+16, y1+14, label, (*accent_color[:3], al), 13, "raj_sb_14")
             _txt(dl, x1+16, y1+32, "NO.", (*C["txt_dim"][:3], al), 14, "raj_sb_14")
             _txt(dl, x1+66, y1+18, str(rank), (*C["gold_lt"][:3], al), 68, "raj_56")
-            _txt(dl, x1+16, y1+118, name, (*C["txt"][:3], al), 24, "raj_28")
+            _name_link(dl, x1+16, y1+118, name, raw_name, (*C["txt"][:3], al), 24, "raj_28")
             _txt(dl, x2-120, y1+56, fs,
                  (*C["gold_lt"][:3], al), 32, "raj_36")
             _txt(dl, x1+16, y1+168, f"TIER {ts}  ·  RANK {rs}",
                  (*C["txt_dim"][:3], al), 11, "raj_r_12")
             _badge(dl, x2-38, y1+34, rating, tier, al, r=30)
-            _hex(dl, x2-58, y1+h-42, 36, C["card_hover"],
-                 (*border_col[:3], al), label=name[:2], alpha=al)
+            _avatar_or_hex(dl, x2-58, y1+h-42, 36, raw_name,
+                           C["card_hover"], (*border_col[:3], al),
+                           label=name[:2], alpha=al)
 
 
 def _draw_challenger_rows(dl):
@@ -510,11 +569,11 @@ def _draw_challenger_rows(dl):
         rs     = str(p.get("rank_score", "?"))
         rating = str(p.get("rating", tier[:1].upper()))
 
+        raw = p.get("name", "")
         _txt(dl, rx+xo+16, ry+CHAL_H//2-18, f"#{rank}",
              (*C["txt2"][:3], al), 18, "raj_20")
-        _hex(dl, rx+xo+90, ry+CHAL_H//2, 26,
-             C["panel"], C["rule_dark"], label=name[:2], alpha=al)
-        raw = p.get("name", "")
+        _avatar_or_hex(dl, rx+xo+90, ry+CHAL_H//2, 26, raw,
+                       C["panel"], C["rule_dark"], label=name[:2], alpha=al)
         _name_link(dl, rx+xo+122, ry+CHAL_H//2-18, name,
                    raw, (*C["txt"][:3], al), 20, "raj_20")
         _txt(dl, rx+xo+122, ry+CHAL_H//2+6, f"AVG TIER {avg}  ·  RANK {rs}",
@@ -534,7 +593,7 @@ def _draw_rest_rows(dl):
     section_y = podium_bot + CHAL_PAD_T + chal_h + SECTION_GAP
 
     _txt(dl, rx, section_y - 22, "FULL STANDINGS",
-         (*C["txt_dim"][:3], 180), 14, "raj_sb_16")
+         (*C["txt_dim"][:3], 180), 16, "raj_sb_16")
     dpg.draw_line((rx, section_y - 4),(rx + row_w, section_y - 4),
                   color=C["rule_dark"], thickness=1, parent=dl)
 
@@ -559,7 +618,9 @@ def _draw_rest_rows(dl):
         raw2 = p.get("name", "")
         _txt(dl, rx+xo+14, ry+ROW_H//2-11, f"#{rank}",
              (*C["txt2"][:3], al), 16, "raj_18")
-        _name_link(dl, rx+xo+56, ry+ROW_H//2-11, name,
+        _avatar_or_hex(dl, rx+xo+72, ry+ROW_H//2, 18, raw2,
+                       C["panel"], C["rule_dark"], label=name[:2], alpha=al)
+        _name_link(dl, rx+xo+96, ry+ROW_H//2-11, name,
                    raw2, (*C["txt"][:3], al), 16, "raj_18")
         _txt(dl, rx+xo+row_w-90, ry+ROW_H//2-11, fs,
              (*C["gold"][:3], al), 16, "raj_18")

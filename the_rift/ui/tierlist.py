@@ -3,18 +3,19 @@ Tier List Tab — Phase 6.
 Drag-and-drop player cards into S/A/B/C/D/F tier rows.
 Players loaded from config.json.
 """
-import math, time, threading, os
+import math, time, threading, os, random
 import dearpygui.dearpygui as dpg
 from theme import C
 from core.animations import anim
 from data.config import load_config, save_config
 from data.reader import write_tier_list
+from data.tips import TIPS
 
 
 def _detect_lcu_summoner():
     """
-    Read the LCU lockfile and return the current summoner's displayName, or None.
-    Tries common League of Legends install locations on Windows.
+    Read the LCU lockfile and return (game_name, error_str).
+    Tries gameName first (Riot ID era), falls back to displayName.
     """
     candidates = []
     local_app = os.environ.get("LOCALAPPDATA", "")
@@ -25,22 +26,16 @@ def _detect_lcu_summoner():
         candidates.append(os.path.join(drive, "Program Files", "Riot Games", "League of Legends", "lockfile"))
         candidates.append(os.path.join(drive, "Program Files (x86)", "Riot Games", "League of Legends", "lockfile"))
 
-    lockfile = None
-    for path in candidates:
-        if os.path.isfile(path):
-            lockfile = path
-            break
-
+    lockfile = next((p for p in candidates if os.path.isfile(p)), None)
     if not lockfile:
         return None, "League client not running (lockfile not found)"
 
     try:
         with open(lockfile, "r") as f:
-            content = f.read().strip()
-        parts = content.split(":")
+            parts = f.read().strip().split(":")
         if len(parts) < 5:
             return None, "Unexpected lockfile format"
-        _name, _pid, port, password, protocol = parts[0], parts[1], parts[2], parts[3], parts[4]
+        port, password = parts[2], parts[3]
     except Exception as e:
         return None, f"Could not read lockfile: {e}"
 
@@ -53,16 +48,55 @@ def _detect_lcu_summoner():
         r = requests.get(url, auth=HTTPBasicAuth("riot", password),
                          verify=False, timeout=5)
         if r.status_code == 200:
-            display = r.json().get("displayName", "")
-            return display or None, "" if display else "No displayName in response"
+            j       = r.json()
+            name    = j.get("gameName") or j.get("displayName") or ""
+            return (name or None), ("" if name else "No name in LCU response")
         return None, f"LCU returned {r.status_code}"
     except Exception as e:
         return None, str(e)
 
+
+def _resolve_summoner_to_player(game_name):
+    """
+    Map a Riot gameName → in-house player name.
+    Priority: live sheet summoner_map → config summoner_map → direct name match.
+    Returns matched player name or None.
+    """
+    from data.reader import live
+    # 1. Live sheet map (Players tab riot_id column)
+    if live.loaded and live.summoner_map:
+        result = live.summoner_map.get(game_name)
+        if result:
+            return result
+    # 2. Config summoner_map (manually set or saved by picker)
+    cfg  = load_config()
+    smap = cfg.get("summoner_map", {})
+    if game_name in smap:
+        return smap[game_name]
+    # 3. Direct name match (gameName == display name)
+    players = _load_players()
+    if game_name in players:
+        return game_name
+    return None
+
+
+def _save_summoner_link(game_name, player_name):
+    """Persist gameName → player_name to config summoner_map."""
+    cfg = load_config()
+    smap = cfg.setdefault("summoner_map", {})
+    smap[game_name] = player_name
+    save_config(cfg)
+
 def _load_players():
+    """Return ordered list of real player names. Live sheet takes priority over config."""
+    from data.reader import live
+    if live.loaded and live.players:
+        return list(live.players)
     cfg = load_config()
     players = cfg.get("players", [])
-    return [p for p in players if p and str(p).strip()]
+    return [p for p in players if p and str(p).strip()
+            and not str(p).upper().startswith("PLAYER")
+            and str(p).upper() not in ("TBD", "TBA")]
 
 def _load_rater_name():
     """Return the saved 'Rating as' identity, or empty string if unset."""
@@ -77,7 +111,7 @@ def _save_rater_name(name):
 TIERS = ["S", "A", "B", "C", "D", "F"]
 
 TIER_COLORS = {
-    "S": (200, 70,  60,  255),   # red
+    "S": (210, 40,  40,  255),   # red
     "A": (200,155,  60,  255),   # amber
     "B": (160,136,  78,  255),   # gold
     "C": ( 92,138,  92,  255),   # muted green
@@ -88,7 +122,6 @@ TIER_COLORS = {
 # ---------------------------------------------------------------------------
 # State
 # ---------------------------------------------------------------------------
-_TL_SUBMIT_WIN = "tl_submit_dialog"
 _TL_RATER_WIN  = "tl_rater_win"
 
 
@@ -144,8 +177,188 @@ def set_fonts(f): global _F; _F = f
 
 _wheel_delta = [0]   # accumulated between frames; consumed in _draw_pool
 
+# ---------------------------------------------------------------------------
+# Detection gate + welcome cover page
+# ---------------------------------------------------------------------------
+_TIPS = TIPS  # from data/tips.py
+
+# Phase flags (per-session, reset when the module is reloaded)
+_tl_unlocked = False   # True once cover page has finished → tier list is accessible
+
+_cv = {
+    "active":      False,
+    "name":        "",
+    "tip":         "",
+    "name_offset": -700.0,
+    "bar_pct":     0.0,
+    "alpha":       0,
+}
+
+# Detection screen state (status line + optional name picker)
+_det = {
+    "status":   "",
+    "color":    (70, 65, 55, 255),
+    "busy":     False,
+    "picker":   False,   # True when we need the user to pick their player name
+    "summoner": "",      # raw gameName returned by LCU (shown in picker prompt)
+}
+
+
+def _show_cover_page(player_name):
+    global _tl_unlocked
+    _tl_unlocked = False   # lock again until cover finishes
+    _cv.update({
+        "active":      True,
+        "name":        player_name,
+        "tip":         random.choice(_TIPS),
+        "name_offset": -700.0,
+        "bar_pct":     0.0,
+        "alpha":       0,
+    })
+    anim.tween(0, 255, 200, "out_cubic",
+               on_update=lambda v: _cv.update({"alpha": int(v)}))
+    anim.tween(-700.0, 0.0, 800, "elastic_out",
+               on_update=lambda v: _cv.update({"name_offset": v}))
+    anim.tween(0.0, 1.0, 4700, "linear",
+               on_update=lambda v: _cv.update({"bar_pct": v}))
+    anim.tween(0, 1, 1, "linear", delay_ms=5000, on_done=_hide_cover_page)
+
+
+def _hide_cover_page():
+    anim.tween(255, 0, 400, "out_cubic",
+               on_update=lambda v: _cv.update({"alpha": int(v)}),
+               on_done=_on_cover_hidden)
+
+
+def _on_cover_hidden():
+    global _tl_unlocked
+    _cv["active"] = False
+    _tl_unlocked  = True
+
+
+def _draw_cover(dl, vw, vh):
+    al = _cv["alpha"]
+    if al <= 0:
+        return
+
+    dpg.draw_rectangle((0, 0), (vw, vh),
+                        fill=(*C["bg"][:3], al),
+                        color=(0, 0, 0, 0), parent=dl)
+    dpg.draw_rectangle((0, 0), (vw, 5),
+                        fill=(*C["gold_dk"][:3], al),
+                        color=(0, 0, 0, 0), parent=dl)
+
+    cx     = vw // 2
+    cy     = vh // 2
+    offset = int(_cv["name_offset"])
+
+    _txt(dl, cx - 72, cy - 90 + offset, "Welcome,",
+         (*C["txt2"][:3], al), 28, "raj_28")
+
+    name   = _cv["name"].upper()
+    name_x = max(20, cx - len(name) * 16)
+    _txt(dl, name_x, cy - 36 + offset, name,
+         (*C["gold_lt"][:3], al), 52, "raj_56")
+
+    tip   = _cv["tip"]
+    tip_x = max(40, cx - len(tip) * 5)
+    _txt(dl, tip_x, cy + 62 + offset, tip,
+         (*C["txt_dim"][:3], int(al * 0.8)), 18, "raj_r_18")
+
+    bar_w  = min(420, vw - 120)
+    bar_x  = cx - bar_w // 2
+    bar_y  = vh - 70
+    dpg.draw_rectangle((bar_x, bar_y), (bar_x + bar_w, bar_y + 6),
+                        fill=(*C["card"][:3], int(al * 0.6)),
+                        color=(0, 0, 0, 0), rounding=3, parent=dl)
+    fill_w = int(bar_w * _cv["bar_pct"])
+    if fill_w > 0:
+        dpg.draw_rectangle((bar_x, bar_y), (bar_x + fill_w, bar_y + 6),
+                            fill=(*C["gold"][:3], al),
+                            color=(0, 0, 0, 0), rounding=3, parent=dl)
+    _txt(dl, bar_x, bar_y + 12, "LOADING TIER LIST…",
+         (*C["txt_dim"][:3], int(al * 0.5)), 16, "raj_r_16")
+
+
+def _draw_detection_screen(dl, vw, vh):
+    """Full-screen gate shown until the user detects their identity."""
+    cx, cy = vw // 2, vh // 2
+    t = (math.sin(time.monotonic() * 1.3) + 1) / 2
+    a = int(90 + t * 110)
+
+    # --- Name picker (shown when gameName couldn't be auto-matched) ---
+    if _det["picker"]:
+        _txt(dl, cx - 180, cy - 110, "WHO ARE YOU?", (*C["gold"][:3], a), 36, "raj_36")
+        summoner = _det["summoner"]
+        sub = f"Signed in as  '{summoner}'  — select your player name:"
+        _txt(dl, max(20, cx - len(sub) * 4), cy - 58, sub,
+             (*C["txt_dim"][:3], int(a * 0.75)), 16, "raj_r_16")
+
+        players  = _load_players()
+        cols     = 4
+        bw, bh   = 160, 40
+        gap      = 12
+        total_w  = cols * bw + (cols - 1) * gap
+        start_x  = cx - total_w // 2
+        start_y  = cy - 24
+
+        clicked = dpg.is_mouse_button_clicked(0)
+        mouse   = dpg.get_mouse_pos(local=False)
+        vp      = dpg.get_viewport_pos()
+        rx = mouse[0] - vp[0] - 68
+        ry = mouse[1] - vp[1] - 52
+
+        for i, pname in enumerate(players):
+            col_i = i % cols
+            row_i = i // cols
+            bx = start_x + col_i * (bw + gap)
+            by = start_y + row_i * (bh + gap)
+            dpg.draw_rectangle((bx, by), (bx + bw, by + bh),
+                                fill=(*C["card"][:3], 200),
+                                color=(*C["gold_dk"][:3], 180), rounding=4, parent=dl)
+            lx = bx + bw // 2 - len(pname) * 6
+            _txt(dl, lx, by + 11, pname, (*C["gold_lt"][:3], 220), 17, "raj_sb_18")
+            if clicked and bx <= rx <= bx + bw and by <= ry <= by + bh:
+                _save_summoner_link(summoner, pname)
+                tl.rater_name    = pname
+                _save_rater_name(pname)
+                _det["picker"]   = False
+                _det["summoner"] = ""
+                _det["status"]   = ""
+                _show_cover_page(pname)
+        return
+
+    # --- Normal detection screen ---
+    _txt(dl, cx - 120, cy - 80, "TIER LIST", (*C["gold"][:3], a), 44, "raj_44")
+    _txt(dl, cx - 168, cy - 20, "Identify yourself to begin rating",
+         (*C["txt_dim"][:3], int(a * 0.7)), 16, "raj_r_16")
+
+    bw, bh = 300, 56
+    bx, by = cx - bw // 2, cy + 20
+    dpg.draw_rectangle((bx, by), (bx + bw, by + bh),
+                        fill=(*C["gold_dk"][:3], 210),
+                        color=(*C["gold"][:3], 210), rounding=6, parent=dl)
+    lbl     = "DETECTING…" if _det["busy"] else "◆  DETECT FROM LOL CLIENT"
+    lbl_col = (*C["txt_dim"][:3], 160) if _det["busy"] else (*C["gold_lt"][:3], 230)
+    _txt(dl, bx + bw // 2 - len(lbl) * 5, by + 16, lbl, lbl_col, 16, "raj_sb_16")
+
+    if _det["status"]:
+        st_x = max(20, cx - len(_det["status"]) * 4)
+        _txt(dl, st_x, by + bh + 14, _det["status"],
+             (*_det["color"][:3], 220), 16, "raj_r_16")
+
+    if not _det["busy"] and dpg.is_mouse_button_clicked(0):
+        mouse = dpg.get_mouse_pos(local=False)
+        vp    = dpg.get_viewport_pos()
+        rx = mouse[0] - vp[0] - 68
+        ry = mouse[1] - vp[1] - 52
+        if bx <= rx <= bx + bw and by <= ry <= by + bh:
+            _run_detect_from_screen()
+
+
 def _on_wheel(sender, app_data):
     _wheel_delta[0] += app_data
+
 
 def register_wheel_handler():
     """Call once after DPG context is created."""
@@ -153,6 +366,35 @@ def register_wheel_handler():
         return
     with dpg.handler_registry(tag="tl_wheel_registry"):
         dpg.add_mouse_wheel_handler(callback=_on_wheel)
+
+
+def _run_detect_from_screen():
+    """Detection triggered from the gate screen (no rater DPG window yet)."""
+    _det["busy"]   = True
+    _det["status"] = "Connecting to LoL client…"
+    _det["color"]  = C["txt_dim"]
+
+    def _bg():
+        game_name, err = _detect_lcu_summoner()
+        if not game_name:
+            _det["busy"]   = False
+            _det["status"] = f"✗  {err[:60]}"
+            _det["color"]  = C["loss"]
+            return
+        matched = _resolve_summoner_to_player(game_name)
+        _det["busy"] = False
+        if matched:
+            tl.rater_name = matched
+            _save_rater_name(matched)
+            _det["status"] = ""
+            _show_cover_page(matched)
+        else:
+            # Unknown summoner — show picker so user links once
+            _det["summoner"] = game_name
+            _det["picker"]   = True
+            _det["status"]   = ""
+
+    threading.Thread(target=_bg, daemon=True).start()
 
 # ---------------------------------------------------------------------------
 # Layout constants
@@ -187,11 +429,24 @@ def draw_tierlist(dl, vw, vh, fonts=None):
     dpg.delete_item(dl, children_only=True)
     dpg.draw_rectangle((0,0),(vw,vh), fill=C["bg"], color=(0,0,0,0), parent=dl)
 
-    _draw_top_bar(dl, vw)
-    _ensure_rater_window(vw, vh)
+    # Phase 1: cover page animating (detection just succeeded)
+    if _cv["active"]:
+        _draw_cover(dl, vw, vh)
+        return
 
-    rater_bar_h = 40  # identity bar is always shown; always reserve space
+    # Phase 2: not yet unlocked → show detection gate
+    if not _tl_unlocked:
+        _draw_detection_screen(dl, vw, vh)
+        return
+
+    # Phase 3: unlocked → full tier list
+    _draw_top_bar(dl, vw)
+    if dpg.does_item_exist(_TL_RATER_WIN):
+        dpg.delete_item(_TL_RATER_WIN)
+
+    rater_bar_h = 40
     content_y   = TOP_BAR_H + rater_bar_h + PAD
+    _draw_rater_bar(dl, vw, TOP_BAR_H, rater_bar_h)
     tier_area_h = len(TIERS) * (TIER_H + 4)
     pool_y      = content_y + tier_area_h + 16
 
@@ -199,7 +454,6 @@ def draw_tierlist(dl, vw, vh, fonts=None):
     _draw_pool_divider(dl, PAD, pool_y - 10, vw - PAD*2)
     _draw_pool(dl, PAD, pool_y, vw - PAD*2, vh - pool_y - PAD, vw, vh)
 
-    # Draw dragged card on top of everything
     if tl.drag_name:
         mx, my = tl.drag_pos
         _draw_card(dl, mx - CARD_W//2, my - CARD_H//2, tl.drag_name,
@@ -215,7 +469,7 @@ def _draw_top_bar(dl, vw):
                   color=C["rule_dark"], thickness=1, parent=dl)
     _txt(dl, PAD, 12, "TIER LIST BUILDER", (*C["gold"][:3],220), 22, "raj_24")
     _txt(dl, PAD+270, 18, "Drag players from the pool into tiers  ·  Right-click a card to remove",
-         (*C["txt_dim"][:3],150), 13, "raj_r_14")
+         (*C["txt_dim"][:3],150), 16, "raj_r_16")
 
     # Reset button
     bw, bh = 120, 34
@@ -224,7 +478,7 @@ def _draw_top_bar(dl, vw):
     dpg.draw_rectangle((bx,by),(bx+bw,by+bh),
                         fill=(*C["card"][:3],200), color=(*C["rule_dark"][:3],200),
                         rounding=4, parent=dl)
-    _txt(dl, bx+14, by+8, "↺  RESET", (*C["txt"][:3],200), 14, "raj_sb_16")
+    _txt(dl, bx+14, by+8, "↺  RESET", (*C["txt"][:3],200), 16, "raj_sb_16")
 
     # Submit button
     sbw, sbh = 160, 34
@@ -233,13 +487,13 @@ def _draw_top_bar(dl, vw):
     dpg.draw_rectangle((sbx,sby),(sbx+sbw,sby+sbh),
                         fill=(*C["gold_dk"][:3],200), color=(*C["gold"][:3],200),
                         rounding=4, parent=dl)
-    _txt(dl, sbx+14, sby+8, "◆  SUBMIT LIST", (*C["gold_lt"][:3],230), 14, "raj_sb_16")
+    _txt(dl, sbx+14, sby+8, "◆  SUBMIT LIST", (*C["gold_lt"][:3],230), 16, "raj_sb_16")
 
     # Submit status flash
     status = tl.submit_status
     if status and (time.monotonic() - tl.submit_flash) < 5.0:
         st_col = C["win"] if status.startswith("✓") else C["loss"] if status.startswith("✗") else C["txt_dim"]
-        _txt(dl, sbx - 320, sby+8, status, (*st_col[:3],220), 13, "raj_r_14")
+        _txt(dl, sbx - 320, sby+8, status, (*st_col[:3],220), 16, "raj_r_16")
 
     if dpg.is_mouse_button_clicked(0):
         mouse = dpg.get_mouse_pos(local=False)
@@ -248,7 +502,53 @@ def _draw_top_bar(dl, vw):
         if bx<=rx<=bx+bw and by<=ry<=by+bh:
             tl.reset()
         if sbx<=rx<=sbx+sbw and sby<=ry<=sby+sbh:
-            _open_submit_dialog()
+            _do_submit()
+
+
+def _draw_rater_bar(dl, vw, rater_y, rater_h):
+    """Draw the 'Rating as' identity bar directly on the drawlist — no floating window."""
+    dpg.draw_rectangle((0, rater_y), (vw, rater_y + rater_h),
+                        fill=(*C["panel"][:3], 200), color=(0,0,0,0), parent=dl)
+    dpg.draw_line((0, rater_y), (vw, rater_y),
+                  color=C["rule_dark"], thickness=1, parent=dl)
+    dpg.draw_line((0, rater_y + rater_h - 1), (vw, rater_y + rater_h - 1),
+                  color=C["rule_dark"], thickness=1, parent=dl)
+
+    ty = rater_y + rater_h // 2 - 7
+    tx = PAD
+
+    _txt(dl, tx, ty, "Rating as:", (*C["txt_dim"][:3], 200), 14, "raj_sb_14")
+    tx += 92
+
+    rater = tl.rater_name
+    id_text  = f"✓  {rater}" if rater else "Not identified"
+    id_color = (*C["win"][:3], 220) if rater else (*C["txt_dim"][:3], 180)
+    _txt(dl, tx, ty, id_text, id_color, 14, "raj_r_14")
+    tx += max(180, len(id_text) * 9 + 20)
+
+    busy = _det.get("busy", False)
+    btn_lbl = "Detecting…" if busy else "Detect from LoL Client"
+    bw, bh  = 190, 26
+    bx      = tx
+    by      = rater_y + (rater_h - bh) // 2
+    btn_fill = (*C["card"][:3], 140) if busy else (*C["gold_dk"][:3], 200)
+    btn_bdr  = (*C["rule_dark"][:3], 140) if busy else (*C["gold"][:3], 180)
+    dpg.draw_rectangle((bx, by), (bx + bw, by + bh),
+                        fill=btn_fill, color=btn_bdr, rounding=3, parent=dl)
+    _txt(dl, bx + 10, by + 6, btn_lbl, (*C["gold_lt"][:3], 210 if not busy else 120), 13, "raj_r_14")
+
+    status = _det.get("status", "")
+    if status:
+        st_col = C["loss"] if status.startswith("✗") else C["txt_dim"]
+        _txt(dl, bx + bw + 14, by + 6, status[:70], (*st_col[:3], 200), 13, "raj_r_14")
+
+    if not busy and dpg.is_mouse_button_clicked(0):
+        mouse = dpg.get_mouse_pos(local=False)
+        vp    = dpg.get_viewport_pos()
+        rx = mouse[0] - vp[0] - 68
+        ry = mouse[1] - vp[1] - 52
+        if bx <= rx <= bx + bw and by <= ry <= by + bh:
+            _detect_identity_bg()
 
 
 def _draw_tier_rows(dl, tx, ty, tw, vw, vh):
@@ -296,7 +596,7 @@ def _tier_contains(tier, name):
 
 def _draw_pool_divider(dl, tx, dy, tw):
     dpg.draw_line((tx, dy),(tx+tw, dy), color=(*C["rule_dark"][:3],180), thickness=1, parent=dl)
-    _txt(dl, tx, dy+4, "PLAYER POOL", (*C["gold_dk"][:3],220), 14, "raj_sb_16")
+    _txt(dl, tx, dy+4, "PLAYER POOL", (*C["gold_dk"][:3],220), 16, "raj_sb_16")
     placed_count = sum(len(v) for v in tl.placements.values())
     total = placed_count + len(tl.unplaced)
     _txt(dl, tx+170, dy+8, f"{placed_count}/{total} placed",
@@ -434,95 +734,46 @@ def _handle_drag(vw, vh, content_y, pool_y):
 
 def _detect_identity_bg():
     """Button callback — detects LCU summoner name in a background thread."""
-    if dpg.does_item_exist("tl_detect_status"):
-        dpg.configure_item("tl_detect_status", default_value="⟳ Detecting…",
-                           color=C["txt_dim"][:3])
+    _det["busy"]   = True
+    _det["status"] = ""
 
     def _bg():
-        display, err = _detect_lcu_summoner()
-        players = _load_players()
-        if display:
-            matched = display if display in players else None
-            if matched:
-                tl.rater_name = matched
-                _save_rater_name(matched)
-                if dpg.does_item_exist("tl_identity_text"):
-                    dpg.configure_item("tl_identity_text",
-                                       default_value=f"✓  {matched}",
-                                       color=C["win"][:3])
-                if dpg.does_item_exist("tl_detect_status"):
-                    dpg.configure_item("tl_detect_status",
-                                       default_value="",
-                                       color=C["txt_dim"][:3])
-            else:
-                if dpg.does_item_exist("tl_detect_status"):
-                    dpg.configure_item("tl_detect_status",
-                                       default_value=f"⚠ '{display}' not in player list",
-                                       color=C["gold_dk"][:3])
+        game_name, err = _detect_lcu_summoner()
+        if not game_name:
+            _det["busy"]   = False
+            _det["status"] = f"✗ {err[:60]}"
+            _det["color"]  = C["loss"]
+            return
+        matched = _resolve_summoner_to_player(game_name)
+        _det["busy"] = False
+        if matched:
+            tl.rater_name = matched
+            _save_rater_name(matched)
+            _det["status"] = ""
+            _show_cover_page(matched)
         else:
-            if dpg.does_item_exist("tl_detect_status"):
-                dpg.configure_item("tl_detect_status",
-                                   default_value=f"✗ {err[:60]}",
-                                   color=C["loss"][:3])
+            # Unknown summoner — fall back to picker on the gate screen
+            global _tl_unlocked
+            _tl_unlocked       = False
+            _det["summoner"]   = game_name
+            _det["picker"]     = True
+            _det["status"]     = ""
 
     threading.Thread(target=_bg, daemon=True).start()
 
 
-def _ensure_rater_window(vw, vh):
-    """
-    Show an identity bar below the top bar.
-    Identity is detected from the LoL client lockfile only — no manual dropdown.
-    """
-    if not dpg.does_item_exist(_TL_RATER_WIN):
-        rater = tl.rater_name
-        id_text  = f"✓  {rater}" if rater else "Not identified — detect below"
-        id_color = C["win"][:3] if rater else C["txt_dim"][:3]
-        with dpg.window(tag=_TL_RATER_WIN,
-                        pos=(68, TOP_BAR_H + _VP_TITLE_H),
-                        width=vw, height=40,
-                        no_title_bar=True, no_resize=True,
-                        no_move=True, no_focus_on_appearing=True,
-                        no_scrollbar=True):
-            with dpg.group(horizontal=True):
-                dpg.add_spacer(width=PAD - 8)
-                lbl = dpg.add_text("Rating as:", color=C["txt_dim"][:3])
-                if "raj_sb_14" in _F: dpg.bind_item_font(lbl, _F["raj_sb_14"])
-                dpg.add_spacer(width=10)
-                dpg.add_text(tag="tl_identity_text",
-                             default_value=id_text, color=id_color)
-                dpg.add_spacer(width=16)
-                detect_btn = dpg.add_button(
-                    label="Detect from LoL Client",
-                    callback=_detect_identity_bg,
-                    height=26,
-                )
-                if "raj_r_12" in _F: dpg.bind_item_font(detect_btn, _F["raj_r_12"])
-                dpg.add_spacer(width=8)
-                dpg.add_text(tag="tl_detect_status", default_value="",
-                             color=C["txt_dim"][:3])
-    else:
-        dpg.configure_item(_TL_RATER_WIN,
-                           pos=(68, TOP_BAR_H + _VP_TITLE_H),
-                           width=vw, height=40)
-        # Keep the identity text in sync if tl.rater_name was updated externally
-        if dpg.does_item_exist("tl_identity_text"):
-            rater = tl.rater_name
-            dpg.configure_item("tl_identity_text",
-                               default_value=f"✓  {rater}" if rater else "Not identified — detect below",
-                               color=C["win"][:3] if rater else C["txt_dim"][:3])
-
-
 # ---------------------------------------------------------------------------
-# Submit dialog
+# Submit
 # ---------------------------------------------------------------------------
 
-def _open_submit_dialog():
-    if dpg.does_item_exist(_TL_SUBMIT_WIN):
-        dpg.delete_item(_TL_SUBMIT_WIN)
+def _do_submit():
+    """Validate and submit the tier list directly — no confirmation dialog."""
+    # Guard: already submitting
+    if tl.submit_status == "Submitting…":
+        return
 
-    # Require rater identity before allowing submission
+    # Validation
     if not tl.rater_name:
-        # Flash warning in the rater bar instead of opening dialog
         tl.submit_status = "⚠  Detect your identity from the LoL client first."
         tl.submit_flash  = time.monotonic()
         return
@@ -533,56 +784,16 @@ def _open_submit_dialog():
         tl.submit_flash  = time.monotonic()
         return
 
-    vp  = dpg.get_viewport_width(), dpg.get_viewport_height()
-    w, h = 380, 200
-    px  = (vp[0] - w) // 2
-    py  = (vp[1] - h) // 2
-    with dpg.window(tag=_TL_SUBMIT_WIN, label="Submit Tier List",
-                    pos=(px, py), width=w, height=h,
-                    no_resize=True, modal=True):
-        dpg.add_spacer(height=12)
-        t = dpg.add_text("SUBMIT YOUR TIER LIST", color=C["gold"][:3])
-        if "raj_sb_18" in _F: dpg.bind_item_font(t, _F["raj_sb_18"])
-        dpg.add_spacer(height=6)
-        dpg.add_text(f"Submitting as:  {tl.rater_name}", color=C["txt"][:3])
-        dpg.add_spacer(height=4)
-        dpg.add_text(f"{placed} player(s) placed across "
-                     f"{len([v for v in tl.placements.values() if v])} tier(s).",
-                     color=C["txt_dim"][:3])
-        dpg.add_spacer(height=18)
-        with dpg.group(horizontal=True):
-            dpg.add_button(label="  SUBMIT  ", callback=_do_submit,
-                           width=120, height=36)
-            dpg.add_spacer(width=12)
-            dpg.add_button(label="Cancel##tl_cancel",
-                           callback=lambda: dpg.delete_item(_TL_SUBMIT_WIN),
-                           width=80, height=36)
-        dpg.add_spacer(height=8)
-        dpg.add_text(tag="tl_submit_status", default_value="",
-                     color=C["txt_dim"][:3])
-
-
-def _do_submit():
-    name = tl.rater_name   # already validated in _open_submit_dialog
-    if not name:
-        return
-    if dpg.does_item_exist("tl_submit_status"):
-        dpg.configure_item("tl_submit_status", default_value="⟳  Writing to sheet…")
+    name = tl.rater_name
     tl.submit_status = "Submitting…"
     tl.submit_flash  = time.monotonic()
 
     def _done():
         tl.submit_status = f"✓  Submitted as {name}"
         tl.submit_flash  = time.monotonic()
-        if dpg.does_item_exist("tl_submit_status"):
-            dpg.configure_item("tl_submit_status", default_value=f"✓  Saved as {name}.")
-        if dpg.does_item_exist(_TL_SUBMIT_WIN):
-            dpg.delete_item(_TL_SUBMIT_WIN)
 
     def _err(msg):
         tl.submit_status = f"✗  Error: {msg[:60]}"
         tl.submit_flash  = time.monotonic()
-        if dpg.does_item_exist("tl_submit_status"):
-            dpg.configure_item("tl_submit_status", default_value=f"✗  {msg[:60]}")
 
     write_tier_list(tl.placements, name, on_done=_done, on_error=_err)
