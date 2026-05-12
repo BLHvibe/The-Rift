@@ -14,7 +14,7 @@ def _config_path():
 
 _DEFAULTS = {
     "api_key":   "",
-    "sheet_url": "",
+    "sheet_url": "https://docs.google.com/spreadsheets/d/1jtScmcfol2YBi0FUSwkXVWkJ4qRBuP9EVIfWSWSDpms/edit",
     "creds_path":"credentials.json",
     "region":    "na1",
     "routing":   "americas",

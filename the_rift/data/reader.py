@@ -3,9 +3,37 @@ Live data reader for The Rift.
 Reads parsed data from Google Sheets tabs after a fetch_ranks run.
 All functions return plain dicts/lists — no DPG dependencies.
 """
-import threading
+import os, sys, threading
 from collections import defaultdict
 from data.config import load_config
+
+
+def _resolve_creds_path(path):
+    """
+    Resolve a credentials.json path at runtime.
+    Priority: absolute path (if it exists) → sys._MEIPASS (frozen bundle)
+    → next to exe → relative to this file → as-is.
+    """
+    if os.path.isabs(path) and os.path.exists(path):
+        return path
+    if getattr(sys, "frozen", False):
+        bundled = os.path.join(sys._MEIPASS, path)
+        if os.path.exists(bundled):
+            return bundled
+        beside_exe = os.path.join(os.path.dirname(sys.executable), path)
+        if os.path.exists(beside_exe):
+            return beside_exe
+    if os.path.exists(path):
+        return path
+    here = os.path.dirname(os.path.abspath(__file__))
+    local = os.path.join(here, path)
+    if os.path.exists(local):
+        return local
+    root = os.path.normpath(os.path.join(here, "..", ".."))
+    root_path = os.path.join(root, path)
+    if os.path.exists(root_path):
+        return root_path
+    return path
 
 # ---------------------------------------------------------------------------
 # Shared live data — written by background loader, read by UI tabs
@@ -88,7 +116,7 @@ def _read_sheets(cfg):
         "https://www.googleapis.com/auth/drive",
     ]
     creds = Credentials.from_service_account_file(
-        cfg.get("creds_path", "credentials.json"), scopes=SCOPES)
+        _resolve_creds_path(cfg.get("creds_path", "credentials.json")), scopes=SCOPES)
     gc   = gspread.authorize(creds)
     sh   = gc.open_by_url(cfg["sheet_url"]) if cfg["sheet_url"].startswith("http") \
            else gc.open(cfg["sheet_url"])
@@ -589,7 +617,7 @@ def _gspread_connect(cfg):
         "https://www.googleapis.com/auth/drive",
     ]
     creds = Credentials.from_service_account_file(
-        cfg.get("creds_path", "credentials.json"), scopes=SCOPES)
+        _resolve_creds_path(cfg.get("creds_path", "credentials.json")), scopes=SCOPES)
     gc  = gspread.authorize(creds)
     url = cfg.get("sheet_url", "")
     return gc.open_by_url(url) if url.startswith("http") else gc.open(url)
@@ -762,18 +790,11 @@ def write_draft_picks(blue_players, red_players, on_done=None, on_error=None):
 
 def run_draft_subprocess(on_done=None, on_error=None, on_line=None):
     """
-    Run `fetch_ranks_gsheets.py --draft` as a subprocess.
-    on_done(sh)   — called with an open Spreadsheet object when exit code == 0
-    on_error(msg) — called on failure / script not found / timeout
-    on_line(text) — optional, called for each stdout line (for console streaming)
+    Run fetch_ranks_gsheets draft analysis.
+    When frozen (exe), imports the module directly — subprocess won't work.
+    When running from source, spawns a subprocess so stdout streams line-by-line.
     """
-    import subprocess, sys, os
-
-    script = _find_draft_script()
-    if not script:
-        if on_error:
-            on_error("fetch_ranks_gsheets.py not found — rich draft analysis unavailable.")
-        return
+    import subprocess
 
     cfg = load_config()
     key = cfg.get("api_key", "")
@@ -782,12 +803,47 @@ def run_draft_subprocess(on_done=None, on_error=None, on_line=None):
             on_error("No API key set — add your Riot API key in Settings.")
         return
 
-    py  = sys.executable   # use same Python that's running the app
+    creds_path = _resolve_creds_path(cfg.get("creds_path", "credentials.json"))
+
+    # Frozen exe: import module directly (subprocess can't run .py files)
+    if getattr(sys, "frozen", False):
+        def _bg_frozen():
+            try:
+                import data.fetch_ranks_gsheets as fg
+                if on_line:
+                    on_line("Running draft analysis…")
+                fg.run_draft(
+                    key=key,
+                    sheet=cfg.get("sheet_url", ""),
+                    creds=creds_path,
+                    region=cfg.get("region", "na1"),
+                    routing=cfg.get("routing", "americas"),
+                )
+                try:
+                    sh = _gspread_connect(cfg)
+                    if on_done:
+                        on_done(sh)
+                except Exception as e:
+                    if on_error:
+                        on_error(f"Couldn't reconnect to sheet after draft: {e}")
+            except Exception as e:
+                if on_error:
+                    on_error(f"Draft analysis error: {e}")
+        threading.Thread(target=_bg_frozen, daemon=True, name="draft_frozen").start()
+        return
+
+    # Dev mode: subprocess with stdout streaming
+    script = _find_draft_script()
+    if not script:
+        if on_error:
+            on_error("fetch_ranks_gsheets.py not found — rich draft analysis unavailable.")
+        return
+
     cmd = [
-        py, script,
+        sys.executable, script,
         "--key",     key,
         "--sheet",   cfg.get("sheet_url", ""),
-        "--creds",   cfg.get("creds_path", "credentials.json"),
+        "--creds",   creds_path,
         "--region",  cfg.get("region",  "na1"),
         "--routing", cfg.get("routing", "americas"),
         "--draft",
@@ -817,7 +873,6 @@ def run_draft_subprocess(on_done=None, on_error=None, on_line=None):
                 if on_error:
                     on_error(f"Draft subprocess exited with code {proc.returncode}.")
                 return
-            # Re-open sheet so caller can read results
             try:
                 sh = _gspread_connect(cfg)
                 if on_done:
