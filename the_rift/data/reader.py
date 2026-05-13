@@ -212,7 +212,8 @@ def _read_final_rankings(sh):
     if len(rows) < 2:
         return _read_rank_data(sh)
 
-    results = []
+    results    = []
+    seen_names = set()
     pos = 0
     for row in rows[1:]:
         if len(row) < 8:
@@ -229,6 +230,10 @@ def _read_final_rankings(sh):
         # Skip rows that are clearly non-player (headers re-appearing, etc.)
         if rank_str.lower() in ("rank", "#", ""):
             continue
+        # Skip duplicate player rows (keep first / highest-ranked occurrence)
+        if name.lower() in seen_names:
+            continue
+        seen_names.add(name.lower())
 
         try:
             ts = float(tier_score) if tier_score else 0.0
@@ -270,11 +275,16 @@ def _read_rank_data(sh):
     if len(rows) < 3:
         return []
 
-    results = []
+    results    = []
+    seen_names = set()
     for row in rows[2:]:
         if len(row) < 9 or not row[0]:
             continue
         try:
+            name = str(row[1]).strip()
+            if name.lower() in seen_names:
+                continue
+            seen_names.add(name.lower())
             tier_raw = str(row[2]).strip()
             div_raw  = str(row[3]).strip()
             tier = _normalise_tier(tier_raw)
@@ -285,7 +295,7 @@ def _read_rank_data(sh):
             score = str(row[7]) if row[7] else "0"
             results.append({
                 "rank":       int(row[0]),
-                "name":       str(row[1]).strip(),
+                "name":       name,
                 "tier":       tier,
                 "avg_tier":   tier,
                 "tier_score": str(int(float(row[7]))) if row[7] else "0",
@@ -1945,11 +1955,14 @@ def check_for_update(current_version, repo="BLHvibe/The-Rift", on_done=None):
 
     def _bg():
         try:
-            import urllib.request, json
+            import urllib.request, json, ssl
             url = f"https://api.github.com/repos/{repo}/releases/latest"
             req = urllib.request.Request(
                 url, headers={"User-Agent": "TheRift/updater"})
-            with urllib.request.urlopen(req, timeout=8) as resp:
+            # Use an unverified SSL context so the check works inside
+            # PyInstaller frozen bundles, which lack the system CA bundle.
+            ctx = ssl._create_unverified_context()
+            with urllib.request.urlopen(req, timeout=8, context=ctx) as resp:
                 data = json.loads(resp.read())
             latest_tag   = data.get("tag_name", "")
             assets       = data.get("assets", [])

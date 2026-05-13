@@ -45,22 +45,30 @@ def _get_player_pool():
     Return player list for draft dropdowns.
     Prefer live.scout — it has both final_score (win probability) AND top_champs
     (ban/comp computation).  Fall back to rankings, then live.players, then config.
-    All sources are filtered to remove placeholder names.
+    All sources are filtered to remove placeholder names and deduplicated by name.
     """
+    def _dedup(players, name_fn=lambda p: p.get("name", "")):
+        seen, out = set(), []
+        for p in players:
+            n = name_fn(p)
+            if _is_real_player(n) and n.lower() not in seen:
+                seen.add(n.lower())
+                out.append(p)
+        return out
+
     if live.loaded and live.scout:
-        return [p for p in live.scout    if _is_real_player(p.get("name", ""))]
+        return _dedup(live.scout)
     if live.loaded and live.rankings:
-        return [p for p in live.rankings if _is_real_player(p.get("name", ""))]
-    # Fall back to live.players (from Players sheet) if available
+        return _dedup(live.rankings)
     if live.loaded and live.players:
-        return [{"name": p, "tier": "Unranked", "final_score": 50.0, "score": 50.0}
-                for p in live.players if _is_real_player(p)]
-    # Last resort: config
+        return _dedup(
+            [{"name": p, "tier": "Unranked", "final_score": 50.0, "score": 50.0}
+             for p in live.players])
     cfg_players = load_config().get("players", [])
-    return [{"name": p if isinstance(p, str) else p.get("name", str(p)),
-             "tier": "Unranked", "final_score": 50.0, "score": 50.0}
-            for p in cfg_players if _is_real_player(
-                p if isinstance(p, str) else p.get("name", str(p)))]
+    return _dedup(
+        [{"name": p if isinstance(p, str) else p.get("name", str(p)),
+          "tier": "Unranked", "final_score": 50.0, "score": 50.0}
+         for p in cfg_players])
 
 
 def _player_score(p):

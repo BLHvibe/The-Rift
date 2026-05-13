@@ -26,7 +26,7 @@ from ui.commands import draw_commands
 from ui.feed import draw_feed
 from data.reader import live, load_live_data, check_for_update
 
-__version__ = "2.0.1"   # bump this on each release
+__version__ = "2.0.3"   # bump this on each release
 
 WIN_W, WIN_H = 1280, 800
 TITLE_H      = 52    # titlebar height
@@ -718,33 +718,43 @@ def main():
         if _pending_update[0] and not dpg.does_item_exist(_UPDATE_WIN):
             latest_tag, _dl_url = _pending_update[0]
             _pending_update[0] = None   # consume once
-            nw, nh = 340, 90
+            nw, nh = 400, 128
             nx = vw - nw - 16
             ny = TITLE_H + 8
+            _tag_capture  = latest_tag
+            _url_capture  = _dl_url
             with dpg.window(tag=_UPDATE_WIN,
                             pos=(nx, ny), width=nw, height=nh,
                             no_title_bar=True, no_resize=True,
                             no_move=False, no_scrollbar=True):
-                with dpg.drawlist(tag="update_dl", width=nw, height=nh):
-                    dpg.draw_rectangle((0, 0), (nw, nh),
+                with dpg.drawlist(tag="update_dl", width=nw, height=78):
+                    dpg.draw_rectangle((0, 0), (nw, 78),
                                        fill=(*C["card"][:3], 240),
                                        color=(*C["gold"][:3], 220), rounding=6)
-                    dpg.draw_rectangle((0, 0), (4, nh),
+                    dpg.draw_rectangle((0, 0), (4, 78),
                                        fill=(*C["gold"][:3], 255),
                                        color=(0, 0, 0, 0), rounding=2)
-                    t1 = dpg.draw_text((14, 12),
+                    t1 = dpg.draw_text((14, 10),
                                        f"◆  UPDATE AVAILABLE: {latest_tag}",
-                                       color=(*C["gold_lt"][:3], 240), size=15)
+                                       color=(*C["gold_lt"][:3], 240), size=16)
                     if "raj_sb_16" in _FONTS: dpg.bind_item_font(t1, _FONTS["raj_sb_16"])
-                    t2 = dpg.draw_text((14, 36),
-                                       "Visit GitHub Releases to download.",
-                                       color=(*C["txt"][:3], 200), size=12)
+                    t2 = dpg.draw_text((14, 40),
+                                       "A new version of The Rift is ready to download.",
+                                       color=(*C["txt"][:3], 200), size=13)
                     if "raj_r_12" in _FONTS: dpg.bind_item_font(t2, _FONTS["raj_r_12"])
                 with dpg.group(horizontal=True):
                     dpg.add_spacer(width=14)
-                    dpg.add_button(label="Dismiss##update_btn", height=22,
+                    dpg.add_button(label="Dismiss",
+                                   height=28,
                                    callback=lambda: dpg.delete_item(_UPDATE_WIN)
                                    if dpg.does_item_exist(_UPDATE_WIN) else None)
+                    dpg.add_spacer(width=8)
+                    def _open_release(_tc=_tag_capture, _du=_url_capture):
+                        import webbrowser
+                        webbrowser.open(_du or f"https://github.com/BLHvibe/The-Rift/releases/tag/{_tc}")
+                    dpg.add_button(label="Download ↗",
+                                   height=28,
+                                   callback=_open_release)
 
         # Splash overlay
         if not state.splash_done:
