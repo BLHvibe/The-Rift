@@ -26,7 +26,7 @@ from ui.commands import draw_commands
 from ui.feed import draw_feed
 from data.reader import live, load_live_data, check_for_update
 
-__version__ = "2.0.4"   # bump this on each release
+__version__ = "2.0.5"   # bump this on each release
 
 WIN_W, WIN_H = 1280, 800
 TITLE_H      = 52    # titlebar height
@@ -749,9 +749,9 @@ def main():
                                    callback=lambda: dpg.delete_item(_UPDATE_WIN)
                                    if dpg.does_item_exist(_UPDATE_WIN) else None)
                     dpg.add_spacer(width=8)
-                    def _open_release(_tc=_tag_capture, _du=_url_capture):
+                    def _open_release():
                         import webbrowser
-                        webbrowser.open(_du or f"https://github.com/BLHvibe/The-Rift/releases/tag/{_tc}")
+                        webbrowser.open(_url_capture or f"https://github.com/BLHvibe/The-Rift/releases/tag/{_tag_capture}")
                     dpg.add_button(label="Download ↗",
                                    height=28,
                                    callback=_open_release)
