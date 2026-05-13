@@ -707,6 +707,12 @@ def main():
             from ui.inhouse import update_live_data as _ih_update
             _ih_update(live.inhouse, live.inhouse_champs)
             inhouse_state.begin_load(live.inhouse)
+            # Auto-sync avatars from Sheets so every user sees uploaded pfps
+            # without needing to manually click "Sync All Avatars"
+            from data.reader import download_all_avatars
+            from ui.inhouse import queue_avatars_reload_all
+            download_all_avatars(on_done=queue_avatars_reload_all,
+                                 on_error=lambda _: None)
 
         # ── Show update notification (main-thread safe) ───────────────────
         if _pending_update[0] and not dpg.does_item_exist(_UPDATE_WIN):
