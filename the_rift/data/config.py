@@ -25,6 +25,23 @@ _DEFAULTS = {
 def load_config():
     path = _config_path()
     if not os.path.exists(path):
+        # First run of the frozen exe — bootstrap from the bundled config
+        # template so the API key, sheet URL, etc. are pre-populated.
+        if getattr(sys, "frozen", False):
+            bundled = os.path.join(sys._MEIPASS, "data", "config.json")
+            if os.path.exists(bundled):
+                try:
+                    with open(bundled, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    cfg = dict(_DEFAULTS)
+                    cfg.update(data)
+                    # Normalise creds_path to relative so _resolve_creds_path
+                    # finds the bundled credentials.json on any machine.
+                    cfg["creds_path"] = "credentials.json"
+                    save_config(cfg)
+                    return cfg
+                except Exception:
+                    pass
         return dict(_DEFAULTS)
     try:
         with open(path, "r", encoding="utf-8") as f:
