@@ -71,7 +71,8 @@ def draw_commands(dl, vw, vh, fonts=None):
     if fonts:
         set_fonts(fonts)
 
-    cmds.tick()
+    # Drain queue once; use result to decide whether to refresh the console
+    changed = cmds.tick()
 
     dpg.delete_item(dl, children_only=True)
     dpg.draw_rectangle((0,0),(vw,vh), fill=C["bg"], color=(0,0,0,0), parent=dl)
@@ -83,22 +84,23 @@ def draw_commands(dl, vw, vh, fonts=None):
                   color=C["rule_dark"], thickness=1, parent=dl)
     _txt(dl, PAD, 12, "ADMIN / COMMANDS", (*C["gold"][:3],220), 22, "raj_24")
 
+    # Overlay window: position relative to actual sidebar width, not hardcoded 68
+    vp_w = dpg.get_viewport_width()
+    sb_w = vp_w - vw   # actual current sidebar pixel width
     if not dpg.does_item_exist(_CMD_WIN):
-        _build_commands_window(vw, vh)
+        _build_commands_window(sb_w, vw, vh)
     else:
-        dpg.configure_item(_CMD_WIN,
-                           pos=(68, TOP_BAR_H),
-                           width=vw-68, height=vh-TOP_BAR_H)
+        dpg.configure_item(_CMD_WIN, pos=(sb_w, TOP_BAR_H), width=vw, height=vh-TOP_BAR_H)
 
-    # Flush pending log lines into console widget
-    if cmds.tick() and dpg.does_item_exist("cmd_console"):
+    # Flush pending log lines into console widget (main thread only)
+    if changed and dpg.does_item_exist("cmd_console"):
         _refresh_console()
 
 
-def _build_commands_window(vw, vh):
+def _build_commands_window(sb_w, vw, vh):
     with dpg.window(tag=_CMD_WIN,
-                    pos=(68, TOP_BAR_H),
-                    width=vw-68, height=vh-TOP_BAR_H,
+                    pos=(sb_w, TOP_BAR_H),
+                    width=vw, height=vh-TOP_BAR_H,
                     no_title_bar=True, no_resize=True,
                     no_move=True, no_focus_on_appearing=True):
 
@@ -215,8 +217,6 @@ def _refresh_console():
 
 def _log(text, color=None):
     cmds.log(text, color)
-    if dpg.does_item_exist("cmd_console"):
-        _refresh_console()
 
 
 def _clear_console():

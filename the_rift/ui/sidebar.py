@@ -15,6 +15,7 @@ _OVERLAY_TAGS = {
     "feed":     "feed_overlay_win",
     "scout":    "scout_report_panel_win",
     "tierlist": "tl_rater_win",
+    "inhouse":  "inhouse_filter_win",
 }
 
 def _cleanup_overlay(tab_id):

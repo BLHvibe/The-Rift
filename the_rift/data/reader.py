@@ -611,7 +611,177 @@ def _read_inhouse(sh, known_names=None):
     for i, p in enumerate(leaderboard):
         p["rank"] = i + 1
 
+    # If _InhouseGameLog was empty, fall back to the pre-computed display sheet
+    if not leaderboard:
+        return _read_inhouse_stats_tab(sh, known_names)
+
     return leaderboard, inhouse_champs, primary_roles
+
+
+def _parse_inhouse_stats_rows(rows, known_names=None):
+    """
+    Parse the 'In-House Stats' display sheet into the same leaderboard/champs
+    structure that _read_inhouse returns.  Used as a fallback when _InhouseGameLog
+    is missing or empty.
+
+    Sheet layout (matches the CSV attached by the user):
+      Row 0:  "IN-HOUSE 5v5 STATS"
+      Row 3:  "IN-HOUSE LEADERBOARD"
+      Row 4:  column headers (#, Player, Games, Wins, Losses, Win Rate, KDA, …)
+      Row 5+: leaderboard data until blank rows
+      …
+      "IN-HOUSE CHAMPION STATS" section with per-player champion blocks
+    """
+    leaderboard    = []
+    inhouse_champs = {}
+
+    # ── Leaderboard section ──────────────────────────────────────────────────
+    lb_header_row = None
+    for i, row in enumerate(rows):
+        first = str(row[0]).strip().upper() if row else ""
+        if first.startswith("IN-HOUSE LEADERBOARD"):
+            lb_header_row = i + 1   # next row = column headers
+            break
+
+    if lb_header_row is not None:
+        for row in rows[lb_header_row + 1:]:   # +1 to skip column header row
+            if not row or not str(row[0]).strip():
+                break
+            try:
+                int(str(row[0]).strip())
+            except ValueError:
+                break  # hit next section header
+
+            try:
+                rank     = int(str(row[0]).strip())
+                name     = str(row[1]).strip()
+                games    = int(str(row[2]).strip())   if len(row) > 2  and row[2]  else 0
+                wins     = int(str(row[3]).strip())   if len(row) > 3  and row[3]  else 0
+                losses   = int(str(row[4]).strip())   if len(row) > 4  and row[4]  else 0
+                wr_str   = str(row[5]).strip()        if len(row) > 5  else "0%"
+                kda      = float(str(row[6]).strip()) if len(row) > 6  and row[6]  else 0.0
+                avg_dmg  = str(row[11]).strip()       if len(row) > 11 and row[11] else "0"
+                avg_gold = str(row[12]).strip()       if len(row) > 12 and row[12] else "0"
+            except (ValueError, IndexError):
+                continue
+
+            leaderboard.append({
+                "rank":           rank,
+                "player":         name,
+                "games":          games,
+                "wins":           wins,
+                "losses":         losses,
+                "wr":             wr_str,
+                "kda":            kda,
+                "cs_min":         "—",
+                "damage":         avg_dmg,
+                "gold":           avg_gold,
+                "recent_results": [],
+            })
+
+    # ── Champion stats section ───────────────────────────────────────────────
+    champ_section_row = None
+    for i, row in enumerate(rows):
+        first = str(row[0]).strip().upper() if row else ""
+        if first.startswith("IN-HOUSE CHAMPION STATS"):
+            champ_section_row = i + 1
+            break
+
+    if champ_section_row is not None:
+        current_player = None
+        current_champs = []
+        i = champ_section_row
+        while i < len(rows):
+            row = rows[i]
+            first = str(row[0]).strip() if row else ""
+
+            if not first:
+                # Blank row: flush current player
+                if current_player and current_champs:
+                    inhouse_champs[current_player] = current_champs
+                current_player = None
+                current_champs = []
+                i += 1
+                continue
+
+            upper = first.upper()
+            if upper.startswith("IN-HOUSE ROLE"):
+                break   # role section starts — we're done
+
+            # Player header: "PlayerName  -  N games  |  XX.X% WR"
+            if "  -  " in first and "games" in first.lower():
+                if current_player and current_champs:
+                    inhouse_champs[current_player] = current_champs
+                current_player = first.split("  -  ")[0].strip()
+                current_champs = []
+                i += 1
+                continue
+
+            # Champion column header row
+            if upper.startswith("CHAMPION"):
+                i += 1
+                continue
+
+            # Champion data row
+            if current_player:
+                try:
+                    cg   = int(str(row[1]).strip())   if len(row) > 1 and row[1] else 0
+                    cw   = int(str(row[2]).strip())   if len(row) > 2 and row[2] else 0
+                    cl   = int(str(row[3]).strip())   if len(row) > 3 and row[3] else 0
+                    cwr  = str(row[4]).strip()         if len(row) > 4 else "0%"
+                    ckda = float(str(row[5]).strip())  if len(row) > 5 and row[5] else 0.0
+                    ck   = float(str(row[6]).strip())  if len(row) > 6 and row[6] else 0.0
+                    cd   = float(str(row[7]).strip())  if len(row) > 7 and row[7] else 0.0
+                    ca   = float(str(row[8]).strip())  if len(row) > 8 and row[8] else 0.0
+                    cdmg = str(row[9]).strip()         if len(row) > 9 and row[9] else "0"
+                    if cg > 0:
+                        current_champs.append({
+                            "champ":   first,
+                            "games":   cg,
+                            "wins":    cw,
+                            "losses":  cl,
+                            "wr":      cwr,
+                            "kda":     ckda,
+                            "kills":   ck,
+                            "deaths":  cd,
+                            "assists": ca,
+                            "damage":  cdmg,
+                        })
+                except (ValueError, IndexError):
+                    pass
+
+            i += 1
+
+        if current_player and current_champs:
+            inhouse_champs[current_player] = current_champs
+
+    # ── Filter to roster ─────────────────────────────────────────────────────
+    if known_names:
+        leaderboard    = [p for p in leaderboard    if p["player"] in known_names]
+        inhouse_champs = {k: v for k, v in inhouse_champs.items() if k in known_names}
+
+    # Re-sort + re-rank after filtering
+    def _wr_key(p):
+        try:
+            return float(str(p["wr"]).replace("%", ""))
+        except (ValueError, TypeError):
+            return 0.0
+
+    leaderboard.sort(key=lambda p: (_wr_key(p), p["games"]), reverse=True)
+    for idx, p in enumerate(leaderboard):
+        p["rank"] = idx + 1
+
+    return leaderboard, inhouse_champs, {}
+
+
+def _read_inhouse_stats_tab(sh, known_names=None):
+    """Read leaderboard from the 'In-House Stats' display sheet."""
+    try:
+        ws   = sh.worksheet("In-House Stats")
+        rows = ws.get_all_values()
+        return _parse_inhouse_stats_rows(rows, known_names)
+    except Exception:
+        return [], {}, {}
 
 
 # ---------------------------------------------------------------------------
@@ -822,13 +992,21 @@ def run_draft_subprocess(on_done=None, on_error=None, on_line=None):
                 import data.fetch_ranks_gsheets as fg
                 if on_line:
                     on_line("Running draft analysis…")
-                fg.run_draft(
-                    key=key,
-                    sheet=cfg.get("sheet_url", ""),
-                    creds=creds_path,
-                    region=cfg.get("region", "na1"),
-                    routing=cfg.get("routing", "americas"),
-                )
+                # Simulate the CLI args that the subprocess path would pass
+                _old_argv = sys.argv[:]
+                sys.argv = [
+                    "fetch_ranks_gsheets",
+                    "--key",     key,
+                    "--sheet",   cfg.get("sheet_url", ""),
+                    "--creds",   creds_path,
+                    "--region",  cfg.get("region", "na1"),
+                    "--routing", cfg.get("routing", "americas"),
+                    "--draft",
+                ]
+                try:
+                    fg.main()
+                finally:
+                    sys.argv = _old_argv
                 try:
                     sh = _gspread_connect(cfg)
                     if on_done:

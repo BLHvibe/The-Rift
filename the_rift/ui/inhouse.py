@@ -442,29 +442,18 @@ def draw_inhouse(dl, vw, vh, fonts=None):
 
 
 def _draw_idle(dl, vw, vh):
+    # If live data is already here, skip the idle screen entirely
+    if live.loaded and live.inhouse:
+        update_live_data(live.inhouse, live.inhouse_champs)
+        inhouse.begin_load(live.inhouse)
+        return
+
     cx, cy = vw//2, vh//2
     t = (math.sin(time.monotonic()*1.3)+1)/2
     a = int(90 + t*110)
     _txt(dl, cx-180, cy-30, "IN-HOUSE CUSTOMS", (*C["gold"][:3], a), 36, "raj_36")
-    hint = "Live data ready — click to load" if (live.loaded and live.inhouse) \
-           else "Fetch leaderboard to begin"
+    hint = "Connecting to Google Sheets…" if not live.loaded else "No in-house data found"
     _txt(dl, cx-165, cy+14, hint, (*C["txt_dim"][:3], int(a*0.6)), 18, "raj_18")
-    bw, bh = 320, 60
-    bx, by = cx-bw//2, cy+56
-    dpg.draw_rectangle((bx,by),(bx+bw,by+bh), fill=(*C["gold_dk"][:3],210),
-                        color=(*C["gold"][:3],210), rounding=6, parent=dl)
-    _txt(dl, bx+bw//2-130, by+16, "LOAD LEADERBOARD", (*C["gold_lt"][:3], 230), 22, "raj_24")
-
-    if dpg.is_mouse_button_clicked(0):
-        mouse = dpg.get_mouse_pos(local=False)
-        vp    = dpg.get_viewport_pos()
-        rx = mouse[0]-vp[0]-68; ry = mouse[1]-vp[1]-52
-        if bx<=rx<=bx+bw and by<=ry<=by+bh:
-            if live.loaded and live.inhouse:
-                update_live_data(live.inhouse, live.inhouse_champs)
-                inhouse.begin_load(live.inhouse)
-            else:
-                inhouse.begin_load(_DEMO_LEADERBOARD)
 
 
 def _draw_loading(dl, vw, vh):

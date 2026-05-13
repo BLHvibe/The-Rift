@@ -108,16 +108,16 @@ def draw_settings(dl, vw, vh, fonts=None):
     _txt(dl, PAD, 12, "SETTINGS", (*C["gold"][:3],220), 22, "raj_24")
 
     # Settings form lives in a DPG window overlay for native input widgets
+    vp_w = dpg.get_viewport_width()
+    sb_w = vp_w - vw   # actual current sidebar pixel width
     if not dpg.does_item_exist(_SETTINGS_WIN):
-        _build_settings_window(vw, vh)
+        _build_settings_window(sb_w, vw, vh)
     else:
-        # Reposition if viewport resized
-        dpg.configure_item(_SETTINGS_WIN,
-                           pos=(68, TOP_BAR_H),
-                           width=vw-68, height=vh-TOP_BAR_H)
+        # Reposition if viewport or sidebar width changed
+        dpg.configure_item(_SETTINGS_WIN, pos=(sb_w, TOP_BAR_H), width=vw, height=vh-TOP_BAR_H)
 
 
-def _build_settings_window(vw, vh):
+def _build_settings_window(sb_w, vw, vh):
     # Reset detection state for a fresh build
     _pfp_det["busy"]        = False
     _pfp_det["player_name"] = ""
@@ -125,8 +125,8 @@ def _build_settings_window(vw, vh):
     _pfp_det["picker"]      = False
 
     with dpg.window(tag=_SETTINGS_WIN,
-                    pos=(68, TOP_BAR_H),
-                    width=vw-68, height=vh-TOP_BAR_H,
+                    pos=(sb_w, TOP_BAR_H),
+                    width=vw, height=vh-TOP_BAR_H,
                     no_title_bar=True, no_resize=True,
                     no_move=True, no_focus_on_appearing=True):
 

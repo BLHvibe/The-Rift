@@ -26,7 +26,7 @@ from ui.commands import draw_commands
 from ui.feed import draw_feed
 from data.reader import live, load_live_data, check_for_update
 
-__version__ = "2.0.5"   # bump this on each release
+__version__ = "2.0.6"   # bump this on each release
 
 WIN_W, WIN_H = 1280, 800
 TITLE_H      = 52    # titlebar height
@@ -594,6 +594,10 @@ def main():
     # Live data load — reads Rank Data + Player Stats + InhouseGameLog from Sheets
     def _on_live_data_ready():
         splash.loading_done = True
+        # Auto-sync avatars on every launch so all clients stay up-to-date
+        from data.reader import download_all_avatars
+        from ui.inhouse import queue_avatars_reload_all
+        download_all_avatars(on_done=queue_avatars_reload_all, on_error=lambda _: None)
 
     def _on_live_data_error(msg):
         print(f"[live data] {msg}")
@@ -707,12 +711,6 @@ def main():
             from ui.inhouse import update_live_data as _ih_update
             _ih_update(live.inhouse, live.inhouse_champs)
             inhouse_state.begin_load(live.inhouse)
-            # Auto-sync avatars from Sheets so every user sees uploaded pfps
-            # without needing to manually click "Sync All Avatars"
-            from data.reader import download_all_avatars
-            from ui.inhouse import queue_avatars_reload_all
-            download_all_avatars(on_done=queue_avatars_reload_all,
-                                 on_error=lambda _: None)
 
         # ── Show update notification (main-thread safe) ───────────────────
         if _pending_update[0] and not dpg.does_item_exist(_UPDATE_WIN):
