@@ -313,7 +313,10 @@ def _browse_creds():
     try:
         import tkinter as tk
         from tkinter import filedialog
-        root = tk.Tk(); root.withdraw()
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes('-topmost', True)
+        root.update()
         path = filedialog.askopenfilename(
             title="Select credentials.json",
             filetypes=[("JSON files","*.json"),("All files","*.*")])
@@ -328,7 +331,10 @@ def _browse_icon():
     try:
         import tkinter as tk
         from tkinter import filedialog
-        root = tk.Tk(); root.withdraw()
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes('-topmost', True)
+        root.update()
         path = filedialog.askopenfilename(
             title="Select profile image",
             filetypes=[("Images","*.png *.jpg *.jpeg"),("All files","*.*")])

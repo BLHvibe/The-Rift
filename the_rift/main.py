@@ -26,7 +26,7 @@ from ui.commands import draw_commands
 from ui.feed import draw_feed
 from data.reader import live, load_live_data, check_for_update
 
-__version__ = "2.0.0"   # bump this on each release
+__version__ = "2.0.1"   # bump this on each release
 
 WIN_W, WIN_H = 1280, 800
 TITLE_H      = 52    # titlebar height
@@ -164,15 +164,24 @@ def _draw_crown(dl, cx, cy, size, alpha):
 # ---------------------------------------------------------------------------
 _drag_start     = None
 _win_pos_start  = None
+_is_fullscreen  = [True]   # tracks viewport fullscreen state
 
 def _handle_drag():
     global _drag_start, _win_pos_start
+    # No dragging while fullscreen — window can't be repositioned
+    if _is_fullscreen[0]:
+        _drag_start = None
+        return
+
     mouse  = dpg.get_mouse_pos(local=False)
     vp_pos = dpg.get_viewport_pos()
     rel    = (mouse[0] - vp_pos[0], mouse[1] - vp_pos[1])
+    vw     = dpg.get_viewport_width()
 
     if dpg.is_mouse_button_down(0):
-        if rel[1] < TITLE_H and _drag_start is None:
+        # Exclude close + fullscreen button areas so clicks don't start a drag
+        in_buttons = rel[0] >= vw - TITLE_H * 2 and 8 <= rel[1] <= TITLE_H - 8
+        if rel[1] < TITLE_H and _drag_start is None and not in_buttons:
             _drag_start    = mouse
             _win_pos_start = list(vp_pos)
     else:
@@ -621,6 +630,7 @@ def main():
         f11_down = dpg.is_key_down(dpg.mvKey_F11)
         if f11_down and not _f11_was_down[0]:
             dpg.toggle_viewport_fullscreen()
+            _is_fullscreen[0] = not _is_fullscreen[0]
         _f11_was_down[0] = f11_down
 
         # Resize: update all containers when viewport dimensions change
@@ -653,6 +663,7 @@ def main():
             # Fullscreen toggle button (second from right)
             elif vw-TITLE_H*2+8 <= rx <= vw-TITLE_H+8 and 8 <= ry <= TITLE_H-8:
                 dpg.toggle_viewport_fullscreen()
+                _is_fullscreen[0] = not _is_fullscreen[0]
 
         # Title bar redrawn every frame so button hit-states stay current
         _draw_titlebar("titlebar_dl", vw)
