@@ -2105,49 +2105,57 @@ def _draw_lane_card(dl, px, py, pw, ph, role, blue_name, red_name,
     _txt(dl, chip_x + 6, py + 5, phase,
          (*pcol[:3], card_a), 12, "raj_sb_12")
 
+    # Team colors
+    BLUE_TEAM = (58, 96, 168)
+    RED_TEAM  = (220, 90, 90)
+
     # Blue name left (mid-row)
     mid_y = py + ph // 2
     name_y = mid_y - 10
     _txt(dl, ox + 14, name_y, blue_name.upper(),
-         (*C["platinum"][:3], card_a), 19, "raj_20")
+         (*BLUE_TEAM, card_a), 19, "raj_20")
     # Red name right
     red_disp = red_name.upper()
     red_w = len(red_disp) * 11
     _txt(dl, ox + pw - slide - red_w - 12, name_y, red_disp,
-         (220, 110, 110, card_a), 19, "raj_20")
+         (*RED_TEAM, card_a), 19, "raj_20")
 
-    # Center directional bar — fills from middle in winner's direction
-    bw_w   = min(180, max(120, (pw - slide) // 2 - 80))
+    # Split win-share bar — blue portion = blue_win%, red portion = (100 - blue_win)%
+    # Dominant side fills more of the bar in its team color.
+    bw_w   = min(360, max(220, (pw - slide) - 40))
     bx     = ox + (pw - slide - bw_w) // 2
-    bh_bar = 10
+    bh_bar = 14
     by     = mid_y + 14
-    # Track
+
+    blue_frac = max(0.0, min(1.0, blue_win / 100.0))
+    # Animate with reveal: ease from 50/50 toward true split
+    blue_frac_anim = 0.5 + (blue_frac - 0.5) * reveal
+    split_x = bx + int(bw_w * blue_frac_anim)
+
+    # Blue portion
+    if split_x > bx:
+        dpg.draw_rectangle((bx, by), (split_x, by + bh_bar),
+                            fill=(*BLUE_TEAM, card_a),
+                            color=(0, 0, 0, 0), rounding=4, parent=dl)
+    # Red portion
+    if split_x < bx + bw_w:
+        dpg.draw_rectangle((split_x, by), (bx + bw_w, by + bh_bar),
+                            fill=(*RED_TEAM, card_a),
+                            color=(0, 0, 0, 0), rounding=4, parent=dl)
+    # Outline
     dpg.draw_rectangle((bx, by), (bx + bw_w, by + bh_bar),
-                        fill=(*C["bg"][:3], card_a),
+                        fill=(0, 0, 0, 0),
                         color=(*C["rule_dark"][:3], int(card_a * 0.7)),
                         rounding=4, parent=dl)
-    # Center notch
-    dpg.draw_line((bx + bw_w // 2, by - 2),
-                  (bx + bw_w // 2, by + bh_bar + 2),
-                  color=(*C["gold_dk"][:3], card_a),
-                  thickness=1, parent=dl)
-    # Fill (animate per-lane via reveal too)
-    delta = (blue_win - 50) / 50.0
-    delta = max(-1.0, min(1.0, delta)) * reveal
-    half  = bw_w // 2
-    if delta >= 0:
-        fw = int(half * delta)
-        dpg.draw_rectangle((bx + half, by + 1), (bx + half + fw, by + bh_bar - 1),
-                            fill=(79, 168, 130, card_a),
-                            color=(0, 0, 0, 0), rounding=3, parent=dl)
+
+    # Big % readout — show the DOMINANT side's win %, colored in winner's team color
+    if blue_win >= 50:
+        dom_pct = blue_win
+        bar_col = BLUE_TEAM
     else:
-        fw = int(half * abs(delta))
-        dpg.draw_rectangle((bx + half - fw, by + 1), (bx + half, by + bh_bar - 1),
-                            fill=(220, 90, 90, card_a),
-                            color=(0, 0, 0, 0), rounding=3, parent=dl)
-    # Big % readout — color follows winner side
-    bar_col = (79, 168, 130) if blue_win >= 50 else (220, 90, 90)
-    pct_str = f"{blue_win:.0f}%"
+        dom_pct = 100 - blue_win
+        bar_col = RED_TEAM
+    pct_str = f"{dom_pct:.0f}%"
     pw_pct  = len(pct_str) * 11
     _txt(dl, ox + (pw - slide - pw_pct) // 2, name_y - 4, pct_str,
          (*bar_col, card_a), 22, "raj_20")

@@ -22,35 +22,58 @@ _DEFAULTS = {
     "last_run":  {},
 }
 
+def _load_bundled_config():
+    """Read the bundled config template shipped inside the frozen exe."""
+    if not getattr(sys, "frozen", False):
+        return {}
+    bundled = os.path.join(sys._MEIPASS, "data", "config.json")
+    if not os.path.exists(bundled):
+        return {}
+    try:
+        with open(bundled, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
 def load_config():
     path = _config_path()
+    bundled = _load_bundled_config()
+
     if not os.path.exists(path):
         # First run of the frozen exe — bootstrap from the bundled config
         # template so the API key, sheet URL, etc. are pre-populated.
-        if getattr(sys, "frozen", False):
-            bundled = os.path.join(sys._MEIPASS, "data", "config.json")
-            if os.path.exists(bundled):
-                try:
-                    with open(bundled, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    cfg = dict(_DEFAULTS)
-                    cfg.update(data)
-                    # Normalise creds_path to relative so _resolve_creds_path
-                    # finds the bundled credentials.json on any machine.
-                    cfg["creds_path"] = "credentials.json"
-                    save_config(cfg)
-                    return cfg
-                except Exception:
-                    pass
+        if bundled:
+            cfg = dict(_DEFAULTS)
+            cfg.update(bundled)
+            cfg["creds_path"] = "credentials.json"
+            save_config(cfg)
+            return cfg
         return dict(_DEFAULTS)
+
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         cfg = dict(_DEFAULTS)
         cfg.update(data)
-        return cfg
     except Exception:
-        return dict(_DEFAULTS)
+        cfg = dict(_DEFAULTS)
+
+    # Backfill bundled values for any keys the user's local config is missing
+    # or has blanked out. This recovers users with a stale config.json from an
+    # older build that shipped without an api_key / sheet_url.
+    if bundled:
+        changed = False
+        for key in ("api_key", "sheet_url", "region", "routing"):
+            if not cfg.get(key) and bundled.get(key):
+                cfg[key] = bundled[key]
+                changed = True
+        if not cfg.get("creds_path"):
+            cfg["creds_path"] = "credentials.json"
+            changed = True
+        if changed:
+            save_config(cfg)
+    return cfg
 
 def save_config(cfg):
     path = _config_path()
