@@ -26,7 +26,7 @@ from ui.commands import draw_commands
 from ui.feed import draw_feed
 from data.reader import live, load_live_data, check_for_update
 
-__version__ = "2.2.1"   # bump this on each release
+__version__ = "2.3.0"   # bump this on each release
 
 WIN_W, WIN_H = 1280, 800
 TITLE_H      = 52    # titlebar height
@@ -394,6 +394,8 @@ def _wrap(text, w):
 _sb_w          = [SIDEBAR_W]   # current animated width
 _sb_tween      = [None]
 _sb_last_w     = [SIDEBAR_W]   # detect width changes for content resize
+_sb_ind_y      = [None]        # current y of sliding active-tab indicator
+_sb_ind_target = [None]        # target y based on active tab
 
 def _sidebar_tick(vw, vh):
     """Animate expand/collapse; returns True if a tab was clicked."""
@@ -448,15 +450,30 @@ def _sidebar_tick(vw, vh):
         if 0 <= idx < len(TABS):
             hov_idx = idx
 
+    # Smooth the active-tab indicator toward its target (ease-out lerp)
+    active_idx = next((i for i, t in enumerate(TABS) if t[0] == state.active_tab), 0)
+    target_y = TOP_PAD + active_idx * ITEM_H
+    if _sb_ind_y[0] is None:
+        _sb_ind_y[0] = float(target_y)
+    _sb_ind_target[0] = float(target_y)
+    delta = _sb_ind_target[0] - _sb_ind_y[0]
+    if abs(delta) > 0.4:
+        _sb_ind_y[0] += delta * 0.22
+
+    try:
+        from ui.effects import breathing_alpha
+        pulse_alpha = breathing_alpha(255, period=2.6, amp=0.30)
+        icon_alpha  = breathing_alpha(255, period=2.6, amp=0.22)
+    except Exception:
+        pulse_alpha = 255
+        icon_alpha  = 255
+
     for i, (tab_id, label, draw_fn_name) in enumerate(TABS):
         iy        = TOP_PAD + i * ITEM_H
         is_active = (tab_id == state.active_tab)
         is_hov    = (i == hov_idx)
         icon_col  = C["gold"] if is_active else (C["txt"] if is_hov else C["txt2"])
 
-        if is_active:
-            dpg.draw_rectangle((0, iy+4),(3, iy+ITEM_H-4),
-                               fill=C["gold"], color=(0,0,0,0), parent=dl)
         if is_active or is_hov:
             bg_a = 160 if is_active else 70
             dpg.draw_rectangle((3, iy+2),(sw-2, iy+ITEM_H-2),
@@ -465,7 +482,12 @@ def _sidebar_tick(vw, vh):
 
         fn = _DRAW_FNS.get(draw_fn_name)
         if fn:
-            fn(dl, COLLAPSED_W//2, iy+ITEM_H//2, ICON_SIZE, (*icon_col[:3], 255))
+            if is_active:
+                fn(dl, COLLAPSED_W//2, iy+ITEM_H//2, ICON_SIZE,
+                   (*icon_col[:3], icon_alpha))
+            else:
+                fn(dl, COLLAPSED_W//2, iy+ITEM_H//2, ICON_SIZE,
+                   (*icon_col[:3], 255))
 
         # Labels — fade in as sidebar expands
         if label_alpha > 0:
@@ -474,6 +496,16 @@ def _sidebar_tick(vw, vh):
                        (*C["txt"][:3],  label_alpha)
             dpg.draw_text((text_x, iy + ITEM_H//2 - 9), label,
                           color=text_col, size=17, parent=dl)
+
+    # Sliding gold indicator — drawn last (sits on top of icon row backgrounds)
+    ind_y = int(_sb_ind_y[0])
+    dpg.draw_rectangle((0, ind_y + 4), (3, ind_y + ITEM_H - 4),
+                        fill=(*C["gold"][:3], pulse_alpha),
+                        color=(0, 0, 0, 0), parent=dl)
+    # Soft glow extension to the right of the stripe
+    dpg.draw_rectangle((3, ind_y + 4), (8, ind_y + ITEM_H - 4),
+                        fill=(*C["gold"][:3], int(pulse_alpha * 0.30)),
+                        color=(0, 0, 0, 0), parent=dl)
 
     # Click handling
     clicked = False
@@ -793,7 +825,7 @@ def main():
                                        fill=(*C["gold"][:3], 255),
                                        color=(0, 0, 0, 0), rounding=2)
                     t1 = dpg.draw_text((14, 10),
-                                       f"◆  UPDATE AVAILABLE: {latest_tag}",
+                                       f"UPDATE AVAILABLE: {latest_tag}",
                                        color=(*C["gold_lt"][:3], 240), size=17)
                     if "raj_sb_16" in _FONTS: dpg.bind_item_font(t1, _FONTS["raj_sb_16"])
                     t2 = dpg.draw_text((14, 40),

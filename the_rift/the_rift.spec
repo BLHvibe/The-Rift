@@ -53,6 +53,7 @@ a = Analysis(
         'ui.commands',
         'ui.feed',
         'ui.sidebar',
+        'ui.effects',
     ],
     hookspath=[],
     hooksconfig={},

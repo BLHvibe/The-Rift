@@ -55,7 +55,7 @@ _DEMO_SPARKLINES = {
 }
 
 _BY_NAME = {p["player"]: p for p in _DEMO_LEADERBOARD}
-_LIVE_SPARKLINES = {}   # player_name → [0/1, ...] from real game log
+_LIVE_SPARKLINES = {}   # player_name > [0/1, ...] from real game log
 
 
 def update_live_data(players, champs):
@@ -120,7 +120,7 @@ class _GameLoggedNotif:
                             fill=(*C["gold"][:3], al),
                             color=(0,0,0,0), rounding=3, parent=dl)
         # Title
-        _txt(dl, nx+16, ny+10, "◆  GAME LOGGED", (*C["gold_lt"][:3], al), 18, "raj_sb_18")
+        _txt(dl, nx+16, ny+10, "GAME LOGGED", (*C["gold_lt"][:3], al), 18, "raj_sb_18")
         # Summary
         _txt(dl, nx+16, ny+38, getattr(self, "summary", ""), (*C["txt"][:3], int(al*0.8)), 16, "raj_16")
 
@@ -131,7 +131,7 @@ _notif = _GameLoggedNotif()
 # Avatar texture registry
 # ---------------------------------------------------------------------------
 _AVATAR_REG     = "rift_avatar_reg"
-_avatar_textures = {}   # display_name (lowercase) → dpg texture tag
+_avatar_textures = {}   # display_name (lowercase) > dpg texture tag
 # Thread-safe queue: background download/sync threads enqueue (name, path);
 # the main render thread drains it via _flush_pending() each frame.
 _pending_avatars = _queue.SimpleQueue()
@@ -512,7 +512,7 @@ def _draw_top_bar(dl, vw, header_w):
     is_logging = _log_in_progress
     btn_fill = (*C["card"][:3], 200) if is_logging else (*C["gold_dk"][:3], 200)
     btn_bdr  = (*C["gold"][:3], 80)  if is_logging else (*C["gold"][:3], 200)
-    btn_lbl  = "LOGGING…"            if is_logging else "◆  LOG GAME"
+    btn_lbl  = "LOGGING…"            if is_logging else "LOG GAME"
     lbl_col  = (*C["txt_dim"][:3], 160) if is_logging else (*C["gold_lt"][:3], 240)
     dpg.draw_rectangle((bx,by),(bx+bw,by+bh),
                         fill=btn_fill, color=btn_bdr, rounding=4, parent=dl)
@@ -581,6 +581,20 @@ def _draw_leaderboard(dl, tx, ty, tw, th, vw, vh):
 
         dpg.draw_rectangle((tx+xo,ry),(tx+tw+xo,ry+ROW_H),
                             fill=bg, color=(0,0,0,0), rounding=3, parent=dl)
+
+        # Rank 1: breathing gold border on top of the row
+        if rank == 1 and al > 180:
+            try:
+                from ui.effects import breathing_alpha
+                glow_a = breathing_alpha(int(al * 0.65),
+                                          period=3.0, amp=0.35)
+                dpg.draw_rectangle((tx + xo - 1, ry - 1),
+                                    (tx + tw + xo + 1, ry + ROW_H + 1),
+                                    fill=(0, 0, 0, 0),
+                                    color=(*C["gold"][:3], glow_a),
+                                    rounding=4, thickness=2, parent=dl)
+            except Exception:
+                pass
 
         # Left accent stripe: gold for selected, rift_purple for top3, nothing otherwise
         if is_sel:

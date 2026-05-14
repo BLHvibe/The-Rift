@@ -24,7 +24,7 @@ class CommandsState:
         self._max_lines = 500
         self._proc     = None   # current subprocess (dev mode)
         self._thread   = None   # current bg thread (frozen mode)
-        self._last_run = {}     # script_name → "HH:MM:SS" timestamp string
+        self._last_run = {}     # script_name > "HH:MM:SS" timestamp string
         self.progress  = 0.0   # 0.0–1.0, drives the progress bar
 
     def log(self, text, color=None):
@@ -115,7 +115,7 @@ def _build_commands_window(sb_w, vw, vh):
 
                 _section_hdr("DATA COMMANDS")
 
-                _cmd_button("▶  FETCH RANKS",
+                _cmd_button(">  FETCH RANKS",
                             "Fetch latest ranks from Google Sheets + Riot API.",
                             _run_fetch_ranks)
                 dpg.add_text(tag="ts_fetch_ranks", default_value="",
@@ -124,7 +124,7 @@ def _build_commands_window(sb_w, vw, vh):
                     dpg.bind_item_font(dpg.last_item(), _F["raj_r_18"])
                 dpg.add_spacer(height=8)
 
-                _cmd_button("▶  RUN SCOUT",
+                _cmd_button(">  RUN SCOUT",
                             "Fetch scouting data for all players.",
                             _run_scout)
                 dpg.add_text(tag="ts_scout", default_value="",
@@ -133,7 +133,7 @@ def _build_commands_window(sb_w, vw, vh):
                     dpg.bind_item_font(dpg.last_item(), _F["raj_r_18"])
                 dpg.add_spacer(height=8)
 
-                _cmd_button("▶  SETUP DRAFT",
+                _cmd_button(">  SETUP DRAFT",
                             "Prepare the Draft Tool sheet with current roster.",
                             _run_setup_draft)
                 dpg.add_text(tag="ts_draft", default_value="",
@@ -142,7 +142,7 @@ def _build_commands_window(sb_w, vw, vh):
                     dpg.bind_item_font(dpg.last_item(), _F["raj_r_18"])
                 dpg.add_spacer(height=8)
 
-                _cmd_button("▶  LOG INHOUSE GAME",
+                _cmd_button(">  LOG INHOUSE GAME",
                             "Connect to LCU and log the last custom game.",
                             _run_inhouse)
                 dpg.add_text(tag="ts_inhouse", default_value="",
@@ -167,7 +167,7 @@ def _build_commands_window(sb_w, vw, vh):
                 dpg.add_spacer(height=14)
 
                 _section_hdr("ROSTER")
-                _cmd_button("▶  JOIN TIER LIST",
+                _cmd_button(">  JOIN TIER LIST",
                             "Register a new player into the tier list.",
                             _open_join_dialog)
                 dpg.add_spacer(height=24)
@@ -263,7 +263,7 @@ def _run_script(label, script_name, extra_args=None):
     cmds.progress = 0.0
     if dpg.does_item_exist("cmd_progress"):
         dpg.set_value("cmd_progress", 0.0)
-    _log(f"▶  {label}", C["gold"][:3])
+    _log(f">  {label}", C["gold"][:3])
 
     ts_key = script_name + ("".join(extra_args) if extra_args else "")
 
@@ -475,7 +475,7 @@ def _run_inhouse():
     cmds.progress = 0.0
     if dpg.does_item_exist("cmd_progress"):
         dpg.set_value("cmd_progress", 0.0)
-    _log("▶  Connecting to League client…", C["gold"][:3])
+    _log(">  Connecting to League client…", C["gold"][:3])
 
     from data.reader import log_inhouse_games_from_client
 

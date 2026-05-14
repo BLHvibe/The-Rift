@@ -15,27 +15,33 @@ def set_fonts(f): global _F; _F = f
 
 _FEED_WIN = "feed_overlay_win"
 
-TOP_BAR_H = 52
-PAD       = 20
-CARD_H    = 76
-CARD_GAP  = 6
-SEP_H     = 28   # date separator height
+TOP_BAR_H   = 56
+_VP_TITLE_H = 52   # app titlebar height (same as main.py TITLE_H)
+PAD         = 24
+CARD_H      = 84
+CARD_GAP    = 8
+SEP_H       = 34   # date separator height
+ICON_BOX    = 38   # left-side colored kind chip
 
 MAX_EVENTS    = 100
 AUTO_REFRESH_SECS = 90.0   # poll the sheet at most this often while tab is open
 
+# Width of the feed window's content area, set at draw time so right-aligned
+# elements (time-ago / NEW badge) know the real card width.
+_card_w = [800]
+
 # ---------------------------------------------------------------------------
-# Event type → border colour + icon prefix
+# Event type > border colour + icon prefix
 # ---------------------------------------------------------------------------
 _KIND_META = {
-    "UPDATE":     (C["gold"],        "◆"),
-    "SCOUT":      ((140, 100, 220, 255), "●"),
-    "SCOUT_NEW":  ((140, 100, 220, 255), "★"),
-    "RESCOUTED":  ((120,  80, 200, 255), "↺"),
-    "DRAFT":      ((80,  160, 220, 255), "⚔"),
-    "INHOUSE":    (C["win"],         "▶"),
-    "inhouse":    (C["win"],         "▶"),
-    "rank":       (C["gold"],        "#"),
+    "UPDATE":     (C["gold"],            "UPD"),
+    "SCOUT":      ((140, 100, 220, 255), "SCT"),
+    "SCOUT_NEW":  ((170, 130, 230, 255), "NEW"),
+    "RESCOUTED":  ((120,  80, 200, 255), "RSC"),
+    "DRAFT":      ((80,  160, 220, 255), "DFT"),
+    "INHOUSE":    (C["win"],             "IH"),
+    "inhouse":    (C["win"],             "IH"),
+    "rank":       (C["gold"],            "RNK"),
 }
 
 def _kind_color(kind):
@@ -50,7 +56,7 @@ def _kind_color(kind):
 # ---------------------------------------------------------------------------
 
 def _parse_ts(ts_str):
-    """Parse a sheet timestamp → datetime. Accepts ISO 8601 (with optional Z/offset)
+    """Parse a sheet timestamp > datetime. Accepts ISO 8601 (with optional Z/offset)
     and the legacy 'YYYY-MM-DD HH:MM[:SS]' formats. Returns aware datetimes when
     the source is ISO, naive (treated as local) otherwise."""
     if not ts_str:
@@ -113,6 +119,12 @@ def _date_label(ts_str):
     if dt.date() == today - timedelta(days=1):
         return "Yesterday"
     return dt.strftime("%a %b %d")
+
+
+def _event_key(ev):
+    """Stable identifier for an event used to detect 'new since last refresh'."""
+    return (ev.get("ts", ""), ev.get("kind", ""),
+            ev.get("player", ""), ev.get("desc", ""))
 
 
 def _event_date_key(ev):
@@ -207,6 +219,9 @@ class FeedState:
         self.loading           = False
         self.sheet_loaded_once = False
         self.last_error        = ""
+        # Per-event "appeared at" timestamps — used to flash new events briefly
+        self._seen_keys        = set()    # event keys we've already shown
+        self._appear_at        = {}       # key → monotonic timestamp of first appearance
 
     def refresh(self):
         """Refresh from in-memory fallback only (no network)."""
@@ -233,7 +248,28 @@ class FeedState:
             self.sheet_loaded_once = True
             self.last_refresh      = time.monotonic()
             self.events            = _build_events()
+            # Mark any events we haven't seen before as fresh (skip the very first
+            # load — we don't flash every event on startup).
+            now = time.monotonic()
+            first_load = not self._seen_keys
+            had_fresh = False
+            for ev in self.events:
+                key = _event_key(ev)
+                if key and key not in self._seen_keys:
+                    self._seen_keys.add(key)
+                    if not first_load:
+                        self._appear_at[key] = now
+                        had_fresh = True
             self.dirty             = True
+            # If we surfaced fresh events, schedule a re-render in 9s to drop
+            # the NEW badge (is_fresh check uses an 8s window).
+            if had_fresh:
+                try:
+                    from core.animations import anim
+                    anim.tween(0, 1, 1, "linear", delay_ms=9000,
+                               on_done=lambda: setattr(self, "dirty", True))
+                except Exception:
+                    pass
         def _err(msg):
             self.loading     = False
             self.last_error  = str(msg) or "Unknown error"
@@ -283,10 +319,16 @@ def draw_feed(dl, vw, vh, fonts=None):
                   color=C["rule_dark"], thickness=1, parent=dl)
     _txt(dl, PAD, 12, "ACTIVITY FEED", (*C["gold"][:3], 220), 23, "raj_24")
 
-    # Loading spinner hint (animated dots)
+    # Loading spinner (orbital)
     if _feed.loading:
-        dots = "." * (int(time.monotonic() * 2) % 4)
-        _txt(dl, PAD + 240, 18, f"loading{dots}", (*C["gold_lt"][:3], 200), 17, "raj_r_16")
+        try:
+            from ui.effects import draw_orbital_spinner
+            draw_orbital_spinner(dl, PAD + 248, 26, 11,
+                                  C["gold_lt"], 220, n_dots=3, speed=2.0, dot_r=3)
+        except Exception:
+            pass
+        _txt(dl, PAD + 270, 18, "syncing",
+             (*C["gold_lt"][:3], 200), 17, "raj_r_16")
     elif _feed.last_error:
         _txt(dl, PAD + 240, 18,
              f"⚠ sheet load failed — showing local fallback",
@@ -309,35 +351,45 @@ def draw_feed(dl, vw, vh, fonts=None):
     dpg.draw_rectangle((bx, by), (bx + bw, by + bh),
                         fill=btn_fill,
                         color=(*C["gold"][:3], 200), rounding=4, parent=dl)
-    _txt(dl, bx + 14, by + 8, "◆  REFRESH", (*C["gold_lt"][:3], 240), 18, "raj_sb_18")
+    _txt(dl, bx + 14, by + 8, "REFRESH", (*C["gold_lt"][:3], 240), 18, "raj_sb_18")
 
     # Click — force a sheet refresh (same hit-test pattern as the rest of the app)
     if dpg.is_mouse_button_clicked(0):
         mouse = dpg.get_mouse_pos(local=False)
         vp    = dpg.get_viewport_pos()
-        rx = mouse[0] - vp[0] - 68
-        ry = mouse[1] - vp[1] - TOP_BAR_H
+        rx = mouse[0] - vp[0] - 68     # 68 = collapsed sidebar width
+        ry = mouse[1] - vp[1] - 52     # 52 = TITLE_H (app title bar)
         if bx <= rx <= bx + bw and by <= ry <= by + bh:
             _feed.refresh_from_sheet(force=True)
 
+    # Position the cards window flush BELOW our local top bar.
+    # `vw` is content-area width; viewport sidebar width is (viewport_w - vw).
+    sidebar_w = dpg.get_viewport_width() - vw
+    win_x     = sidebar_w
+    win_y     = _VP_TITLE_H + TOP_BAR_H
+    win_w     = vw
+    win_h     = max(20, vh - TOP_BAR_H)
+    _card_w[0] = max(200, win_w - PAD * 2 - 12)   # minus scrollbar gutter
+
     if not dpg.does_item_exist(_FEED_WIN):
-        _build_feed_window(vw, vh)
+        _build_feed_window(win_x, win_y, win_w, win_h)
     else:
         dpg.configure_item(_FEED_WIN,
-                           pos=(68, TOP_BAR_H),
-                           width=vw - 68, height=vh - TOP_BAR_H)
+                           pos=(win_x, win_y),
+                           width=win_w, height=win_h)
         if _feed.dirty:
             _repopulate_feed()
             _feed.dirty = False
 
 
-def _build_feed_window(vw, vh):
+def _build_feed_window(win_x, win_y, win_w, win_h):
     with dpg.window(tag=_FEED_WIN,
-                    pos=(68, TOP_BAR_H),
-                    width=vw - 68, height=vh - TOP_BAR_H,
+                    pos=(win_x, win_y),
+                    width=win_w, height=win_h,
                     no_title_bar=True, no_resize=True,
-                    no_move=True, no_focus_on_appearing=True):
-        dpg.add_spacer(height=PAD)
+                    no_move=True, no_focus_on_appearing=True,
+                    no_scrollbar=False):
+        dpg.add_spacer(height=PAD - 4)
         with dpg.group(tag="feed_card_group"):
             _populate_cards()
     _feed.dirty = False
@@ -382,25 +434,36 @@ def _empty_state(parent):
     if "raj_r_14" in _F:
         dpg.bind_item_font(t, _F["raj_r_14"])
     if _feed.last_error and _feed.sheet_loaded_once is False:
-        err = dpg.add_text(f"  ↳ {_feed.last_error[:140]}",
+        err = dpg.add_text(f"  > {_feed.last_error[:140]}",
                             color=C["loss"][:3], parent=parent)
         if "raj_r_12" in _F:
             dpg.bind_item_font(err, _F["raj_r_12"])
 
 
 def _draw_date_separator(ts_str, parent):
-    dpg.add_spacer(height=4, parent=parent)
+    dpg.add_spacer(height=6, parent=parent)
     lbl = _date_label(ts_str) if ts_str else ""
     if lbl:
-        with dpg.drawlist(width=-1, height=SEP_H, parent=parent):
-            t = dpg.draw_text((PAD, 6), lbl.upper(),
-                               color=(*C["gold_dk"][:3], 200), size=15)
+        w = _card_w[0] + PAD * 2
+        with dpg.drawlist(width=w, height=SEP_H, parent=parent):
+            label_text = lbl.upper()
+            label_w = len(label_text) * 8 + 12
+            # Date pill background
+            dpg.draw_rectangle(
+                (PAD, 6), (PAD + label_w, SEP_H - 2),
+                fill=(*C["card"][:3], 200),
+                color=(*C["gold_dk"][:3], 160),
+                rounding=11,
+            )
+            t = dpg.draw_text((PAD + 8, 8), label_text,
+                               color=(*C["gold_lt"][:3], 220), size=14)
             if "raj_sb_14" in _F:
                 dpg.bind_item_font(t, _F["raj_sb_14"])
-            dpg.draw_line((PAD + 100, SEP_H // 2),
-                           (2000, SEP_H // 2),
+            # Horizontal rule trailing off to the right
+            dpg.draw_line((PAD + label_w + 10, SEP_H // 2),
+                           (w - PAD, SEP_H // 2),
                            color=(*C["rule_dark"][:3], 120), thickness=1)
-    dpg.add_spacer(height=2, parent=parent)
+    dpg.add_spacer(height=4, parent=parent)
 
 
 def _draw_event_card(ev, parent):
@@ -409,42 +472,96 @@ def _draw_event_card(ev, parent):
     desc       = ev.get("desc",    "")
     time_ago   = ev.get("time_ago","")
 
-    border_col, icon = _kind_color(kind)
+    border_col, icon_text = _kind_color(kind)
+    # Was this event flagged as new in the most recent refresh?
+    appear_at = _feed._appear_at.get(_event_key(ev))
+    is_fresh  = appear_at is not None and (time.monotonic() - appear_at) < 8.0
 
-    with dpg.drawlist(width=-1, height=CARD_H, parent=parent):
-        # Background
+    w = _card_w[0] + PAD * 2
+    with dpg.drawlist(width=w, height=CARD_H, parent=parent):
+        # ── Background ───────────────────────────────────────────
+        bg_outline = (*C["gold"][:3], 220) if is_fresh else (*border_col[:3], 130)
         dpg.draw_rectangle(
-            (0, 0), (2000, CARD_H),
-            fill=(*C["card"][:3], 220),
-            color=(*border_col[:3], 160),
+            (PAD, 4), (w - PAD, CARD_H - 4),
+            fill=(*C["card"][:3], 230),
+            color=bg_outline,
+            rounding=6,
+            thickness=2 if is_fresh else 1,
+        )
+        # ── Left accent strip ────────────────────────────────────
+        accent_w = 5 if is_fresh else 3
+        accent_c = (*C["gold"][:3], 240) if is_fresh else (*border_col[:3], 220)
+        dpg.draw_rectangle(
+            (PAD, 8), (PAD + accent_w, CARD_H - 8),
+            fill=accent_c, color=(0, 0, 0, 0), rounding=2,
+        )
+
+        # ── Left-side kind chip (colored box with abbreviation) ──
+        chip_x = PAD + 14
+        chip_y = (CARD_H - ICON_BOX) // 2
+        dpg.draw_rectangle(
+            (chip_x, chip_y), (chip_x + ICON_BOX, chip_y + ICON_BOX),
+            fill=(*border_col[:3], 60),
+            color=(*border_col[:3], 200),
             rounding=4,
         )
-        # Left accent bar
-        dpg.draw_rectangle(
-            (0, 0), (3, CARD_H),
-            fill=(*border_col[:3], 230),
-            color=(0, 0, 0, 0),
-            rounding=2,
+        ic_label = icon_text or "·"
+        ic_w     = len(ic_label) * 7
+        ic_tag = dpg.draw_text(
+            (chip_x + (ICON_BOX - ic_w) // 2, chip_y + 11), ic_label,
+            color=(*border_col[:3], 240), size=13,
         )
-        # Player name
+        if "raj_sb_14" in _F:
+            dpg.bind_item_font(ic_tag, _F["raj_sb_14"])
+
+        # ── Player name + description ────────────────────────────
+        text_x = chip_x + ICON_BOX + 14
+        # right edge reserved for time-ago + optional NEW badge
+        right_pad   = 100
+        text_right  = w - PAD - right_pad
+
+        name = (player or "").upper() if player else kind.upper()
         name_tag = dpg.draw_text(
-            (PAD, 14), f"{icon}  {player.upper()}" if player else icon,
-            color=(*C["gold_lt"][:3], 230), size=17,
+            (text_x, 14), name,
+            color=(*C["gold_lt"][:3], 240), size=17,
         )
-        if "raj_20" in _F:
-            dpg.bind_item_font(name_tag, _F["raj_20"])
-        # Description
-        desc_tag = dpg.draw_text(
-            (PAD, 40), desc,
-            color=(*C["txt"][:3], 190), size=15,
-        )
-        if "raj_r_14" in _F:
-            dpg.bind_item_font(desc_tag, _F["raj_r_14"])
-        # Time-ago (right-aligned area)
-        if time_ago:
-            ta_tag = dpg.draw_text(
-                (PAD, 58), time_ago,
-                color=(*C["txt_dim"][:3], 140), size=13,
+        if "raj_sb_18" in _F:
+            dpg.bind_item_font(name_tag, _F["raj_sb_18"])
+
+        # Description (truncate if it would collide with the time-ago column)
+        if desc:
+            max_chars = max(20, (text_right - text_x) // 7)
+            desc_disp = desc if len(desc) <= max_chars else desc[:max_chars - 1] + "…"
+            desc_tag = dpg.draw_text(
+                (text_x, 42), desc_disp,
+                color=(*C["txt"][:3], 200), size=14,
             )
-            if "raj_r_12" in _F:
-                dpg.bind_item_font(ta_tag, _F["raj_r_12"])
+            if "raj_r_14" in _F:
+                dpg.bind_item_font(desc_tag, _F["raj_r_14"])
+
+        # ── Right-side: time-ago + NEW badge ─────────────────────
+        if time_ago:
+            ta_w = len(time_ago) * 7
+            ta_tag = dpg.draw_text(
+                (w - PAD - 14 - ta_w, 16), time_ago,
+                color=(*C["txt2"][:3], 200), size=13,
+            )
+            if "raj_sb_14" in _F:
+                dpg.bind_item_font(ta_tag, _F["raj_sb_14"])
+
+        if is_fresh:
+            badge_label = "NEW"
+            bw_label = len(badge_label) * 7 + 12
+            bx2 = w - PAD - 14 - bw_label
+            by2 = 42
+            dpg.draw_rectangle(
+                (bx2, by2), (bx2 + bw_label, by2 + 18),
+                fill=(*C["gold"][:3], 230),
+                color=(0, 0, 0, 0), rounding=9,
+            )
+            n_tag = dpg.draw_text(
+                (bx2 + 6, by2 + 1), badge_label,
+                color=(*C["bg"][:3], 245), size=12,
+            )
+            if "raj_sb_12" in _F:
+                dpg.bind_item_font(n_tag, _F["raj_sb_12"])

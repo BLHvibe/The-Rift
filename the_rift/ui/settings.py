@@ -54,7 +54,7 @@ _pfp_det = {
     "busy":        False,
     "player_name": "",      # resolved display name (e.g. "Ben")
     "summoner":    "",      # raw Riot gameName returned by LCU
-    "picker":      False,   # True when gameName not in summoner_map → show WHO ARE YOU
+    "picker":      False,   # True when gameName not in summoner_map > show WHO ARE YOU
 }
 
 # ---------------------------------------------------------------------------
@@ -227,7 +227,7 @@ def _build_settings_window(sb_w, vw, vh):
             # Action buttons
             with dpg.group(horizontal=True):
                 save_btn = dpg.add_button(
-                    label="◆  Upload Avatar", callback=_save_icon,
+                    label=" Upload Avatar", callback=_save_icon,
                     width=160, height=34,
                 )
                 if "raj_sb_14" in _F: dpg.bind_item_font(save_btn, _F["raj_sb_14"])
@@ -349,8 +349,8 @@ def _browse_icon():
 
 def _resolve_pfp_summoner(game_name):
     """
-    Map Riot gameName → in-house display name.
-    Same priority order as the tier list: live sheet map → config map → direct match.
+    Map Riot gameName > in-house display name.
+    Same priority order as the tier list: live sheet map > config map > direct match.
     Returns matched name or None.
     """
     from data.reader import live
@@ -370,7 +370,7 @@ def _resolve_pfp_summoner(game_name):
 
 
 def _save_pfp_summoner_link(game_name, player_name):
-    """Persist a new gameName → player_name mapping to config."""
+    """Persist a new gameName > player_name mapping to config."""
     from data.config import load_config, save_config
     cfg  = load_config()
     smap = cfg.setdefault("summoner_map", {})

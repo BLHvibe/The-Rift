@@ -521,6 +521,16 @@ def _draw_podium_cards(dl):
         dpg.draw_rectangle((x1+2, y1+2),(x2-2, y1+2+ACCENT_H),
                            fill=(*accent_color[:3], al),
                            color=(0,0,0,0), rounding=2, parent=dl)
+        # Medal sheen — gold/silver/bronze single-pass sweep on revealed podium cards
+        if al >= 220:
+            try:
+                from ui.effects import draw_shimmer
+                draw_shimmer(dl, x1 + 2, y1 + 2 + ACCENT_H,
+                             (x2 - 2) - (x1 + 2), (y2) - (y1 + 2 + ACCENT_H),
+                             border_col, alpha=int(al * 0.55),
+                             period=4.5 + rank * 0.7, sweep_w=110)
+            except Exception:
+                pass
 
         if rank == 1:
             _accent_corners(dl, x1, y1, x2, y2, (*C["gold"][:3], al))

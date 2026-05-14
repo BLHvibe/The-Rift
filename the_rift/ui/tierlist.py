@@ -58,8 +58,8 @@ def _detect_lcu_summoner():
 
 def _resolve_summoner_to_player(game_name):
     """
-    Map a Riot gameName → in-house player name.
-    Priority: live sheet summoner_map → config summoner_map → direct name match.
+    Map a Riot gameName > in-house player name.
+    Priority: live sheet summoner_map > config summoner_map > direct name match.
     Returns matched player name or None.
     """
     from data.reader import live
@@ -81,7 +81,7 @@ def _resolve_summoner_to_player(game_name):
 
 
 def _save_summoner_link(game_name, player_name):
-    """Persist gameName → player_name to config summoner_map."""
+    """Persist gameName > player_name to config summoner_map."""
     cfg = load_config()
     smap = cfg.setdefault("summoner_map", {})
     smap[game_name] = player_name
@@ -127,12 +127,12 @@ _TL_RATER_WIN  = "tl_rater_win"
 
 class TierListState:
     def __init__(self):
-        self.placements  = {t: [] for t in TIERS}   # tier → [player_name, ...]
+        self.placements  = {t: [] for t in TIERS}   # tier > [player_name, ...]
         self.unplaced    = _load_players()
         self.drag_name   = None        # player being dragged
         self.drag_pos    = (0, 0)      # current mouse pos during drag
         self.drag_origin_tier = None   # None = unplaced pool
-        self.bounce      = {}          # name → scale factor (0.8→1.0 on drop)
+        self.bounce      = {}          # name > scale factor (0.8>1.0 on drop)
         self.scroll_off  = 0           # pool scroll offset in px
         self._pool_h     = 0           # measured pool height for scroll clamping
         self.submit_status = ""        # "" | "Submitting…" | "✓ Submitted" | "✗ Error: ..."
@@ -183,7 +183,7 @@ _wheel_delta = [0]   # accumulated between frames; consumed in _draw_pool
 _TIPS = TIPS  # from data/tips.py
 
 # Phase flags (per-session, reset when the module is reloaded)
-_tl_unlocked = False   # True once cover page has finished → tier list is accessible
+_tl_unlocked = False   # True once cover page has finished > tier list is accessible
 
 _cv = {
     "active":      False,
@@ -247,6 +247,13 @@ def _draw_cover(dl, vw, vh):
     dpg.draw_rectangle((0, 0), (vw, 5),
                         fill=(*C["gold_dk"][:3], al),
                         color=(0, 0, 0, 0), parent=dl)
+    # Ambient drift field
+    try:
+        from ui.effects import draw_drift_field
+        draw_drift_field(dl, 0, 0, vw, vh, alpha=int(al * 0.8),
+                         accent=C["gold"][:3], n_dots=24, seed=37)
+    except Exception:
+        pass
 
     cx     = vw // 2
     cy     = vh // 2
@@ -338,7 +345,7 @@ def _draw_detection_screen(dl, vw, vh):
     dpg.draw_rectangle((bx, by), (bx + bw, by + bh),
                         fill=(*C["gold_dk"][:3], 210),
                         color=(*C["gold"][:3], 210), rounding=6, parent=dl)
-    lbl     = "DETECTING…" if _det["busy"] else "◆  DETECT FROM LOL CLIENT"
+    lbl     = "DETECTING…" if _det["busy"] else "DETECT FROM LOL CLIENT"
     lbl_col = (*C["txt_dim"][:3], 160) if _det["busy"] else (*C["gold_lt"][:3], 230)
     _txt(dl, bx + bw // 2 - len(lbl) * 5, by + 16, lbl, lbl_col, 17, "raj_sb_16")
 
@@ -437,12 +444,12 @@ def draw_tierlist(dl, vw, vh, fonts=None):
         _draw_cover(dl, vw, vh)
         return
 
-    # Phase 2: not yet unlocked → show detection gate
+    # Phase 2: not yet unlocked > show detection gate
     if not _tl_unlocked:
         _draw_detection_screen(dl, vw, vh)
         return
 
-    # Phase 3: unlocked → full tier list
+    # Phase 3: unlocked > full tier list
     _draw_top_bar(dl, vw)
     if dpg.does_item_exist(_TL_RATER_WIN):
         dpg.delete_item(_TL_RATER_WIN)
@@ -481,7 +488,7 @@ def _draw_top_bar(dl, vw):
     dpg.draw_rectangle((bx,by),(bx+bw,by+bh),
                         fill=(*C["card"][:3],200), color=(*C["rule_dark"][:3],200),
                         rounding=4, parent=dl)
-    _txt(dl, bx+14, by+8, "↺  RESET", (*C["txt"][:3],200), 17, "raj_sb_16")
+    _txt(dl, bx+14, by+8, "RESET", (*C["txt"][:3],200), 17, "raj_sb_16")
 
     # Submit button
     sbw, sbh = 160, 34
@@ -490,7 +497,7 @@ def _draw_top_bar(dl, vw):
     dpg.draw_rectangle((sbx,sby),(sbx+sbw,sby+sbh),
                         fill=(*C["gold_dk"][:3],200), color=(*C["gold"][:3],200),
                         rounding=4, parent=dl)
-    _txt(dl, sbx+14, sby+8, "◆  SUBMIT LIST", (*C["gold_lt"][:3],230), 17, "raj_sb_16")
+    _txt(dl, sbx+14, sby+8, "SUBMIT LIST", (*C["gold_lt"][:3],230), 17, "raj_sb_16")
 
     # Submit status flash
     status = tl.submit_status

@@ -904,6 +904,12 @@ def draw_scout(dl, vw, vh, fonts=None):
 
 def _draw_idle(dl, vw, vh):
     cx, cy = vw//2, vh//2
+    try:
+        from ui.effects import draw_drift_field
+        draw_drift_field(dl, 0, 0, vw, vh, alpha=180,
+                         accent=C["gold"][:3], n_dots=20, seed=23)
+    except Exception:
+        pass
     t  = (math.sin(time.monotonic()*1.3)+1)/2
     a  = int(90 + t*110)
     _txt(dl, cx-180, cy-30, "PLAYER SCOUTING", (*C["gold"][:3],a), 36, "raj_36")
@@ -926,6 +932,12 @@ def _draw_idle(dl, vw, vh):
 
 def _draw_loading(dl, vw, vh):
     cx, cy = vw//2, vh//2
+    try:
+        from ui.effects import draw_orbital_spinner
+        draw_orbital_spinner(dl, cx, cy - 70, 22, C["gold"], 220,
+                              n_dots=3, speed=2.0, dot_r=4)
+    except Exception:
+        pass
     t  = (math.sin(scout._load_t*2.0)+1)/2
     a  = int(80 + t*130)
     _txt(dl, cx - len("FETCHING SCOUT DATA...")*7, cy-30, "FETCHING SCOUT DATA...", (*C["gold_dk"][:3],a), 27, "raj_36")

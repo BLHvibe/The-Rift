@@ -4,10 +4,11 @@ Collapsed (48px) showing geometric icons only.
 Expands to 160px on hover, revealing text labels that fade in.
 """
 import dearpygui.dearpygui as dpg
-import math
+import math, time
 from theme import C
 from core.state import state
 from core.animations import anim
+from ui.effects import breathing_alpha
 
 _OVERLAY_TAGS = {
     "settings": "settings_overlay_win",
@@ -184,6 +185,9 @@ _expand_tween  = None
 _current_width = [COLLAPSED_W]
 _hovered       = [False]
 _label_alpha   = [0]    # 0..255 for label fade
+_indicator_y       = [None]   # current y of sliding indicator (lerps to target)
+_indicator_target  = [None]   # target y based on active tab
+_indicator_tab     = [None]   # tab the indicator was last set for
 
 
 def build_sidebar(parent):
@@ -222,19 +226,21 @@ def _redraw_sidebar():
     dpg.draw_line((w-1, 0), (w-1, 800),
                   color=C["rule_dark"], thickness=1, parent=dl)
 
+    # Resolve target y for the active-tab indicator
+    active_idx = next((i for i, t in enumerate(TABS) if t[0] == act), 0)
+    target_y = TOP_PAD + active_idx * ITEM_H
+    if _indicator_y[0] is None:
+        _indicator_y[0] = target_y
+    _indicator_target[0] = target_y
+
     for i, (tab_id, label, draw_fn_name) in enumerate(TABS):
         item_y   = TOP_PAD + i * ITEM_H
         is_active = (tab_id == act)
 
-        # Active indicator — 2px gold left stripe
         if is_active:
-            dpg.draw_rectangle((0, item_y + 4), (3, item_y + ITEM_H - 4),
-                               fill=C["gold"], color=(0,0,0,0), parent=dl)
             icon_color = C["gold"]
-            bg_color   = (*C["card"][:3], 180)
         else:
             icon_color = C["txt2"]
-            bg_color   = (0, 0, 0, 0)
 
         # Item bg on hover / active
         if is_active or _hovered_tab() == tab_id:
@@ -242,12 +248,16 @@ def _redraw_sidebar():
                                fill=(*C["card"][:3], 120 if is_active else 60),
                                color=(0,0,0,0), rounding=4, parent=dl)
 
-        # Icon centered in collapsed width
+        # Icon centered in collapsed width — active icon breathes
         cx = COLLAPSED_W // 2
         cy = item_y + ITEM_H // 2
         draw_fn = _DRAW_FNS.get(draw_fn_name)
         if draw_fn:
-            draw_fn(dl, cx, cy, ICON_SIZE, (*icon_color[:3], 255))
+            if is_active:
+                pa = breathing_alpha(255, period=2.6, amp=0.22)
+                draw_fn(dl, cx, cy, ICON_SIZE, (*icon_color[:3], pa))
+            else:
+                draw_fn(dl, cx, cy, ICON_SIZE, (*icon_color[:3], 255))
 
         # Label — only when expanded enough
         if la > 10 and w > COLLAPSED_W + 10:
@@ -255,6 +265,17 @@ def _redraw_sidebar():
             text_col = (*C["gold"][:3], la) if is_active else (*C["txt"][:3], la)
             dpg.draw_text((text_x, cy - 10), label,
                           color=text_col, size=17, parent=dl)
+
+    # Sliding gold indicator — drawn last so it sits on top
+    ind_y = int(_indicator_y[0])
+    pulse_a = breathing_alpha(255, period=2.6, amp=0.30)
+    dpg.draw_rectangle((0, ind_y + 4), (3, ind_y + ITEM_H - 4),
+                        fill=(*C["gold"][:3], pulse_a),
+                        color=(0, 0, 0, 0), parent=dl)
+    # Soft glow extension
+    dpg.draw_rectangle((3, ind_y + 4), (7, ind_y + ITEM_H - 4),
+                        fill=(*C["gold"][:3], int(pulse_a * 0.30)),
+                        color=(0, 0, 0, 0), parent=dl)
 
 
 def _hovered_tab():
@@ -276,6 +297,12 @@ def sidebar_tick():
     Returns True if a tab was clicked.
     """
     global _expand_tween
+
+    # Smooth the active-tab indicator toward its target (ease-out lerp)
+    if _indicator_y[0] is not None and _indicator_target[0] is not None:
+        delta = _indicator_target[0] - _indicator_y[0]
+        if abs(delta) > 0.5:
+            _indicator_y[0] += delta * 0.22
 
     hovered = dpg.is_item_hovered(_sidebar_tag)
 
@@ -313,7 +340,9 @@ def sidebar_tick():
             _cleanup_overlay(state.active_tab)
             state.prev_tab   = state.active_tab
             state.active_tab = ht
-            _redraw_sidebar()
             clicked = True
+
+    # Always redraw so indicator slide + breathing icon animate every frame
+    _redraw_sidebar()
 
     return clicked
