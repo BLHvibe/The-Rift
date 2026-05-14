@@ -9,6 +9,7 @@ from theme import C, RANK_COLORS
 from core.animations import anim
 from data.reader import live, load_scout_sheet
 from data.tips import TIPS as _TIPS
+from ui.tierlist import _wheel_delta as _wheel_delta_shared
 
 # ---------------------------------------------------------------------------
 # Layout constants
@@ -697,6 +698,7 @@ class ScoutState:
         self.header_alpha   = 0
         self._load_t        = 0.0
         self._tip           = _rnd.choice(_TIPS)
+        self.scroll_off     = 0
 
     def reset(self):
         self.__init__()
@@ -706,6 +708,7 @@ class ScoutState:
 
     def begin_load(self, players):
         self.reset()
+        self.scroll_off = 0
         self.players = players
         self.phase   = ScoutPhase.LOADING
         anim.tween(0, 1, 1, "linear", delay_ms=1400, on_done=self._reveal)
@@ -745,6 +748,7 @@ class ScoutState:
         )
 
     def toggle_sort(self, col):
+        self.scroll_off = 0
         if self.sort_col == col:
             self.sort_asc = not self.sort_asc
         else:
@@ -867,7 +871,10 @@ def draw_scout(dl, vw, vh, fonts=None):
         pass
     scout.tick()
     dpg.delete_item(dl, children_only=True)
-    dpg.draw_rectangle((0,0),(vw,vh), fill=C["bg"], color=(0,0,0,0), parent=dl)
+    dpg.draw_rectangle((0,0),(vw,3000), fill=C["bg"], color=(0,0,0,0), parent=dl)
+    # Prevent native content_win scroll from misaligning click zones
+    if dpg.does_item_exist("content_win"):
+        dpg.set_y_scroll("content_win", 0)
 
     if scout.phase == ScoutPhase.IDLE:
         _draw_idle(dl, vw, vh); return
@@ -876,8 +883,10 @@ def draw_scout(dl, vw, vh, fonts=None):
 
     table_w = int(vw * TABLE_FRAC)
 
-    _draw_top_bar(dl, vw)
     _draw_table(dl, PAD, TOP_BAR_H + PAD, table_w - PAD*2, vh - TOP_BAR_H - PAD*2, vw, vh)
+    # Draw top bar AFTER the table so it renders on top of any scrolled-up rows;
+    # pass table_w so the bar background and buttons stay inside the table column.
+    _draw_top_bar(dl, vw, table_w)
 
     if not dpg.does_item_exist(_REPORT_WIN):
         _rebuild_report_window(vw, vh)
@@ -938,13 +947,14 @@ def _draw_loading(dl, vw, vh):
                             rounding=2, parent=dl)
 
 
-def _draw_top_bar(dl, vw):
-    dpg.draw_rectangle((0,0),(vw,TOP_BAR_H), fill=(*C["panel"][:3],220), color=(0,0,0,0), parent=dl)
-    dpg.draw_line((0,TOP_BAR_H-1),(vw,TOP_BAR_H-1), color=C["rule_dark"], thickness=1, parent=dl)
+def _draw_top_bar(dl, vw, header_w):
+    """header_w = width of the table column — bars and buttons stay inside it."""
+    dpg.draw_rectangle((0,0),(header_w,TOP_BAR_H), fill=(*C["panel"][:3],220), color=(0,0,0,0), parent=dl)
+    dpg.draw_line((0,TOP_BAR_H-1),(header_w,TOP_BAR_H-1), color=C["rule_dark"], thickness=1, parent=dl)
     _txt(dl, PAD, 12, "PLAYER SCOUTING", (*C["gold_lt"][:3],240), 26, "raj_28")
 
     labels = [("SCORE","score"),("W/R","wr"),("KDA","kda")]
-    bx = vw - 340
+    bx = header_w - 320   # anchor sort buttons to the right edge of the table column
     for lbl, col_key in labels:
         active = scout.sort_col == col_key
         bc = C["gold"] if active else C["rule_dark"]
@@ -961,7 +971,7 @@ def _draw_top_bar(dl, vw):
         vp    = dpg.get_viewport_pos()
         rx = mouse[0]-vp[0]-68; ry = mouse[1]-vp[1]-52
         if 10 <= ry <= TOP_BAR_H-10:
-            bx2 = vw - 340
+            bx2 = header_w - 320
             for _, c2 in labels:
                 if bx2 <= rx <= bx2+90:
                     scout.toggle_sort(c2); break
@@ -973,25 +983,32 @@ def _draw_table(dl, tx, ty, tw, th, vw, vh):
     col_xs   = _col_xs(tw)
     ha       = scout.header_alpha
 
-    # Column headers
-    dpg.draw_rectangle((tx,ty),(tx+tw,ty+HEADER_H),
-                        fill=(*C["card"][:3],ha), color=(*C["rule_dark"][:3],ha), rounding=4, parent=dl)
-    for (lbl,_,sk),(cx,cw) in zip(COLS, col_xs):
-        active = sk and scout.sort_col == sk
-        col    = C["gold_lt"] if active else C["txt2"]
-        _txt(dl, tx+cx+8, ty+HEADER_H//2-10, lbl, (*col[:3],ha), 18, "raj_sb_18")
-    dpg.draw_line((tx,ty+HEADER_H),(tx+tw,ty+HEADER_H),
-                  color=(*C["rule_dark"][:3],ha), thickness=1, parent=dl)
+    # Calculate scroll bounds and consume wheel delta
+    visible_h    = th - HEADER_H - 4
+    total_rows_h = len(players) * (ROW_H + 3)
+    max_scroll   = max(0, total_rows_h - visible_h)
+    if _wheel_delta_shared[0] != 0:
+        scout.scroll_off = max(0, min(
+            scout.scroll_off - _wheel_delta_shared[0] * 30, max_scroll))
+        _wheel_delta_shared[0] = 0
+    scout.scroll_off = max(0, min(scout.scroll_off, max_scroll))
+    scroll = int(scout.scroll_off)
+
+    row_clip_top = ty + HEADER_H + 4
+    row_clip_bot = ty + th
 
     row_y = ty + HEADER_H + 4
 
+    # Draw rows FIRST so the column header renders on top of any scrolled-up rows
     for i, p in enumerate(players):
         n  = p["name"]
         al = scout.row_alpha.get(n, 0)
         xo = scout.row_x_off.get(n, -60)
         if al <= 0:
             continue
-        ry  = row_y + i*(ROW_H+3)
+        ry  = row_y + i*(ROW_H+3) - scroll
+        if ry + ROW_H < row_clip_top or ry > row_clip_bot:
+            continue
         is_sel = scout.selected == n
         if is_sel:
             bg = (*C["card_hover"][:3], al)
@@ -1038,7 +1055,17 @@ def _draw_table(dl, tx, ty, tw, th, vw, vh):
             else:
                 _txt(dl, vx, vy, val, (*C["txt2"][:3],al), 18, "raj_20")
 
-    # Click detection
+    # Column header drawn AFTER rows so it masks any rows that scrolled into its area
+    dpg.draw_rectangle((tx,ty),(tx+tw,ty+HEADER_H),
+                        fill=(*C["card"][:3],ha), color=(*C["rule_dark"][:3],ha), rounding=4, parent=dl)
+    for (lbl,_,sk),(cx,cw) in zip(COLS, col_xs):
+        active = sk and scout.sort_col == sk
+        col    = C["gold_lt"] if active else C["txt2"]
+        _txt(dl, tx+cx+8, ty+HEADER_H//2-10, lbl, (*col[:3],ha), 18, "raj_sb_18")
+    dpg.draw_line((tx,ty+HEADER_H),(tx+tw,ty+HEADER_H),
+                  color=(*C["rule_dark"][:3],ha), thickness=1, parent=dl)
+
+    # Click detection — uses scroll-adjusted positions
     if dpg.is_mouse_button_clicked(0):
         mouse = dpg.get_mouse_pos(local=False)
         vp    = dpg.get_viewport_pos()
@@ -1050,7 +1077,9 @@ def _draw_table(dl, tx, ty, tw, th, vw, vh):
             al = scout.row_alpha.get(n, 0)
             if al <= 0:
                 continue
-            row_top = row_y + i*(ROW_H+3)
+            row_top = row_y + i*(ROW_H+3) - scroll
+            if row_top + ROW_H < row_clip_top or row_top > row_clip_bot:
+                continue
             if tx <= rx2 <= tx+tw and row_top <= ry2 <= row_top+ROW_H:
                 scout.select(n)
                 break

@@ -10,6 +10,7 @@ from theme import C, RANK_COLORS
 from core.animations import anim
 from data.reader import live, log_inhouse_games_from_client, get_most_games_logged
 from data.tips import TIPS as _TIPS
+from ui.tierlist import _wheel_delta as _wheel_delta_shared
 
 # ---------------------------------------------------------------------------
 # Demo data
@@ -279,6 +280,7 @@ class InhouseState:
         self._load_t       = 0.0
         self.filter_text   = ""    # live search string
         self._tip          = _rnd.choice(_TIPS)
+        self.scroll_off    = 0     # rows-only scroll offset in px
 
     def reset(self):
         self.__init__()
@@ -288,6 +290,7 @@ class InhouseState:
 
     def begin_load(self, players):
         self.reset()
+        self.scroll_off = 0
         self.players = players
         self.phase   = InhousePhase.LOADING
         anim.tween(0, 1, 1, "linear", delay_ms=1400, on_done=self._reveal)
@@ -368,10 +371,9 @@ def _col_xs(tw):
 # Main draw
 # ---------------------------------------------------------------------------
 
-def _ensure_filter_window(vw, vh):
+def _ensure_filter_window(vw, vh, filter_w):
     """Create or reposition the search-bar overlay window.
-    x tracks the sidebar's current right edge; y is below both the app
-    titlebar (_VP_TITLE_H) and the inhouse top bar (TOP_BAR_H)."""
+    filter_w clips it to the leaderboard area so it never bleeds into the detail panel."""
     sidebar_w = dpg.get_viewport_width() - vw   # dynamic sidebar width
     win_x     = sidebar_w
     win_y     = _VP_TITLE_H + TOP_BAR_H
@@ -379,7 +381,7 @@ def _ensure_filter_window(vw, vh):
     if not dpg.does_item_exist(_INHOUSE_FILTER_WIN):
         with dpg.window(tag=_INHOUSE_FILTER_WIN,
                         pos=(win_x, win_y),
-                        width=vw, height=FILTER_H,
+                        width=filter_w, height=FILTER_H,
                         no_title_bar=True, no_resize=True,
                         no_move=True, no_focus_on_appearing=True,
                         no_scrollbar=True):
@@ -406,7 +408,7 @@ def _ensure_filter_window(vw, vh):
     else:
         dpg.configure_item(_INHOUSE_FILTER_WIN,
                            pos=(win_x, win_y),
-                           width=vw, height=FILTER_H)
+                           width=filter_w, height=FILTER_H)
 
 
 def draw_inhouse(dl, vw, vh, fonts=None):
@@ -416,7 +418,11 @@ def draw_inhouse(dl, vw, vh, fonts=None):
     _flush_pending()
     inhouse.tick()
     dpg.delete_item(dl, children_only=True)
-    dpg.draw_rectangle((0, 0), (vw, vh), fill=C["bg"], color=(0,0,0,0), parent=dl)
+    dpg.draw_rectangle((0, 0), (vw, 3000), fill=C["bg"], color=(0,0,0,0), parent=dl)
+
+    # Keep native window scroll locked — rows are scrolled via scroll_off instead
+    if dpg.does_item_exist("content_win"):
+        dpg.set_y_scroll("content_win", 0)
 
     if inhouse.phase == InhousePhase.IDLE:
         _draw_idle(dl, vw, vh)
@@ -428,14 +434,18 @@ def draw_inhouse(dl, vw, vh, fonts=None):
 
     # Detail panel slide: occupies right DETAIL_W when open
     detail_open = inhouse.detail_x_frac > 0.01
-    table_w = vw - PAD*2 - (int(DETAIL_W * inhouse.detail_x_frac) if detail_open else 0)
+    detail_px   = int(DETAIL_W * inhouse.detail_x_frac)
+    table_w     = vw - PAD*2 - (detail_px if detail_open else 0)
+    # header_w tracks the left edge of any right-side panel so bars never bleed over
+    header_w    = vw - detail_px
 
-    _draw_top_bar(dl, vw)
-    _ensure_filter_window(vw, vh)
+    _ensure_filter_window(vw, vh, header_w)
 
     table_top = TOP_BAR_H + FILTER_H + 4
     _draw_leaderboard(dl, PAD, table_top, table_w - PAD,
                       vh - table_top - PAD, vw, vh)
+    # Draw top bar AFTER rows so it renders on top of any scrolled-up rows
+    _draw_top_bar(dl, vw, header_w)
     if detail_open:
         _draw_detail_panel(dl, vw, vh)
     _notif.draw(dl, vw)
@@ -479,19 +489,20 @@ def _draw_loading(dl, vw, vh):
                             fill=(*C["gold_dk"][:3], a), color=(0,0,0,0), parent=dl)
 
 
-def _draw_top_bar(dl, vw):
+def _draw_top_bar(dl, vw, header_w):
+    """header_w = width of the area this bar owns (stops at detail-panel left edge)."""
     _fetch_most_games_once()
-    dpg.draw_rectangle((0,0),(vw,TOP_BAR_H), fill=(*C["panel"][:3],220),
+    dpg.draw_rectangle((0,0),(header_w,TOP_BAR_H), fill=(*C["panel"][:3],220),
                         color=(0,0,0,0), parent=dl)
-    dpg.draw_line((0,TOP_BAR_H-1),(vw,TOP_BAR_H-1),
+    dpg.draw_line((0,TOP_BAR_H-1),(header_w,TOP_BAR_H-1),
                   color=C["rule_dark"], thickness=1, parent=dl)
     _txt(dl, PAD, 12, "IN-HOUSE CUSTOMS", (*C["gold"][:3],220), 22, "raj_24")
     _txt(dl, PAD+256, 18, "Click a player row to view champion breakdown",
          (*C["txt_dim"][:3],160), 16, "raj_r_16")
 
-    # "LOG GAME" button
+    # "LOG GAME" button — anchored to header_w right edge
     bw, bh = 160, 36
-    bx = vw - bw - PAD
+    bx = header_w - bw - PAD
     by = (TOP_BAR_H - bh)//2
     is_logging = _log_in_progress
     btn_fill = (*C["card"][:3], 200) if is_logging else (*C["gold_dk"][:3], 200)
@@ -522,26 +533,33 @@ def _draw_leaderboard(dl, tx, ty, tw, th, vw, vh):
     col_xs   = _col_xs(tw)
     ha       = inhouse.header_alpha
 
-    # Section header
-    dpg.draw_rectangle((tx,ty),(tx+tw,ty+HEADER_H),
-                        fill=(*C["card"][:3], ha), color=(*C["rule_dark"][:3], ha),
-                        rounding=4, parent=dl)
-    for ci, ((lbl,_),(cx,cw)) in enumerate(zip(COLS, col_xs)):
-        active = (lbl in ("#","PLAYER","WR","KDA"))
-        col = C["gold"] if active else C["txt_dim"]
-        _txt(dl, tx+cx+8, ty+HEADER_H//2-9, lbl, (*col[:3], ha), 13, "raj_sb_14")
-    dpg.draw_line((tx, ty+HEADER_H),(tx+tw, ty+HEADER_H),
-                  color=(*C["rule_dark"][:3], ha), thickness=1, parent=dl)
+    # Calculate scroll bounds and consume wheel delta
+    visible_h    = th - HEADER_H - 4
+    total_rows_h = len(players) * (ROW_H + 2)
+    max_scroll   = max(0, total_rows_h - visible_h)
+    if _wheel_delta_shared[0] != 0:
+        inhouse.scroll_off = max(0, min(
+            inhouse.scroll_off - _wheel_delta_shared[0] * 30, max_scroll))
+        _wheel_delta_shared[0] = 0
+    inhouse.scroll_off = max(0, min(inhouse.scroll_off, max_scroll))
+    scroll = int(inhouse.scroll_off)
+
+    row_clip_top = ty + HEADER_H + 4
+    row_clip_bot = ty + th
 
     row_y = ty + HEADER_H + 4
 
+    # Draw rows FIRST so the column header renders on top of any scrolled-up rows
     for i, p in enumerate(players):
         n  = p["player"]
         al = inhouse.row_alpha.get(n, 0)
         xo = inhouse.row_x_off.get(n, -60)
         if al <= 0:
             continue
-        ry   = row_y + i*(ROW_H+2)
+        ry   = row_y + i*(ROW_H+2) - scroll
+        # Clip rows outside the visible region below the column header
+        if ry + ROW_H < row_clip_top or ry > row_clip_bot:
+            continue
         rank = p["rank"]
         is_top3 = rank <= 3
         is_sel  = inhouse.selected == n
@@ -619,6 +637,17 @@ def _draw_leaderboard(dl, tx, ty, tw, th, vw, vh):
             elif ci == 8:
                 _draw_sparkline(dl, vx, ry+8, cw-16, ROW_H-16, n, al)
 
+    # Column header drawn AFTER rows so it masks any rows that scrolled into its area
+    dpg.draw_rectangle((tx,ty),(tx+tw,ty+HEADER_H),
+                        fill=(*C["card"][:3], ha), color=(*C["rule_dark"][:3], ha),
+                        rounding=4, parent=dl)
+    for ci, ((lbl,_),(cx,cw)) in enumerate(zip(COLS, col_xs)):
+        active = (lbl in ("#","PLAYER","WR","KDA"))
+        col = C["gold"] if active else C["txt_dim"]
+        _txt(dl, tx+cx+8, ty+HEADER_H//2-9, lbl, (*col[:3], ha), 13, "raj_sb_14")
+    dpg.draw_line((tx, ty+HEADER_H),(tx+tw, ty+HEADER_H),
+                  color=(*C["rule_dark"][:3], ha), thickness=1, parent=dl)
+
     # Click detection
     if dpg.is_mouse_button_clicked(0):
         mouse = dpg.get_mouse_pos(local=False)
@@ -629,7 +658,9 @@ def _draw_leaderboard(dl, tx, ty, tw, th, vw, vh):
             n  = p["player"]
             al = inhouse.row_alpha.get(n, 0)
             xo = inhouse.row_x_off.get(n, -60)
-            ry3 = row_y + i*(ROW_H+2)
+            ry3 = row_y + i*(ROW_H+2) - scroll
+            if ry3 + ROW_H < row_clip_top or ry3 > row_clip_bot:
+                continue
             if al>0 and tx<=rx2<=tx+tw and ry3<=ry2<=ry3+ROW_H:
                 inhouse.select(n)
                 break

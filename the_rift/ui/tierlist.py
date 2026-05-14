@@ -428,6 +428,9 @@ def draw_tierlist(dl, vw, vh, fonts=None):
         set_fonts(fonts)
     dpg.delete_item(dl, children_only=True)
     dpg.draw_rectangle((0,0),(vw,vh), fill=C["bg"], color=(0,0,0,0), parent=dl)
+    # Prevent native content_win scroll from fighting with scroll_off-based pool scroll
+    if dpg.does_item_exist("content_win"):
+        dpg.set_y_scroll("content_win", 0)
 
     # Phase 1: cover page animating (detection just succeeded)
     if _cv["active"]:

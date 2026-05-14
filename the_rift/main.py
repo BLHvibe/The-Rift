@@ -26,7 +26,7 @@ from ui.commands import draw_commands
 from ui.feed import draw_feed
 from data.reader import live, load_live_data, check_for_update
 
-__version__ = "2.0.6"   # bump this on each release
+__version__ = "2.0.9"   # bump this on each release
 
 WIN_W, WIN_H = 1280, 800
 TITLE_H      = 52    # titlebar height
@@ -485,6 +485,8 @@ def _sidebar_tick(vw, vh):
                 if old_tag and dpg.does_item_exist(old_tag):
                     dpg.delete_item(old_tag)
                 state.active_tab = new_tab
+                if dpg.does_item_exist("content_win"):
+                    dpg.set_y_scroll("content_win", 0)
                 clicked = True
 
     return clicked
@@ -558,8 +560,8 @@ def main():
                 with dpg.drawlist(tag="sidebar_dl", width=SIDEBAR_W, height=WIN_H-TITLE_H):
                     pass
             with dpg.child_window(tag="content_win", width=WIN_W-SIDEBAR_W, height=WIN_H-TITLE_H,
-                                  border=False, no_scrollbar=True):
-                with dpg.drawlist(tag="content_dl", width=WIN_W-SIDEBAR_W, height=WIN_H-TITLE_H):
+                                  border=False, no_scrollbar=True, no_scroll_with_mouse=False):
+                with dpg.drawlist(tag="content_dl", width=WIN_W-SIDEBAR_W, height=3000):
                     pass
 
     # --- Splash overlay window (on top of root) ---
@@ -647,7 +649,7 @@ def main():
             dpg.configure_item("sidebar_win",  width=sw,        height=content_h)
             dpg.configure_item("sidebar_dl",   width=sw,        height=content_h)
             dpg.configure_item("content_win",  width=content_w, height=content_h)
-            dpg.configure_item("content_dl",   width=content_w, height=content_h)
+            dpg.configure_item("content_dl",   width=content_w)
             dpg.configure_item("splash_win",   width=vw,        height=vh)
             dpg.configure_item("splash_dl",    width=vw,        height=vh)
             _draw_titlebar("titlebar_dl", vw)
@@ -696,6 +698,8 @@ def main():
                 if live.loaded and live.scout:
                     scout_state.begin_load(live.scout)
             state.active_tab = "scout"
+            if dpg.does_item_exist("content_win"):
+                dpg.set_y_scroll("content_win", 0)
             # Auto-select the player after a brief delay for the tab animation
             def _nav_select(name=target):
                 scout_state.select(name)
