@@ -1600,7 +1600,7 @@ def write_activity_event(event_type, player, details, on_done=None, on_error=Non
                 ws = sh.add_worksheet(title="_Activity", rows=500, cols=5)
                 ws.update(values=[["Timestamp","Event Type","Player","Details","Related Player"]],
                           range_name="A1")
-            ts = _dt.now().strftime("%Y-%m-%d %H:%M")
+            ts = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
             ws.append_row([ts, event_type, player or "", details or "", ""],
                           value_input_option="RAW")
             # Refresh live activity

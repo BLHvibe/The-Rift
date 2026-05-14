@@ -21,7 +21,8 @@ CARD_H    = 76
 CARD_GAP  = 6
 SEP_H     = 28   # date separator height
 
-MAX_EVENTS = 100
+MAX_EVENTS    = 100
+AUTO_REFRESH_SECS = 90.0   # poll the sheet at most this often while tab is open
 
 # ---------------------------------------------------------------------------
 # Event type → border colour + icon prefix
@@ -49,10 +50,20 @@ def _kind_color(kind):
 # ---------------------------------------------------------------------------
 
 def _parse_ts(ts_str):
-    """Parse a 'YYYY-MM-DD HH:MM:SS' or 'YYYY-MM-DD HH:MM' string → datetime (local naive)."""
+    """Parse a sheet timestamp → datetime. Accepts ISO 8601 (with optional Z/offset)
+    and the legacy 'YYYY-MM-DD HH:MM[:SS]' formats. Returns aware datetimes when
+    the source is ISO, naive (treated as local) otherwise."""
+    if not ts_str:
+        return None
+    s = ts_str.strip()
+    # ISO 8601 (e.g. 2026-05-14T12:34:56Z or +00:00)
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        pass
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
         try:
-            return datetime.strptime(ts_str, fmt)
+            return datetime.strptime(s, fmt)
         except ValueError:
             continue
     return None
@@ -63,9 +74,14 @@ def _time_ago(ts_str):
     dt = _parse_ts(ts_str)
     if not dt:
         return ts_str
-    now   = datetime.now()
+    if dt.tzinfo is not None:
+        now = datetime.now(timezone.utc)
+    else:
+        now = datetime.now()
     delta = now - dt
     secs  = int(delta.total_seconds())
+    if secs < 0:
+        secs = 0
     if secs < 60:
         return "Just now"
     if secs < 3600:
@@ -89,6 +105,8 @@ def _date_label(ts_str):
     dt = _parse_ts(ts_str)
     if not dt:
         return ts_str
+    if dt.tzinfo is not None:
+        dt = dt.astimezone()  # convert to local for human-readable date grouping
     today = datetime.now().date()
     if dt.date() == today:
         return "Today"
@@ -98,9 +116,13 @@ def _date_label(ts_str):
 
 
 def _event_date_key(ev):
-    ts = ev.get("timestamp", "")
+    ts = ev.get("ts", "") or ev.get("timestamp", "")
     dt = _parse_ts(ts)
-    return dt.date() if dt else None
+    if not dt:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone()
+    return dt.date()
 
 
 # ---------------------------------------------------------------------------
@@ -178,29 +200,47 @@ def _build_events():
 
 class FeedState:
     def __init__(self):
-        self.events       = []
-        self.last_refresh = 0.0
-        self.dirty        = False
-        self.loading      = False
+        self.events            = []
+        self.last_refresh      = 0.0   # monotonic, set after a sheet load completes
+        self.last_sheet_attempt = 0.0  # monotonic, set when we kick off a load
+        self.dirty             = False
+        self.loading           = False
+        self.sheet_loaded_once = False
+        self.last_error        = ""
 
     def refresh(self):
+        """Refresh from in-memory fallback only (no network)."""
         self.events       = _build_events()
-        self.last_refresh = time.monotonic()
         self.dirty        = True
 
-    def refresh_from_sheet(self):
+    def refresh_from_sheet(self, force=False):
+        """Kick a background load of the _Activity sheet.
+
+        force=False is used by the auto-refresh path so we don't stampede.
+        Returns True if a load was actually started."""
         if self.loading:
-            return
-        self.loading = True
+            return False
+        if not force:
+            elapsed = time.monotonic() - self.last_sheet_attempt
+            if self.last_sheet_attempt and elapsed < AUTO_REFRESH_SECS:
+                return False
+        self.loading             = True
+        self.last_sheet_attempt  = time.monotonic()
+        self.dirty               = True   # repaint spinner on next frame
         def _done(evs):
-            self.loading = False
-            self.events  = _build_events()
-            self.dirty   = True
+            self.loading           = False
+            self.last_error        = ""
+            self.sheet_loaded_once = True
+            self.last_refresh      = time.monotonic()
+            self.events            = _build_events()
+            self.dirty             = True
         def _err(msg):
-            self.loading = False
-            self.events  = _build_events()
-            self.dirty   = True
+            self.loading     = False
+            self.last_error  = str(msg) or "Unknown error"
+            self.events      = _build_events()
+            self.dirty       = True
         load_activity(on_done=_done, on_error=_err)
+        return True
 
 
 _feed = FeedState()
@@ -225,6 +265,14 @@ def draw_feed(dl, vw, vh, fonts=None):
     if fonts:
         set_fonts(fonts)
 
+    # Kick a sheet load the first time the tab is drawn, and again every
+    # AUTO_REFRESH_SECS while the user is on it.
+    if not _feed.sheet_loaded_once and not _feed.loading:
+        _feed.refresh_from_sheet(force=True)
+    elif _feed.sheet_loaded_once and not _feed.loading:
+        if time.monotonic() - _feed.last_refresh >= AUTO_REFRESH_SECS:
+            _feed.refresh_from_sheet(force=True)
+
     dpg.delete_item(dl, children_only=True)
     dpg.draw_rectangle((0, 0), (vw, vh), fill=C["bg"], color=(0, 0, 0, 0), parent=dl)
 
@@ -235,30 +283,42 @@ def draw_feed(dl, vw, vh, fonts=None):
                   color=C["rule_dark"], thickness=1, parent=dl)
     _txt(dl, PAD, 12, "ACTIVITY FEED", (*C["gold"][:3], 220), 23, "raj_24")
 
-    # Loading spinner hint
+    # Loading spinner hint (animated dots)
     if _feed.loading:
-        _txt(dl, PAD + 240, 18, "loading…", (*C["txt_dim"][:3], 160), 17, "raj_r_16")
+        dots = "." * (int(time.monotonic() * 2) % 4)
+        _txt(dl, PAD + 240, 18, f"loading{dots}", (*C["gold_lt"][:3], 200), 17, "raj_r_16")
+    elif _feed.last_error:
+        _txt(dl, PAD + 240, 18,
+             f"⚠ sheet load failed — showing local fallback",
+             (*C["loss"][:3], 200), 16, "raj_r_16")
+    elif _feed.sheet_loaded_once and _feed.last_refresh:
+        ago = int(time.monotonic() - _feed.last_refresh)
+        if ago < 5:
+            label = "synced just now"
+        elif ago < 60:
+            label = f"synced {ago}s ago"
+        else:
+            label = f"synced {ago // 60}m ago"
+        _txt(dl, PAD + 240, 18, label, (*C["txt_dim"][:3], 140), 16, "raj_r_16")
 
     # REFRESH button
     bw, bh = 140, 34
     bx = vw - bw - PAD
     by = (TOP_BAR_H - bh) // 2
+    btn_fill = (*C["gold_dk"][:3], 200) if not _feed.loading else (*C["gold_dk"][:3], 120)
     dpg.draw_rectangle((bx, by), (bx + bw, by + bh),
-                        fill=(*C["gold_dk"][:3], 200),
+                        fill=btn_fill,
                         color=(*C["gold"][:3], 200), rounding=4, parent=dl)
     _txt(dl, bx + 14, by + 8, "◆  REFRESH", (*C["gold_lt"][:3], 240), 18, "raj_sb_18")
 
-    # Click — refresh from sheet first, fallback to local
+    # Click — force a sheet refresh (same hit-test pattern as the rest of the app)
     if dpg.is_mouse_button_clicked(0):
         mouse = dpg.get_mouse_pos(local=False)
         vp    = dpg.get_viewport_pos()
         rx = mouse[0] - vp[0] - 68
         ry = mouse[1] - vp[1] - TOP_BAR_H
         if bx <= rx <= bx + bw and by <= ry <= by + bh:
-            _feed.refresh_from_sheet()
-
-    if not _feed.events:
-        _feed.refresh()
+            _feed.refresh_from_sheet(force=True)
 
     if not dpg.does_item_exist(_FEED_WIN):
         _build_feed_window(vw, vh)
@@ -310,12 +370,22 @@ def _populate_cards():
 
 def _empty_state(parent):
     dpg.add_spacer(height=60, parent=parent)
-    t = dpg.add_text(
-        "No activity yet — click REFRESH to load from the Activity sheet",
-        color=C["txt_dim"][:3], parent=parent,
-    )
+    if _feed.loading and not _feed.sheet_loaded_once:
+        msg = "Loading activity from sheet…"
+    elif _feed.last_error and not _feed.sheet_loaded_once:
+        msg = "Could not reach the Activity sheet. Check your connection and click REFRESH."
+    elif _feed.sheet_loaded_once:
+        msg = "No activity yet — events will appear here after a SCOUT, DRAFT, or INHOUSE run."
+    else:
+        msg = "Click REFRESH to load from the Activity sheet."
+    t = dpg.add_text(msg, color=C["txt_dim"][:3], parent=parent)
     if "raj_r_14" in _F:
         dpg.bind_item_font(t, _F["raj_r_14"])
+    if _feed.last_error and _feed.sheet_loaded_once is False:
+        err = dpg.add_text(f"  ↳ {_feed.last_error[:140]}",
+                            color=C["loss"][:3], parent=parent)
+        if "raj_r_12" in _F:
+            dpg.bind_item_font(err, _F["raj_r_12"])
 
 
 def _draw_date_separator(ts_str, parent):

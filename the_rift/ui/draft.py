@@ -11,7 +11,7 @@ import math, time
 import dearpygui.dearpygui as dpg
 from theme import C, RANK_COLORS
 from core.animations import anim
-from data.reader import live, load_prediction_data, write_draft_picks, run_draft_subprocess, read_draft_results
+from data.reader import live, load_prediction_data, write_draft_picks, run_draft_subprocess, read_draft_results, write_activity_event
 from data.config import load_config
 from data import draft_engine as _eng
 
@@ -828,6 +828,14 @@ def _analyse_teams(blue_players, red_players):
 
     blue_names = [p["name"] for p in blue_players]
     red_names  = [p["name"] for p in red_players]
+    # Log a DRAFT activity event so the Activity Feed reflects local analyses
+    # (the Sheets subprocess path is disabled — see project notes).
+    try:
+        detail = (f"BLUE {' / '.join(blue_names)}  vs  "
+                  f"RED {' / '.join(red_names)}  ({win_pct:.0f}% blue)")
+        write_activity_event("DRAFT", "", detail)
+    except Exception:
+        pass
     # Keep the Rank History win-% prediction (different signal: strength-based,
     # updates win meter + per-lane bars but does NOT touch bans/comps).
     load_prediction_data(blue_names, red_names, on_done=_apply_prediction)
