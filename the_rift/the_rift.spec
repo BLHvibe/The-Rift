@@ -42,6 +42,7 @@ a = Analysis(
         'data.config',
         'data.fetch_ranks_gsheets',
         'data.inhouse_tracker',
+        'data.draft_engine',
         'ui',
         'ui.rankings',
         'ui.draft',

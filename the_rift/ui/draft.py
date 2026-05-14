@@ -13,6 +13,7 @@ from theme import C, RANK_COLORS
 from core.animations import anim
 from data.reader import live, load_prediction_data, write_draft_picks, run_draft_subprocess, read_draft_results
 from data.config import load_config
+from data import draft_engine as _eng
 
 _ROLES = ["TOP", "JGL", "MID", "BOT", "SUP"]
 
@@ -57,18 +58,18 @@ def _get_player_pool():
         return out
 
     if live.loaded and live.scout:
-        return _dedup(live.scout)
+        return _dedup(live.scout) + _RANDOM_PLAYERS
     if live.loaded and live.rankings:
-        return _dedup(live.rankings)
+        return _dedup(live.rankings) + _RANDOM_PLAYERS
     if live.loaded and live.players:
         return _dedup(
             [{"name": p, "tier": "Unranked", "final_score": 50.0, "score": 50.0}
-             for p in live.players])
+             for p in live.players]) + _RANDOM_PLAYERS
     cfg_players = load_config().get("players", [])
     return _dedup(
         [{"name": p if isinstance(p, str) else p.get("name", str(p)),
           "tier": "Unranked", "final_score": 50.0, "score": 50.0}
-         for p in cfg_players])
+         for p in cfg_players]) + _RANDOM_PLAYERS
 
 
 def _player_score(p):
@@ -82,127 +83,189 @@ def _player_score(p):
 # Matchup computation
 # ---------------------------------------------------------------------------
 
-_ENGAGE_CHAMPS  = {"Leona","Malphite","Amumu","Sejuani","Galio","Orianna",
-                   "Vi","Jarvan IV","Jarvan","Wukong","Zac","Kennen"}
-_POKE_CHAMPS    = {"Jayce","Ezreal","Zoe","Karma","Lux","Nidalee","Xerath",
-                   "Ziggs","Hwei","Corki","Caitlyn"}
-_SPLIT_CHAMPS   = {"Fiora","Camille","Tryndamere","Riven","Jax","Nasus","Garen"}
-_PROTECT_CHAMPS = {"Lulu","Janna","Soraka","Ivern","Sona","Tahm Kench","Shields"}
+# ---------------------------------------------------------------------------
+# Champion classification (mirrors fetch_ranks_gsheets.py)
+# ---------------------------------------------------------------------------
 
+_ROLE_NORM = {
+    "TOP": "Top", "JGL": "Jungle", "MID": "Mid", "BOT": "Bot", "SUP": "Support"
+}
 
-def _compute_matchups(blue, red):
-    """
-    Compute per-lane 1v1 matchup advantage for each role.
-    Returns list of (role, blue_name, red_name, blue_win_pct, note).
-    """
-    rows = []
-    for i, (bp, rp) in enumerate(zip(blue, red)):
-        role = _ROLES[i]
-        bs   = _player_score(bp)
-        rs   = _player_score(rp)
-        diff = bs - rs
+_SUBCLASSES = {
+    "engage":      {"Malphite","Amumu","Leona","Nautilus","Rakan","Rell","Alistar",
+                    "Jarvan IV","Sejuani","Maokai","Ornn","Zac","Sion","Gragas",
+                    "Wukong","Diana","Galio","Skarner","Yone","Kennen","Hecarim",
+                    "Vi","Camille","Kled","Nocturne","Rek'Sai","Pantheon",
+                    "Ambessa","Aurora"},
+    "aoe_damage":  {"Orianna","Miss Fortune","Kennen","Rumble","Diana","Yone",
+                    "Yasuo","Gangplank","Samira","Karthus","Brand","Zyra",
+                    "Viktor","Cassiopeia","Nilah","Fiddlesticks","Aurora","Katarina",
+                    "Vladimir","Lissandra","Wukong","Galio","Lillia","Briar",
+                    "Vex","Hwei","Ziggs","Seraphine","Twitch","Jinx"},
+    "frontline":   {"Malphite","Maokai","Ornn","Sion","Cho'Gath","Dr. Mundo",
+                    "Tahm Kench","Shen","Braum","Taric","Alistar","Leona",
+                    "Nautilus","Rell","Sejuani","Amumu","Rammus","Zac",
+                    "Poppy","Skarner","K'Sante","Gragas","Volibear","Darius",
+                    "Garen","Sett","Mordekaiser","Illaoi","Urgot","Aatrox","Ambessa"},
+    "assassin_or_burst": {"Zed","Talon","Qiyana","Akali","LeBlanc","Fizz",
+                          "Katarina","Ekko","Kha'Zix","Rengar","Evelynn",
+                          "Shaco","Naafiri","Pyke","Syndra","Ahri","Veigar",
+                          "Annie","Lux","Neeko","Zoe","Vex","Aurora",
+                          "Nocturne","Diana","Briar","Lee Sin","Ambessa","Mel"},
+    "cc":          {"Thresh","Morgana","Lux","Ahri","Ashe","Jhin","Veigar","Neeko",
+                    "Twisted Fate","Blitzcrank","Pyke","Elise","Lee Sin","Hwei",
+                    "Sejuani","Amumu","Leona","Nautilus","Maokai","Zyra","Bard",
+                    "Renata Glasc","Rakan","Rell","Skarner"},
+    "duelist":     {"Fiora","Tryndamere","Jax","Camille","Gwen","Irelia","Riven",
+                    "Yasuo","Yone","Mordekaiser","Nasus","Yorick","Trundle",
+                    "Volibear","Udyr","Kayle","Sett","Gnar","Ambessa","Warwick",
+                    "Shen","Illaoi","Olaf","Renekton","Kled"},
+    "waveclear":   {"Anivia","Ryze","Malzahar","Viktor","Ziggs","Sivir",
+                    "Jinx","Orianna","Xerath","Taliyah","Aurelion Sol","Hwei",
+                    "Twisted Fate","Corki","Heimerdinger","Seraphine","Veigar",
+                    "Cassiopeia","Vladimir","Azir","Mel","Smolder"},
+    "long_range":  {"Xerath","Vel'Koz","Lux","Ziggs","Jayce","Ezreal","Varus",
+                    "Kog'Maw","Nidalee","Zoe","Hwei","Caitlyn","Senna",
+                    "Seraphine","Karma","Viktor","Corki","Jhin","Ashe"},
+    "disengage":   {"Janna","Gragas","Poppy","Alistar","Thresh","Braum",
+                    "Karma","Lulu","Zilean","Anivia","Taliyah","Azir",
+                    "Nami","Milio","Soraka"},
+    "hypercarry":  {"Kog'Maw","Jinx","Twitch","Aphelios","Vayne","Kayle",
+                    "Kindred","Smolder","Veigar","Cassiopeia","Karthus",
+                    "Azir","Viktor","Tristana","Xayah","Zeri","Kai'Sa",
+                    "Draven","Nilah","Master Yi"},
+    "peel":        {"Lulu","Janna","Karma","Nami","Soraka","Yuumi","Milio",
+                    "Renata Glasc","Taric","Zilean","Ivern","Braum","Shen",
+                    "Orianna","Seraphine","Sona","Bard"},
+}
 
-        blue_adv = 50.0 + diff * 0.5
-        blue_adv = max(25.0, min(75.0, blue_adv))
+_ARCHETYPES = {
+    "Teamfight":         {"needs": {"engage": 1, "aoe_damage": 2, "frontline": 1},
+                          "label": "Teamfight  (AoE + Engage)"},
+    "Pick":              {"needs": {"assassin_or_burst": 2, "cc": 2},
+                          "label": "Pick  (Catch + Burst)"},
+    "Split Push":        {"needs": {"duelist": 1, "waveclear": 1},
+                          "label": "Split Push  (1-3-1)"},
+    "Poke / Siege":      {"needs": {"long_range": 2, "disengage": 1},
+                          "label": "Poke / Siege  (Range + Zone)"},
+    "Protect the Carry": {"needs": {"hypercarry": 1, "peel": 2},
+                          "label": "Protect the Carry  (Shield/Peel)"},
+    "Dive":              {"needs": {"engage": 2, "assassin_or_burst": 1, "frontline": 1},
+                          "label": "Dive  (Hard Engage + Collapse)"},
+    "Scaling":           {"needs": {"hypercarry": 1, "waveclear": 1, "disengage": 1},
+                          "label": "Scaling  (Late-game win)"},
+}
 
-        b_main = live.primary_roles.get(bp["name"])
-        r_main = live.primary_roles.get(rp["name"])
-        if b_main == role:   blue_adv += 4.0
-        if r_main == role:   blue_adv -= 4.0
-        blue_adv = max(20.0, min(80.0, blue_adv))
+_ARCH_CONFLICTS = {
+    "Dive":              {"hypercarry", "disengage"},
+    "Teamfight":         {"disengage", "duelist"},
+    "Poke / Siege":      {"engage", "assassin_or_burst"},
+    "Protect the Carry": {"assassin_or_burst"},
+    "Split Push":        {"engage", "aoe_damage"},
+}
 
-        note = _matchup_note(diff, role, bp["name"], rp["name"], b_main, r_main)
-        rows.append((role, bp["name"], rp["name"], round(blue_adv, 1), note))
-    return rows
+_ROLE_VALID = {
+    "TOP": {"Aatrox","Ambessa","Aurora","Camille","Cho'Gath","Darius","Dr. Mundo",
+            "Fiora","Gangplank","Garen","Gnar","Gwen","Illaoi","Irelia","Jax",
+            "Jayce","K'Sante","Kayle","Kennen","Kled","Malphite","Maokai",
+            "Mordekaiser","Nasus","Olaf","Ornn","Pantheon","Poppy","Quinn",
+            "Renekton","Riven","Rumble","Sett","Shen","Sion","Tahm Kench",
+            "Teemo","Trundle","Tryndamere","Urgot","Vladimir","Volibear",
+            "Wukong","Yasuo","Yone","Yorick","Gragas","Akali","Warwick","Zac"},
+    "JGL": {"Amumu","Ambessa","Bel'Veth","Briar","Diana","Ekko","Elise","Evelynn",
+            "Fiddlesticks","Gragas","Graves","Hecarim","Ivern","Jarvan IV",
+            "Karthus","Kayn","Kha'Zix","Kindred","Lee Sin","Lillia",
+            "Master Yi","Nidalee","Nocturne","Nunu","Pantheon","Poppy",
+            "Rammus","Rek'Sai","Rengar","Sejuani","Shaco","Shyvana",
+            "Skarner","Taliyah","Udyr","Vi","Viego","Volibear","Warwick",
+            "Wukong","Xin Zhao","Zac","Maokai","Trundle","Sylas"},
+    "MID": {"Ahri","Akali","Akshan","Anivia","Annie","Aurelion Sol","Azir",
+            "Cassiopeia","Corki","Diana","Ekko","Fizz","Galio","Hwei",
+            "Irelia","Kassadin","Katarina","LeBlanc","Lissandra","Lux",
+            "Malzahar","Mel","Naafiri","Neeko","Orianna","Pantheon","Qiyana",
+            "Ryze","Sylas","Syndra","Taliyah","Talon","Tristana","Twisted Fate",
+            "Veigar","Vex","Viktor","Vladimir","Xerath","Yasuo","Yone",
+            "Zed","Zoe","Ziggs","Aurora","Jayce","Rumble","Heimerdinger","Zyra"},
+    "BOT": {"Aphelios","Ashe","Caitlyn","Corki","Draven","Ezreal","Jhin",
+            "Jinx","Kai'Sa","Kalista","Kog'Maw","Lucian","Miss Fortune",
+            "Nilah","Samira","Sivir","Smolder","Tristana","Twitch","Varus",
+            "Vayne","Xayah","Zeri","Ziggs","Senna"},
+    "SUP": {"Alistar","Bard","Blitzcrank","Braum","Janna","Karma","Leona",
+            "Lulu","Lux","Mel","Milio","Morgana","Nami","Nautilus","Pyke",
+            "Rakan","Rell","Renata Glasc","Senna","Seraphine","Sona",
+            "Soraka","Taric","Thresh","Yuumi","Zilean","Zyra","Xerath",
+            "Vel'Koz","Maokai","Poppy","Tahm Kench","Galio"},
+}
 
-
-def _matchup_note(diff, role, bn, rn, b_main, r_main):
-    parts = []
-    if   abs(diff) >= 20: parts.append(f"{'Blue' if diff>0 else 'Red'} +{abs(diff):.0f} score")
-    elif abs(diff) >= 8:  parts.append("Close skill match")
-    else:                 parts.append("Even matchup")
-
-    if   b_main == role:             parts.append(f"{bn} on main")
-    elif b_main and b_main != role:  parts.append(f"{bn} off-role ({b_main})")
-    if   r_main == role:             parts.append(f"{rn} on main")
-    elif r_main and r_main != role:  parts.append(f"{rn} off-role ({r_main})")
-
-    return "  ·  ".join(parts[:3])
-
-
-def _compute_bans(opposing_players):
-    """
-    Recommend bans against the opposing team.
-    Prioritises inhouse champions with most games, then top_champs from Player Stats.
-    Returns list of up to 5 champion name strings.
-    """
-    seen   = {}
-    for p in opposing_players:
-        for ch in live.inhouse_champs.get(p["name"], [])[:3]:
-            cname = ch["champ"]
-            if cname not in seen or ch["games"] > seen[cname]["games"]:
-                seen[cname] = {"champ": cname, "games": ch["games"],
-                               "player": p["name"]}
-    for p in opposing_players:
-        for champ in p.get("top_champs", [])[:3]:
-            if champ and champ not in seen:
-                seen[champ] = {"champ": champ, "games": 0, "player": p["name"]}
-
-    bans = sorted(seen.values(), key=lambda x: -x["games"])[:5]
-    return [b["champ"] for b in bans]
-
-
-_COMP_TAGS = [
-    (_ENGAGE_CHAMPS,  "Engage  (Hard CC + Dive)"),
-    (_POKE_CHAMPS,    "Poke  (Range + Siege)"),
-    (_SPLIT_CHAMPS,   "Split Push  (1-3-1)"),
-    (_PROTECT_CHAMPS, "Protect ADC  (Shield/Heal)"),
+_RANDOM_PLAYERS = [
+    {"name": "Random 1", "tier": "Unranked", "final_score": 50.0, "score": 50.0,
+     "top_champs": [], "is_random": True},
+    {"name": "Random 2", "tier": "Unranked", "final_score": 50.0, "score": 50.0,
+     "top_champs": [], "is_random": True},
+    {"name": "Random 3", "tier": "Unranked", "final_score": 50.0, "score": 50.0,
+     "top_champs": [], "is_random": True},
 ]
-_COMP_FALLBACKS = [
-    "Teamfight  (AoE burst)",
-    "Skirmish  (Pick + Catch)",
-    "Scaling  (Late-game win)",
-]
 
-def _compute_comps(players):
-    """Suggest team compositions based on the assembled players' champion pools."""
-    all_champs = {ch for p in players for ch in p.get("top_champs", [])}
-    comps = []
-    for champ_set, label in _COMP_TAGS:
-        if all_champs & champ_set:
-            comps.append(label)
-    for fb in _COMP_FALLBACKS:
-        if len(comps) >= 5:
+
+def _parse_wr(val):
+    """Parse win rate from '68.3%' or numeric → float."""
+    try:
+        return float(str(val).replace("%", ""))
+    except (ValueError, TypeError):
+        return 50.0
+
+
+def _champ_arch_score(champ, archetype):
+    """0-1 fit score for a champion in an archetype."""
+    arch  = _ARCHETYPES[archetype]
+    total = sum(arch["needs"].values())
+    hits  = sum(1 for need in arch["needs"] if champ in _SUBCLASSES.get(need, set()))
+    score = hits / max(total, 1)
+    for conflict in _ARCH_CONFLICTS.get(archetype, set()):
+        if champ in _SUBCLASSES.get(conflict, set()):
+            score -= 0.25
             break
-        comps.append(fb)
-    return comps[:5]
+    return max(score, 0.0)
 
 
-def _compute_comps_detail(players):
-    """Return comp detail list with champion picks from player pools."""
-    all_champs = {ch for p in players for ch in p.get("top_champs", [])}
-    comps = []
-    for champ_set, label in _COMP_TAGS:
-        matching = sorted(all_champs & champ_set)
-        if matching:
-            name = label.split("  ")[0]
-            comps.append({
-                "archetype": name,
-                "viability": "STRONG",
-                "synergy":   min(5, len(matching)),
-                "picks":     [{"champion": ch} for ch in matching[:5]],
-            })
-    for fb in _COMP_FALLBACKS:
-        if len(comps) >= 5:
-            break
-        name = fb.split("  ")[0]
-        comps.append({
-            "archetype": name,
-            "viability": "VIABLE",
-            "synergy":   2,
-            "picks":     [],
-        })
-    return comps[:5]
+def _compute_matchups(blue, red, blue_picks=None, red_picks=None):
+    """Per-lane matchup. Delegates to draft_engine for champion + form awareness."""
+    return _eng.compute_matchups(
+        blue, red,
+        primary_roles=live.primary_roles,
+        blue_picks=blue_picks or [],
+        red_picks=red_picks or [],
+    )
+
+
+def _compute_bans(opposing_players, own_picks=None):
+    """
+    Bans vs opposing team. Delegates to draft_engine for Bayesian-shrunk threat,
+    form modifier, role-context boost, and counter-coverage discount when our
+    team already counters a champion.
+    """
+    return _eng.recommend_bans(
+        opposing_players,
+        inhouse_champs=live.inhouse_champs,
+        own_picks=own_picks or [],
+        primary_roles=live.primary_roles,
+        n_bans=5,
+    )
+
+
+def _compute_comps_detail(players, enemy_picks=None):
+    """
+    Per-player champion picks per archetype using beam search global optimisation.
+    Adds team identity vector, synergy/anti-synergy pairs, AP/AD damage profile,
+    counter-pick scoring vs locked enemy champions.
+    """
+    return _eng.recommend_comps(
+        players,
+        inhouse_champs=live.inhouse_champs,
+        primary_roles=live.primary_roles,
+        enemy_picks=enemy_picks or (),
+        n_results=5,
+    )
 
 # Fly-in config
 FLY_DURATION_MS  = 460
@@ -507,7 +570,7 @@ def _draw_team_builder_full(dl, vw, vh):
 
     # Empty pool hint
     if not pool_vis and not _tb.drag:
-        _txt(dl, pad, ry+8, "All players assigned.", (*C["txt_dim"][:3], 120), 17, "raj_r_16")
+        _txt(dl, pad, ry+8, "All players assigned.", (*C["txt_dim"][:3], 120), 17, "raj_sb_16")
 
     # ── Dragged card (top layer) ──────────────────────────────────
     if _tb.drag:
@@ -548,31 +611,44 @@ def _draw_role_slots(dl, x, y, width, slots, slot_h):
             tc    = RANK_COLORS.get(tier, RANK_COLORS["Unranked"])
             name_sz = min(28, max(22, slot_h - 26))
             _txt(dl, x+60, sy+max(4, slot_h//2-name_sz//2-2), name.upper(), (*C["gold_lt"][:3], 235), name_sz, "raj_24")
-            _txt(dl, x+60, sy+slot_h-20, tier[:3].upper(), (*tc[:3], 200), 18, "raj_r_18")
+            _txt(dl, x+60, sy+slot_h-20, tier[:3].upper(), (*tc[:3], 200), 18, "raj_sb_18")
             sc = _tb_score_str(p)
             if sc:
                 _txt(dl, x+width-86, sy+max(4, slot_h//2-13), sc, (*C["txt2"][:3], 200), 21, "raj_20")
         else:
             _txt(dl, x+60, sy+slot_h//2-9, "drag here",
-                 (*C["txt_dim"][:3], 70), 18, "raj_r_18")
+                 (*C["txt_dim"][:3], 70), 18, "raj_sb_18")
 
 
 def _draw_tb_card(dl, x, y, w, h, player, dragging=False):
     """Draw a compact player card."""
-    name  = player.get("name", "?")
-    tier  = player.get("tier", "Unranked")
-    tc    = RANK_COLORS.get(tier, RANK_COLORS["Unranked"])
-    al    = 240 if dragging else 210
+    name      = player.get("name", "?")
+    is_random = player.get("is_random", False)
+    tier      = player.get("tier", "Unranked")
+    tc        = RANK_COLORS.get(tier, RANK_COLORS["Unranked"])
+    al        = 240 if dragging else 210
 
-    dpg.draw_rectangle((x, y), (x+w, y+h),
-                        fill=(*C["card"][:3], 240 if dragging else 180),
-                        color=(*tc[:3], 220 if dragging else 150),
-                        rounding=4, parent=dl)
-    _txt(dl, x+10, y+5,    name.upper(),      (*C["gold_lt"][:3], al), 22, "raj_24")
-    _txt(dl, x+10, y+h-19, tier[:3].upper(),  (*tc[:3], int(al*0.85)), 19, "raj_r_18")
-    sc = _tb_score_str(player)
-    if sc:
-        _txt(dl, x+w-52, y+5, sc, (*C["txt2"][:3], int(al*0.9)), 19, "raj_20")
+    if is_random:
+        dpg.draw_rectangle((x, y), (x+w, y+h),
+                            fill=(*C["card"][:3], 130 if not dragging else 190),
+                            color=(100, 120, 170, 140 if not dragging else 200),
+                            rounding=4, parent=dl)
+        # Dashed top edge to signal "unknown player"
+        dpg.draw_line((x+4, y+1), (x+w-4, y+1),
+                      color=(100, 120, 170, 80), thickness=1, parent=dl)
+        _txt(dl, x+10, y+5,    name.upper(), (130, 155, 210, al), 20, "raj_20")
+        _txt(dl, x+10, y+h-19, "RAND",       ( 90, 110, 160, int(al*0.7)), 17, "raj_sb_18")
+        _txt(dl, x+w-46, y+5,  "~50",        (*C["txt2"][:3], int(al*0.55)), 17, "raj_20")
+    else:
+        dpg.draw_rectangle((x, y), (x+w, y+h),
+                            fill=(*C["card"][:3], 240 if dragging else 180),
+                            color=(*tc[:3], 220 if dragging else 150),
+                            rounding=4, parent=dl)
+        _txt(dl, x+10, y+5,    name.upper(),      (*C["gold_lt"][:3], al), 22, "raj_24")
+        _txt(dl, x+10, y+h-19, tier[:3].upper(),  (*tc[:3], int(al*0.85)), 19, "raj_sb_18")
+        sc = _tb_score_str(player)
+        if sc:
+            _txt(dl, x+w-52, y+5, sc, (*C["txt2"][:3], int(al*0.9)), 19, "raj_20")
 
 
 def _tb_slot_hit(sx, sy, sw, sh, pos):
@@ -712,18 +788,32 @@ def _analyse_teams(blue_players, red_players):
     win_pct  = (blue_avg / total * 100) if total > 0 else 50.0
     win_pct  = max(25.0, min(75.0, win_pct))
 
+    # Stage 1: recommend comps for both sides independently
     blue_comp_detail = _compute_comps_detail(blue_players)
-    red_comp_detail  = _compute_comps_detail(red_players)
+    # Stage 2: red sees blue's likely picks, can be counter-aware
+    blue_top_picks = [pk["champion"] for pk in (blue_comp_detail[0]["picks"]
+                                                if blue_comp_detail else [])]
+    red_comp_detail = _compute_comps_detail(red_players, enemy_picks=blue_top_picks)
+
+    red_top_picks = [pk["champion"] for pk in (red_comp_detail[0]["picks"]
+                                               if red_comp_detail else [])]
+
+    # Stage 3: bans use our likely picks for coverage-discount on countered threats
+    blue_bans, blue_ban_detail = _compute_bans(red_players, own_picks=blue_top_picks)
+    red_bans,  red_ban_detail  = _compute_bans(blue_players, own_picks=red_top_picks)
 
     draft.blue_avg         = blue_avg
     draft.red_avg          = red_avg
-    draft.pvp_rows         = _compute_matchups(blue_players, red_players)
-    draft.blue_bans        = _compute_bans(red_players)
-    draft.red_bans         = _compute_bans(blue_players)
+    # Stage 4: matchups use top-comp picks for champion-level matchup awareness
+    draft.pvp_rows         = _compute_matchups(blue_players, red_players,
+                                                blue_picks=blue_top_picks,
+                                                red_picks=red_top_picks)
+    draft.blue_bans        = blue_bans
+    draft.red_bans         = red_bans
     draft.blue_comps       = [c["archetype"] for c in blue_comp_detail]
     draft.red_comps        = [c["archetype"] for c in red_comp_detail]
-    draft.ban_detail_blue  = []
-    draft.ban_detail_red   = []
+    draft.ban_detail_blue  = blue_ban_detail
+    draft.ban_detail_red   = red_ban_detail
     draft.comp_detail_blue = blue_comp_detail
     draft.comp_detail_red  = red_comp_detail
     draft.prediction_src   = "local"
@@ -733,11 +823,17 @@ def _analyse_teams(blue_players, red_players):
 
     blue_names = [p["name"] for p in blue_players]
     red_names  = [p["name"] for p in red_players]
+    # Keep the Rank History win-% prediction (different signal: strength-based,
+    # updates win meter + per-lane bars but does NOT touch bans/comps).
     load_prediction_data(blue_names, red_names, on_done=_apply_prediction)
 
-    draft.bg_running = True
-    draft.bg_status  = "Writing picks to sheet…"
-    _kick_off_bg_draft(blue_players, red_players)
+    # Sheets-subprocess pass is disabled: the local engine now produces the
+    # full rich comps/bans on the spot. The subprocess used to overwrite them
+    # with its older logic. If you ever want the backend rerun, re-enable
+    # _kick_off_bg_draft below.
+    # draft.bg_running = True
+    # draft.bg_status  = "Writing picks to sheet…"
+    # _kick_off_bg_draft(blue_players, red_players)
 
 
 def _tb_begin_analysis():
@@ -839,6 +935,37 @@ def _apply_draft_results(results):
     comps_b = results.get("blue_comps", [])
     comps_r = results.get("red_comps",  [])
 
+    # Augment backend comp results with engine-derived UI fields (win_condition,
+    # spike, score_breakdown). Backend predates the engine module; this adds the
+    # richer surface without touching fetch_ranks_gsheets.py.
+    def _augment_comp(c):
+        arch = c.get("archetype")
+        if arch and arch in _eng.ARCHETYPES:
+            ad = _eng.ARCHETYPES[arch]
+            c.setdefault("win_condition", ad.get("win_condition", ""))
+            c.setdefault("spike",         ad.get("spike", ""))
+        # Score breakdown from the engine if backend didn't provide one
+        if "score_breakdown" not in c:
+            picks = c.get("picks") or []
+            champs = [p.get("champion", "") for p in picks if p.get("champion")]
+            if champs and arch in _eng.ARCHETYPES:
+                comforts = [float(p.get("fit_score") or p.get("comfort") or 0.4)
+                            for p in picks]
+                try:
+                    sb = _eng.score_team(champs, comforts, arch)
+                    c["score_breakdown"] = {
+                        "identity":  round(sb["identity"], 2),
+                        "synergy":   round(sb["synergy"],  2),
+                        "damage":    round(sb["damage"],   2),
+                        "counter":   round(sb["counter"],  2),
+                        "comfort":   round(sb["comfort"],  2),
+                        "coherence": round(sb["coherence"],2),
+                        "ap_ratio":  round(sb["ap_ratio"], 2),
+                    }
+                except Exception:
+                    pass
+        return c
+
     if bans_b:
         draft.blue_bans       = [b["champion"] for b in bans_b]
         draft.ban_detail_blue = bans_b
@@ -846,10 +973,10 @@ def _apply_draft_results(results):
         draft.red_bans        = [b["champion"] for b in bans_r]
         draft.ban_detail_red  = bans_r
     if comps_b:
-        draft.comp_detail_blue = comps_b
+        draft.comp_detail_blue = [_augment_comp(dict(c)) for c in comps_b]
         draft.blue_comps       = [c["archetype"] for c in comps_b]
     if comps_r:
-        draft.comp_detail_red  = comps_r
+        draft.comp_detail_red  = [_augment_comp(dict(c)) for c in comps_r]
         draft.red_comps        = [c["archetype"] for c in comps_r]
 
 # ---------------------------------------------------------------------------
@@ -967,9 +1094,9 @@ def _draw_team_area(dl, vw, team_h):
     if draft.phase in (DraftPhase.RESULTS, DraftPhase.DONE) and draft.panel_alpha > 0:
         al = draft.panel_alpha
         _txt(dl, 24, 42, f"avg score: {draft.blue_avg:.1f}",
-             (*C["txt2"][:3], al), 18, "raj_r_18")
+             (*C["txt"][:3], al), 19, "raj_sb_18")
         _txt(dl, vw - 190, 42, f"avg score: {draft.red_avg:.1f}",
-             (220, 90, 90, al), 18, "raj_r_18")
+             (220, 110, 110, al), 19, "raj_sb_18")
 
     dpg.draw_line((center, 0),(center, team_h),
                   color=(*C["rule_gold"][:3], 180), thickness=1, parent=dl)
@@ -1044,10 +1171,10 @@ def _draw_team_area(dl, vw, team_h):
         t  = (math.sin(time.monotonic() * 2.0) + 1) / 2
         pa = int(60 + t * 60)
         _txt(dl, center - 140, team_h - 24, draft.bg_status,
-             (*C["txt2"][:3], pa), 18, "raj_r_18")
+             (*C["txt2"][:3], pa), 18, "raj_sb_18")
     elif draft.bg_status and not draft.bg_running and draft.phase in (DraftPhase.RESULTS, DraftPhase.DONE):
         _txt(dl, center - 140, team_h - 24, draft.bg_status,
-             (*C["txt2"][:3], 160), 18, "raj_r_18")
+             (*C["txt2"][:3], 160), 18, "raj_sb_18")
 
     # NEW DRAFT button — visible in results/done phase
     if draft.phase in (DraftPhase.RESULTS, DraftPhase.DONE):
@@ -1105,7 +1232,7 @@ def _draw_win_meter(dl, cx, team_h):
 
     label = f"{draft.win_pct_display:.1f}%"
     _txt(dl, cx - 32, my - 42, label, (*col, ma), 32, "raj_28")
-    _txt(dl, cx - 26, my + mh//2 + 8, "BLUE WIN", (*C["txt2"][:3], ma), 20, "raj_sb_22")
+    _txt(dl, cx - 32, my + mh//2 + 8, "BLUE WIN", (*C["txt"][:3], ma), 22, "raj_sb_22")
 
 
 def _win_color(pct):
@@ -1128,18 +1255,18 @@ def _draw_strategy_panel(dl, px, py, pw, ph, al, header, header_col,
                   color=(*C["rule_dark"][:3], al), thickness=1, parent=dl)
 
     _txt(dl, px+18, py+58, "PRIORITY BANS",
-         (*C["txt2"][:3], al), 19, "raj_sb_18")
+         (*C["gold_lt"][:3], al), 19, "raj_sb_18")
 
     has_rich_bans = bool(ban_detail)
-    ban_h  = 62 if has_rich_bans else 46
+    ban_h  = 78 if has_rich_bans else 52
     ban_y  = py + 84
     n_bans = max(1, len(bans)) if bans else 5
     slot_w = (pw - 36 - (n_bans - 1) * 6) // n_bans
 
     _PRIORITY_COLORS = {
         "HIGH":   C["loss"][:3],
-        "MEDIUM": C["gold"][:3],
-        "LOW":    C["txt2"][:3],
+        "MEDIUM": C["gold_lt"][:3],
+        "LOW":    C["txt"][:3],
     }
 
     for i, champ in enumerate(bans[:5]):
@@ -1154,18 +1281,26 @@ def _draw_strategy_panel(dl, px, py, pw, ph, al, header, header_col,
         dpg.draw_line((xs,ys),(xe,ye), color=(*C["loss"][:3],al), thickness=1.5, parent=dl)
         dpg.draw_line((xe,ys),(xs,ye), color=(*C["loss"][:3],al), thickness=1.5, parent=dl)
         name_y = (ban_y + 6) if has_rich_bans else (ban_y + ban_h//2 - 10)
-        _txt(dl, bx+24, name_y, champ, (*C["txt"][:3], al), 19, "raj_20")
+        _txt(dl, bx+24, name_y, champ, (*C["txt"][:3], al), 20, "raj_20")
         if detail:
-            wr_str = str(detail.get("wr", "")).replace("%", "")
-            g_str  = str(detail.get("games", ""))
+            player = str(detail.get("player", ""))
+            wr_val = detail.get("wr", "")
+            g_val  = detail.get("games", 0)
             pri    = str(detail.get("priority", "")).upper()
-            sub    = f"{wr_str}% WR · {g_str}g" if wr_str and g_str else ""
-            if sub:
-                _txt(dl, bx+8, ban_y+30, sub,
-                     (*C["txt2"][:3], int(al*0.9)), 16, "raj_r_16")
-            pc = _PRIORITY_COLORS.get(pri, C["txt2"][:3])
+
+            if player:
+                # Combine player + WR on one compact line
+                wr_str = str(wr_val).replace("%", "") if wr_val else ""
+                g_str  = str(g_val) if g_val else ""
+                if wr_str and g_str and int(float(g_str)) > 0:
+                    sub = f"{player[:11]}  {wr_str}%wr  {g_str}g"
+                else:
+                    sub = player[:16]
+                _txt(dl, bx+8, ban_y+32, sub,
+                     (*C["txt"][:3], al), 17, "raj_sb_18")
+            pc = _PRIORITY_COLORS.get(pri, C["txt"][:3])
             if pri:
-                _txt(dl, bx+8, ban_y+47, pri, (*pc, int(al*0.95)), 16, "raj_r_16")
+                _txt(dl, bx+8, ban_y+53, pri, (*pc, al), 17, "raj_sb_18")
 
     if not bans:
         for i in range(5):
@@ -1182,13 +1317,14 @@ def _draw_strategy_panel(dl, px, py, pw, ph, al, header, header_col,
                   color=(*C["rule_dark"][:3], al), thickness=1, parent=dl)
 
     _txt(dl, px+18, div_y+10, "TEAM COMPOSITIONS",
-         (*C["txt2"][:3], al), 19, "raj_sb_18")
+         (*C["gold_lt"][:3], al), 19, "raj_sb_18")
 
     comp_y   = div_y + 36
     has_rich = bool(comp_detail)
     remaining = max(1, ph - (comp_y - py) - 10)
     n_comps  = max(1, len(comps)) if comps else 1
-    comp_h   = max(46, (remaining - (n_comps-1)*5) // n_comps)
+    # Need vertical room for arch + picks + win-cond + AP/AD at readable sizes
+    comp_h   = max(78, (remaining - (n_comps-1)*5) // n_comps)
 
     _VIAB_COLORS = {
         "STRONG":          (79, 168, 130),
@@ -1216,26 +1352,44 @@ def _draw_strategy_panel(dl, px, py, pw, ph, al, header, header_col,
             viab  = detail.get("viability", "VIABLE")
             syn   = int(detail.get("synergy", 0))
             picks = detail.get("picks", [])
-            vc    = _VIAB_COLORS.get(viab, C["txt2"][:3])
-            _txt(dl, px+40, cy2 + 5, arch, (*C["gold_lt"][:3], al), 20, "raj_20")
+            wcond = detail.get("win_condition", "")
+            spike = detail.get("spike", "")
+            sb    = detail.get("score_breakdown", {}) or {}
+            vc    = _VIAB_COLORS.get(viab, C["txt"][:3])
+            _txt(dl, px+40, cy2 + 5, arch, (*C["gold_lt"][:3], al), 21, "raj_20")
             viab_short = viab[:4] if viab == "NOT RECOMMENDED" else viab
-            vx = px + pw - 18 - len(viab_short) * 8 - 4
-            _txt(dl, vx, cy2 + 6, viab_short, (*vc, al), 16, "raj_r_16")
-            if picks and comp_h >= 36:
+            vx = px + pw - 18 - len(viab_short) * 9 - 4
+            _txt(dl, vx, cy2 + 6, viab_short, (*vc, al), 18, "raj_sb_18")
+            if picks and comp_h >= 50:
                 champ_str = "  ·  ".join(
                     p.get("champion", "") for p in picks[:5] if p.get("champion"))
                 if champ_str:
-                    _txt(dl, px+40, cy2 + 27, champ_str,
-                         (*C["txt"][:3], int(al * 0.9)), 15, "raj_r_16")
+                    _txt(dl, px+40, cy2 + 28, champ_str,
+                         (*C["txt"][:3], al), 18, "raj_sb_18")
+            # Win condition — bumped to readable size + brighter colour
+            if wcond and comp_h >= 70:
+                _txt(dl, px+40, cy2 + 52, "→ " + wcond,
+                     (*C["txt"][:3], al), 17, "raj_sb_18")
+            # AP/AD ratio — right side, same readable tier
+            if sb and comp_h >= 70:
+                ap_r = sb.get("ap_ratio", 0.5)
+                ap_pct = int(round(ap_r * 100))
+                ad_pct = 100 - ap_pct
+                bd_str = f"AP/AD {ap_pct}/{ad_pct}"
+                bdx = px + pw - 18 - len(bd_str) * 10 - 4
+                _txt(dl, bdx, cy2 + 52, bd_str,
+                     (*C["txt"][:3], al), 17, "raj_sb_18")
+            # Synergy dots — top-right under viability label
             if comp_h >= 44:
-                dot_y = cy2 + comp_h - 12
+                dot_y = cy2 + 33
+                dot_start_x = px + pw - 18 - 5*14
                 for d in range(5):
                     fc = (*C["gold"][:3], al) if d < syn else (*C["rule_dark"][:3], al)
-                    dpg.draw_circle((px+40 + d*13, dot_y), 5,
+                    dpg.draw_circle((dot_start_x + d*14, dot_y), 5,
                                     fill=fc, color=(0,0,0,0), parent=dl)
         else:
             text_y = cy2 + comp_h//2 - 11
-            _txt(dl, px+40, text_y, comp, (*C["gold_lt"][:3], al), 20, "raj_20")
+            _txt(dl, px+40, text_y, comp, (*C["gold_lt"][:3], al), 21, "raj_20")
 
 
 def _draw_blue_panel(dl, px, py, pw, ph, al):
@@ -1257,15 +1411,15 @@ def _draw_pvp_panel(dl, px, py, pw, ph, al):
     src_label = "Rank History + inhouse WR" if draft.prediction_src == "sheets" \
                 else "Score ratio (local)"
     _txt(dl, px+18, py+54, f"Lane matchup  ·  Win % via {src_label}",
-         (*C["txt2"][:3], int(al * 0.8)), 15, "raj_r_16")
+         (*C["txt"][:3], al), 17, "raj_sb_18")
 
     rows    = draft.pvp_rows
-    row_h   = max(52, (ph - 86) // max(len(rows), 1)) if rows else 60
+    row_h   = max(68, (ph - 86) // max(len(rows), 1)) if rows else 68
     start_y = py + 78
 
     if not rows:
         _txt(dl, px+18, start_y+16, "Configure teams to see matchups",
-             (*C["txt_dim"][:3], al), 16, "raj_r_16")
+             (*C["txt_dim"][:3], al), 16, "raj_sb_16")
         return
 
     for i, (role, blue_name, red_name, blue_win, note) in enumerate(rows):
@@ -1277,10 +1431,10 @@ def _draw_pvp_panel(dl, px, py, pw, ph, al):
         rc = _ROLE_COLORS.get(role, (120,120,120))
         dpg.draw_rectangle((px+12, ry),(px+16, ry+row_h),
                             fill=(*rc, al), color=(0,0,0,0), rounding=2, parent=dl)
-        _txt(dl, px+22, ry+4, role, (*rc, al), 17, "raj_sb_16")
+        _txt(dl, px+22, ry+4, role, (*rc, al), 18, "raj_sb_18")
 
         _txt(dl, px+22, ry+row_h//2-10, blue_name.upper(),
-             (*C["platinum"][:3], al), 19, "raj_20")
+             (*C["platinum"][:3], al), 20, "raj_20")
 
         bar_x, bar_w, bh2 = px + pw//2 - 60, 120, 8
         bar_y = ry + row_h//2 - bh2//2
@@ -1293,14 +1447,14 @@ def _draw_pvp_panel(dl, px, py, pw, ph, al):
                             fill=(*bar_col, al), color=(0,0,0,0), rounding=3, parent=dl)
 
         pct_str = f"{blue_win:.0f}%"
-        _txt(dl, px + pw//2 - 22, ry + row_h//2 - 23, pct_str, (*bar_col, al), 21, "raj_20")
+        _txt(dl, px + pw//2 - 24, ry + row_h//2 - 25, pct_str, (*bar_col, al), 22, "raj_20")
 
-        rname_x = px + pw - 18 - len(red_name) * 11
-        _txt(dl, rname_x, ry + row_h//2 - 10, red_name.upper(), (220, 90, 90, al), 19, "raj_20")
+        rname_x = px + pw - 18 - len(red_name) * 12
+        _txt(dl, rname_x, ry + row_h//2 - 10, red_name.upper(), (220, 90, 90, al), 20, "raj_20")
 
         if row_h > 40 and note:
-            _txt(dl, px+22, ry+row_h-17, note,
-                 (*C["txt2"][:3], int(al*0.85)), 15, "raj_r_16")
+            _txt(dl, px+22, ry+row_h-21, note,
+                 (*C["txt"][:3], al), 17, "raj_sb_18")
 
 
 def _draw_red_panel(dl, px, py, pw, ph, al):

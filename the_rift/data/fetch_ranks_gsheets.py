@@ -32,6 +32,16 @@ import requests
 import gspread
 from google.oauth2.service_account import Credentials
 
+# Optional engine import for shared synergy + counter data. The backend can run
+# standalone (subprocess), so this falls back silently if package layout differs.
+try:
+    from data import draft_engine as _eng  # type: ignore
+except Exception:
+    try:
+        import draft_engine as _eng  # type: ignore
+    except Exception:
+        _eng = None
+
 DEFAULT_CREDS_FILE = "credentials.json"
 DEFAULT_REGION = "na1"
 DEFAULT_ROUTING = "americas"
@@ -1421,7 +1431,31 @@ def score_team_synergy(picks, champ_tags_data):
     else:
         score += 5
 
+    # 5. Engine-based pair synergy + anti-synergy bonus (up to ±20)
+    if _eng is not None and champ_names:
+        try:
+            raw = _eng.synergy_score(champ_names)   # typical range -0.5..+2.0
+            score += max(-15, min(20, raw * 12))
+        except Exception:
+            pass
+
     return score
+
+
+def _engine_counter_bonus(your_picks, enemy_picks):
+    """Engine-derived counter coverage bonus for a comp vs locked enemy picks.
+    Returns a 0..15 point bump representing how well our team counters enemies.
+    """
+    if _eng is None or not enemy_picks or not your_picks:
+        return 0
+    try:
+        total = 0.0
+        for ep in enemy_picks:
+            total += _eng.team_counter_coverage(your_picks, ep)
+        avg = total / max(len(enemy_picks), 1)
+        return min(15, avg * 30)
+    except Exception:
+        return 0
 
 
 def compute_ban_recommendations(team_players, all_scouting, rankings):
@@ -1484,11 +1518,23 @@ def compute_ban_recommendations(team_players, all_scouting, rankings):
     for i, ban in enumerate(final):
         if i < 3:
             ban["phase"] = 1
-            ban["phase_reason"] = ("Must ban" if ban["is_must_ban"]
-                                   else "High threat flexible pick")
-        else:
+            if ban["is_must_ban"]:
+                ban["phase_reason"] = "Must ban — dominant in assigned role"
+            elif ban["wr"] >= 65:
+                ban["phase_reason"] = f"High WR threat ({ban['wr']:.0f}% WR)"
+            elif ban["kda"] >= 4:
+                ban["phase_reason"] = f"High KDA threat ({ban['kda']:.1f} KDA)"
+            else:
+                ban["phase_reason"] = "High threat flexible pick"
+        elif i < 7:
             ban["phase"] = 2
-            ban["phase_reason"] = "Phase 2 — target likely counter-picks"
+            if ban["wr"] >= 60:
+                ban["phase_reason"] = f"Counter-pick threat ({ban['wr']:.0f}% WR)"
+            else:
+                ban["phase_reason"] = "Phase 2 — likely counter-pick"
+        else:
+            ban["phase"] = 3
+            ban["phase_reason"] = "Comfort pick — monitor this player"
 
     return final
 
@@ -1520,17 +1566,18 @@ def compute_comp_suggestions(team_players, all_scouting, rankings,
     enemy_diver_count = 0
     enemy_frontline_count = 0
     if enemy_team_players:
+        squishy_subs   = (CHAMP_SUBCLASSES.get("assassin_or_burst", set()) |
+                          CHAMP_SUBCLASSES.get("hypercarry", set()) |
+                          CHAMP_SUBCLASSES.get("long_range", set()))
+        diver_subs     = (CHAMP_SUBCLASSES.get("engage", set()) |
+                          CHAMP_SUBCLASSES.get("assassin_or_burst", set()))
+        frontline_subs = CHAMP_SUBCLASSES.get("frontline", set())
         for e_name, _e_role in enemy_team_players:
             e_scout = enemy_scouting.get(e_name)
             if not e_scout:
                 continue
-            top_champs = [c["name"] for c in e_scout.get("champ_list", [])[:3]]
-            squishy_subs = CHAMP_SUBCLASSES.get("assassin_or_burst", set()) | \
-                           CHAMP_SUBCLASSES.get("hypercarry", set()) | \
-                           CHAMP_SUBCLASSES.get("long_range", set())
-            diver_subs = CHAMP_SUBCLASSES.get("engage", set()) | \
-                         CHAMP_SUBCLASSES.get("assassin_or_burst", set())
-            frontline_subs = CHAMP_SUBCLASSES.get("frontline", set())
+            # Check top 5 champs (was top 3) for better coverage
+            top_champs = [c["name"] for c in e_scout.get("champ_list", [])[:5]]
             if any(c in squishy_subs for c in top_champs):
                 enemy_squishy_count += 1
             if any(c in diver_subs for c in top_champs):
@@ -1688,14 +1735,36 @@ def compute_comp_suggestions(team_players, all_scouting, rankings,
             long_range_subs = CHAMP_SUBCLASSES.get("long_range", set())
             poke_subs = CHAMP_SUBCLASSES.get("long_range", set()) | \
                         CHAMP_SUBCLASSES.get("waveclear", set())
-            if enemy_squishy_count >= 3:
-                counter_bonus += sum(0.15 for c in pick_names if c in engage_subs)
-            if enemy_diver_count >= 3:
-                counter_bonus += sum(0.15 for c in pick_names if c in frontline_subs)
-            if enemy_frontline_count >= 3:
-                counter_bonus += sum(0.15 for c in pick_names
+            if enemy_squishy_count >= 2:
+                counter_bonus += sum(0.12 for c in pick_names if c in engage_subs)
+                counter_bonus += sum(0.10 for c in pick_names
+                                     if c in CHAMP_SUBCLASSES.get("cc", set()))
+            if enemy_diver_count >= 2:
+                counter_bonus += sum(0.12 for c in pick_names if c in frontline_subs)
+                counter_bonus += sum(0.08 for c in pick_names if c in poke_subs)
+            if enemy_frontline_count >= 2:
+                counter_bonus += sum(0.12 for c in pick_names
                                      if c in long_range_subs or c in poke_subs)
         counter_potential = min(int(counter_bonus * 100), 100)
+
+        # Engine-derived enhancements: pair-level counter coverage + win condition.
+        pick_names = [p["champion"].replace(" (off-meta)", "") for p in arch_picks
+                      if p["champion"] != "?"]
+        enemy_pick_names = []
+        if enemy_team_players and enemy_scouting:
+            for (en_name, _en_role) in enemy_team_players:
+                en_scout = enemy_scouting.get(en_name, {}) if isinstance(enemy_scouting, dict) else {}
+                for tc in (en_scout.get("top_champs") or [])[:3]:
+                    if tc:
+                        enemy_pick_names.append(tc)
+        eng_counter_pts = _engine_counter_bonus(pick_names, enemy_pick_names)
+        combined += eng_counter_pts          # 0..15 bump
+        counter_potential = min(100, counter_potential + int(eng_counter_pts * 4))
+
+        # Win-condition / spike (engine archetype data, falls back to description)
+        eng_arch = (_eng.ARCHETYPES.get(archetype, {}) if _eng is not None else {})
+        win_condition = eng_arch.get("win_condition", arch_data.get("description", ""))
+        spike = eng_arch.get("spike", "")
 
         suggestions[archetype] = {
             "description": arch_data["description"],
@@ -1704,6 +1773,8 @@ def compute_comp_suggestions(team_players, all_scouting, rankings,
             "on_meta_count": on_meta,
             "combined_score": round(combined, 1),
             "counter_potential": counter_potential,
+            "win_condition": win_condition,
+            "spike": spike,
             "viability": ("STRONG" if combined >= 35 else
                           "VIABLE" if combined >= 25 else
                           "WEAK" if combined >= 15 else "NOT RECOMMENDED"),
