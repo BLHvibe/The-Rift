@@ -254,7 +254,7 @@ def _redraw_sidebar():
             text_x  = COLLAPSED_W + 10
             text_col = (*C["gold"][:3], la) if is_active else (*C["txt"][:3], la)
             dpg.draw_text((text_x, cy - 10), label,
-                          color=text_col, size=16, parent=dl)
+                          color=text_col, size=17, parent=dl)
 
 
 def _hovered_tab():

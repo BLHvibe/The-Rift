@@ -253,7 +253,7 @@ def _draw_cover(dl, vw, vh):
     offset = int(_cv["name_offset"])
 
     _txt(dl, cx - 72, cy - 90 + offset, "Welcome,",
-         (*C["txt2"][:3], al), 28, "raj_28")
+         (*C["txt2"][:3], al), 29, "raj_36")
 
     name   = _cv["name"].upper()
     name_x = max(20, cx - len(name) * 16)
@@ -263,7 +263,7 @@ def _draw_cover(dl, vw, vh):
     tip   = _cv["tip"]
     tip_x = max(40, cx - len(tip) * 5)
     _txt(dl, tip_x, cy + 62 + offset, tip,
-         (*C["txt_dim"][:3], int(al * 0.8)), 18, "raj_r_18")
+         (*C["txt_dim"][:3], int(al * 0.8)), 19, "raj_r_18")
 
     bar_w  = min(420, vw - 120)
     bar_x  = cx - bar_w // 2
@@ -277,7 +277,7 @@ def _draw_cover(dl, vw, vh):
                             fill=(*C["gold"][:3], al),
                             color=(0, 0, 0, 0), rounding=3, parent=dl)
     _txt(dl, bar_x, bar_y + 12, "LOADING TIER LIST…",
-         (*C["txt_dim"][:3], int(al * 0.5)), 16, "raj_r_16")
+         (*C["txt_dim"][:3], int(al * 0.5)), 17, "raj_r_16")
 
 
 def _draw_detection_screen(dl, vw, vh):
@@ -292,7 +292,7 @@ def _draw_detection_screen(dl, vw, vh):
         summoner = _det["summoner"]
         sub = f"Signed in as  '{summoner}'  — select your player name:"
         _txt(dl, max(20, cx - len(sub) * 4), cy - 58, sub,
-             (*C["txt_dim"][:3], int(a * 0.75)), 16, "raj_r_16")
+             (*C["txt_dim"][:3], int(a * 0.75)), 17, "raj_r_16")
 
         players  = _load_players()
         cols     = 4
@@ -317,7 +317,7 @@ def _draw_detection_screen(dl, vw, vh):
                                 fill=(*C["card"][:3], 200),
                                 color=(*C["gold_dk"][:3], 180), rounding=4, parent=dl)
             lx = bx + bw // 2 - len(pname) * 6
-            _txt(dl, lx, by + 11, pname, (*C["gold_lt"][:3], 220), 17, "raj_sb_18")
+            _txt(dl, lx, by + 11, pname, (*C["gold_lt"][:3], 220), 18, "raj_sb_18")
             if clicked and bx <= rx <= bx + bw and by <= ry <= by + bh:
                 _save_summoner_link(summoner, pname)
                 tl.rater_name    = pname
@@ -331,7 +331,7 @@ def _draw_detection_screen(dl, vw, vh):
     # --- Normal detection screen ---
     _txt(dl, cx - 120, cy - 80, "TIER LIST", (*C["gold"][:3], a), 44, "raj_44")
     _txt(dl, cx - 168, cy - 20, "Identify yourself to begin rating",
-         (*C["txt_dim"][:3], int(a * 0.7)), 16, "raj_r_16")
+         (*C["txt_dim"][:3], int(a * 0.7)), 17, "raj_r_16")
 
     bw, bh = 300, 56
     bx, by = cx - bw // 2, cy + 20
@@ -340,12 +340,12 @@ def _draw_detection_screen(dl, vw, vh):
                         color=(*C["gold"][:3], 210), rounding=6, parent=dl)
     lbl     = "DETECTING…" if _det["busy"] else "◆  DETECT FROM LOL CLIENT"
     lbl_col = (*C["txt_dim"][:3], 160) if _det["busy"] else (*C["gold_lt"][:3], 230)
-    _txt(dl, bx + bw // 2 - len(lbl) * 5, by + 16, lbl, lbl_col, 16, "raj_sb_16")
+    _txt(dl, bx + bw // 2 - len(lbl) * 5, by + 16, lbl, lbl_col, 17, "raj_sb_16")
 
     if _det["status"]:
         st_x = max(20, cx - len(_det["status"]) * 4)
         _txt(dl, st_x, by + bh + 14, _det["status"],
-             (*_det["color"][:3], 220), 16, "raj_r_16")
+             (*_det["color"][:3], 220), 17, "raj_r_16")
 
     if not _det["busy"] and dpg.is_mouse_button_clicked(0):
         mouse = dpg.get_mouse_pos(local=False)
@@ -470,9 +470,9 @@ def _draw_top_bar(dl, vw):
                         color=(0,0,0,0), parent=dl)
     dpg.draw_line((0,TOP_BAR_H-1),(vw,TOP_BAR_H-1),
                   color=C["rule_dark"], thickness=1, parent=dl)
-    _txt(dl, PAD, 12, "TIER LIST BUILDER", (*C["gold"][:3],220), 22, "raj_24")
+    _txt(dl, PAD, 12, "TIER LIST BUILDER", (*C["gold"][:3],220), 23, "raj_24")
     _txt(dl, PAD+270, 18, "Drag players from the pool into tiers  ·  Right-click a card to remove",
-         (*C["txt_dim"][:3],150), 16, "raj_r_16")
+         (*C["txt_dim"][:3],150), 17, "raj_r_16")
 
     # Reset button
     bw, bh = 120, 34
@@ -481,7 +481,7 @@ def _draw_top_bar(dl, vw):
     dpg.draw_rectangle((bx,by),(bx+bw,by+bh),
                         fill=(*C["card"][:3],200), color=(*C["rule_dark"][:3],200),
                         rounding=4, parent=dl)
-    _txt(dl, bx+14, by+8, "↺  RESET", (*C["txt"][:3],200), 16, "raj_sb_16")
+    _txt(dl, bx+14, by+8, "↺  RESET", (*C["txt"][:3],200), 17, "raj_sb_16")
 
     # Submit button
     sbw, sbh = 160, 34
@@ -490,13 +490,13 @@ def _draw_top_bar(dl, vw):
     dpg.draw_rectangle((sbx,sby),(sbx+sbw,sby+sbh),
                         fill=(*C["gold_dk"][:3],200), color=(*C["gold"][:3],200),
                         rounding=4, parent=dl)
-    _txt(dl, sbx+14, sby+8, "◆  SUBMIT LIST", (*C["gold_lt"][:3],230), 16, "raj_sb_16")
+    _txt(dl, sbx+14, sby+8, "◆  SUBMIT LIST", (*C["gold_lt"][:3],230), 17, "raj_sb_16")
 
     # Submit status flash
     status = tl.submit_status
     if status and (time.monotonic() - tl.submit_flash) < 5.0:
         st_col = C["win"] if status.startswith("✓") else C["loss"] if status.startswith("✗") else C["txt_dim"]
-        _txt(dl, sbx - 320, sby+8, status, (*st_col[:3],220), 16, "raj_r_16")
+        _txt(dl, sbx - 320, sby+8, status, (*st_col[:3],220), 17, "raj_r_16")
 
     if dpg.is_mouse_button_clicked(0):
         mouse = dpg.get_mouse_pos(local=False)
@@ -520,13 +520,13 @@ def _draw_rater_bar(dl, vw, rater_y, rater_h):
     ty = rater_y + rater_h // 2 - 7
     tx = PAD
 
-    _txt(dl, tx, ty, "Rating as:", (*C["txt_dim"][:3], 200), 14, "raj_sb_14")
+    _txt(dl, tx, ty, "Rating as:", (*C["txt_dim"][:3], 200), 17, "raj_sb_16")
     tx += 92
 
     rater = tl.rater_name
     id_text  = f"✓  {rater}" if rater else "Not identified"
     id_color = (*C["win"][:3], 220) if rater else (*C["txt_dim"][:3], 180)
-    _txt(dl, tx, ty, id_text, id_color, 14, "raj_r_14")
+    _txt(dl, tx, ty, id_text, id_color, 17, "raj_r_16")
     tx += max(180, len(id_text) * 9 + 20)
 
     busy = _det.get("busy", False)
@@ -538,12 +538,12 @@ def _draw_rater_bar(dl, vw, rater_y, rater_h):
     btn_bdr  = (*C["rule_dark"][:3], 140) if busy else (*C["gold"][:3], 180)
     dpg.draw_rectangle((bx, by), (bx + bw, by + bh),
                         fill=btn_fill, color=btn_bdr, rounding=3, parent=dl)
-    _txt(dl, bx + 10, by + 6, btn_lbl, (*C["gold_lt"][:3], 210 if not busy else 120), 13, "raj_r_14")
+    _txt(dl, bx + 10, by + 6, btn_lbl, (*C["gold_lt"][:3], 210 if not busy else 120), 16, "raj_r_16")
 
     status = _det.get("status", "")
     if status:
         st_col = C["loss"] if status.startswith("✗") else C["txt_dim"]
-        _txt(dl, bx + bw + 14, by + 6, status[:70], (*st_col[:3], 200), 13, "raj_r_14")
+        _txt(dl, bx + bw + 14, by + 6, status[:70], (*st_col[:3], 200), 16, "raj_r_16")
 
     if not busy and dpg.is_mouse_button_clicked(0):
         mouse = dpg.get_mouse_pos(local=False)
@@ -571,7 +571,7 @@ def _draw_tier_rows(dl, tx, ty, tw, vw, vh):
                             rounding=4, parent=dl)
         lbl_x = tx + TIER_LBL_W//2 - 10
         lbl_y = row_y + TIER_H//2 - 14
-        _txt(dl, lbl_x, lbl_y, tier, (*C["bg"][:3],240), 26, "raj_28")
+        _txt(dl, lbl_x, lbl_y, tier, (*C["bg"][:3],240), 27, "raj_36")
 
         # Cards in this tier
         cx = tx + TIER_LBL_W + CARD_PAD
@@ -599,11 +599,11 @@ def _tier_contains(tier, name):
 
 def _draw_pool_divider(dl, tx, dy, tw):
     dpg.draw_line((tx, dy),(tx+tw, dy), color=(*C["rule_dark"][:3],180), thickness=1, parent=dl)
-    _txt(dl, tx, dy+4, "PLAYER POOL", (*C["gold_dk"][:3],220), 16, "raj_sb_16")
+    _txt(dl, tx, dy+4, "PLAYER POOL", (*C["gold_dk"][:3],220), 17, "raj_sb_16")
     placed_count = sum(len(v) for v in tl.placements.values())
     total = placed_count + len(tl.unplaced)
     _txt(dl, tx+170, dy+8, f"{placed_count}/{total} placed",
-         (*C["txt_dim"][:3],180), 12, "raj_r_12")
+         (*C["txt_dim"][:3],180), 15, "raj_r_14")
 
 
 def _draw_pool(dl, px, py, pw, ph, vw, vh):
@@ -670,7 +670,7 @@ def _draw_pool_card(dl, cx, cy, name, ghost=False):
     dpg.draw_rectangle((cx,cy),(cx+POOL_CARD_W,cy+POOL_CARD_H),
                         fill=(*C["card"][:3],210), color=(*C["rule_dark"][:3],160),
                         rounding=4, parent=dl)
-    _txt(dl, cx+8, cy+POOL_CARD_H//2-10, name, (*C["txt"][:3],220), 20, "raj_20")
+    _txt(dl, cx+8, cy+POOL_CARD_H//2-10, name, (*C["txt"][:3],220), 21, "raj_20")
 
 
 def _handle_drag(vw, vh, content_y, pool_y):

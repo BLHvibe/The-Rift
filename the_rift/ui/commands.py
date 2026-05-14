@@ -2,7 +2,7 @@
 Commands / Admin Tab — Phase 7.
 Fetch Ranks and Log Inhouse run real subprocesses via data scripts.
 """
-import threading, time, queue, subprocess, sys, os, re
+import threading, time, queue, subprocess, sys, os, re, ctypes
 import dearpygui.dearpygui as dpg
 from theme import C
 from data.config import load_config, save_config, script_path
@@ -22,7 +22,8 @@ class CommandsState:
         self.running   = False
         self._lines    = []     # list of (text, color)
         self._max_lines = 500
-        self._proc     = None   # current subprocess (for Stop button)
+        self._proc     = None   # current subprocess (dev mode)
+        self._thread   = None   # current bg thread (frozen mode)
         self._last_run = {}     # script_name → "HH:MM:SS" timestamp string
         self.progress  = 0.0   # 0.0–1.0, drives the progress bar
 
@@ -82,7 +83,7 @@ def draw_commands(dl, vw, vh, fonts=None):
                         color=(0,0,0,0), parent=dl)
     dpg.draw_line((0,TOP_BAR_H-1),(vw,TOP_BAR_H-1),
                   color=C["rule_dark"], thickness=1, parent=dl)
-    _txt(dl, PAD, 12, "ADMIN / COMMANDS", (*C["gold"][:3],220), 22, "raj_24")
+    _txt(dl, PAD, 12, "ADMIN / COMMANDS", (*C["gold"][:3],220), 23, "raj_24")
 
     # Overlay window: position relative to actual sidebar width, not hardcoded 68
     vp_w = dpg.get_viewport_width()
@@ -119,8 +120,8 @@ def _build_commands_window(sb_w, vw, vh):
                             _run_fetch_ranks)
                 dpg.add_text(tag="ts_fetch_ranks", default_value="",
                              color=C["txt_dim"][:3])
-                if "raj_r_12" in _F:
-                    dpg.bind_item_font(dpg.last_item(), _F["raj_r_12"])
+                if "raj_r_18" in _F:
+                    dpg.bind_item_font(dpg.last_item(), _F["raj_r_18"])
                 dpg.add_spacer(height=8)
 
                 _cmd_button("▶  RUN SCOUT",
@@ -128,8 +129,8 @@ def _build_commands_window(sb_w, vw, vh):
                             _run_scout)
                 dpg.add_text(tag="ts_scout", default_value="",
                              color=C["txt_dim"][:3])
-                if "raj_r_12" in _F:
-                    dpg.bind_item_font(dpg.last_item(), _F["raj_r_12"])
+                if "raj_r_18" in _F:
+                    dpg.bind_item_font(dpg.last_item(), _F["raj_r_18"])
                 dpg.add_spacer(height=8)
 
                 _cmd_button("▶  SETUP DRAFT",
@@ -137,8 +138,8 @@ def _build_commands_window(sb_w, vw, vh):
                             _run_setup_draft)
                 dpg.add_text(tag="ts_draft", default_value="",
                              color=C["txt_dim"][:3])
-                if "raj_r_12" in _F:
-                    dpg.bind_item_font(dpg.last_item(), _F["raj_r_12"])
+                if "raj_r_18" in _F:
+                    dpg.bind_item_font(dpg.last_item(), _F["raj_r_18"])
                 dpg.add_spacer(height=8)
 
                 _cmd_button("▶  LOG INHOUSE GAME",
@@ -146,8 +147,8 @@ def _build_commands_window(sb_w, vw, vh):
                             _run_inhouse)
                 dpg.add_text(tag="ts_inhouse", default_value="",
                              color=C["txt_dim"][:3])
-                if "raj_r_12" in _F:
-                    dpg.bind_item_font(dpg.last_item(), _F["raj_r_12"])
+                if "raj_r_18" in _F:
+                    dpg.bind_item_font(dpg.last_item(), _F["raj_r_18"])
                 dpg.add_spacer(height=24)
 
                 # ── Stop button ───────────────────────────────────────────
@@ -158,8 +159,8 @@ def _build_commands_window(sb_w, vw, vh):
                     dpg.bind_item_font(dpg.last_item(), _F["raj_sb_16"])
                 dpg.add_text("Kill the currently running command.",
                              color=C["txt_dim"][:3], wrap=BTN_W)
-                if "raj_r_12" in _F:
-                    dpg.bind_item_font(dpg.last_item(), _F["raj_r_12"])
+                if "raj_r_18" in _F:
+                    dpg.bind_item_font(dpg.last_item(), _F["raj_r_18"])
                 dpg.add_spacer(height=10)
                 dpg.add_progress_bar(tag="cmd_progress", default_value=0.0,
                                      width=BTN_W, height=14)
@@ -182,8 +183,8 @@ def _build_commands_window(sb_w, vw, vh):
                                    tag="cmd_console_outer"):
                 with dpg.group(tag="cmd_console"):
                     t = dpg.add_text("Console ready.", color=C["txt_dim"][:3])
-                    if "raj_r_12" in _F:
-                        dpg.bind_item_font(t, _F["raj_r_12"])
+                    if "raj_r_18" in _F:
+                        dpg.bind_item_font(t, _F["raj_r_18"])
 
 
 def _section_hdr(text):
@@ -200,8 +201,8 @@ def _cmd_button(label, tooltip, callback):
     if "raj_sb_16" in _F:
         dpg.bind_item_font(btn, _F["raj_sb_16"])
     t = dpg.add_text(tooltip, color=C["txt_dim"][:3], wrap=BTN_W)
-    if "raj_r_12" in _F:
-        dpg.bind_item_font(t, _F["raj_r_12"])
+    if "raj_r_18" in _F:
+        dpg.bind_item_font(t, _F["raj_r_18"])
     dpg.add_spacer(height=2)
 
 
@@ -211,8 +212,8 @@ def _refresh_console():
     dpg.delete_item("cmd_console", children_only=True)
     for text, color in cmds._lines[-200:]:
         t = dpg.add_text(text, color=color, parent="cmd_console", wrap=0)
-        if "raj_r_12" in _F:
-            dpg.bind_item_font(t, _F["raj_r_12"])
+        if "raj_r_18" in _F:
+            dpg.bind_item_font(t, _F["raj_r_18"])
 
 
 def _log(text, color=None):
@@ -243,7 +244,10 @@ _TS_TAG = {
 
 
 def _run_script(label, script_name, extra_args=None):
-    """Run a data script as a subprocess, streaming output to console."""
+    """Run a data script, streaming output to console.
+    Frozen exe: imports module directly (subprocess can't run .py files).
+    Dev mode: spawns a subprocess so stdout streams line-by-line.
+    """
     if cmds.running:
         _log("[!] A command is already running.", C["loss"][:3])
         return
@@ -261,11 +265,95 @@ def _run_script(label, script_name, extra_args=None):
         dpg.set_value("cmd_progress", 0.0)
     _log(f"▶  {label}", C["gold"][:3])
 
-    # Build timestamp-widget tag key
-    ts_key = script_name
-    if extra_args:
-        ts_key += "".join(extra_args)
+    ts_key = script_name + ("".join(extra_args) if extra_args else "")
 
+    def _finish_ok():
+        _log(f"✓  {label} complete.", C["win"][:3])
+        ts_str = time.strftime("Last run: %H:%M:%S")
+        cmds._last_run[ts_key] = ts_str
+        tag = _TS_TAG.get(ts_key)
+        if tag and dpg.does_item_exist(tag):
+            dpg.configure_item(tag, default_value=ts_str)
+        cmds.progress = 1.0
+        if dpg.does_item_exist("cmd_progress"):
+            dpg.set_value("cmd_progress", 1.0)
+
+    def _finish_err(msg=""):
+        if msg:
+            _log(f"[!] {msg}", C["loss"][:3])
+        cmds.progress = 0.0
+        if dpg.does_item_exist("cmd_progress"):
+            dpg.set_value("cmd_progress", 0.0)
+
+    # ── Frozen exe: import module and call main() with patched sys.argv ──────
+    if getattr(sys, "frozen", False):
+        def _bg_frozen():
+            cmds._thread = threading.current_thread()
+            _PROGRESS_RE = re.compile(r'\[(\d+)/(\d+)\]')
+
+            class _LogCapture:
+                """Redirect script stdout/stderr into the console queue."""
+                def write(self, text):
+                    if not text:
+                        return 0
+                    for ln in text.splitlines():
+                        ln = ln.rstrip()
+                        if not ln:
+                            continue
+                        col = (C["win"][:3]  if ln.startswith("✓") or "complete" in ln.lower()
+                               else C["loss"][:3] if "[ERR" in ln or "error" in ln.lower()
+                               else C["txt"][:3])
+                        _log(ln, col)
+                        m = _PROGRESS_RE.search(ln)
+                        if m:
+                            n2, tot = int(m.group(1)), int(m.group(2))
+                            if tot > 0:
+                                cmds.progress = n2 / tot
+                    return len(text)
+                def flush(self): pass
+                def fileno(self): raise OSError("no fd")
+
+            from data.reader import _resolve_creds_path
+            creds = _resolve_creds_path(cfg.get("creds_path", "credentials.json"))
+
+            old_out, old_err = sys.stdout, sys.stderr
+            old_argv = sys.argv[:]
+            cap = _LogCapture()
+            try:
+                sys.stdout = cap
+                sys.stderr = cap
+                sys.argv = [
+                    script_name,
+                    "--key",     cfg["api_key"],
+                    "--sheet",   cfg["sheet_url"],
+                    "--creds",   creds,
+                    "--region",  cfg.get("region",  "na1"),
+                    "--routing", cfg.get("routing", "americas"),
+                ]
+                if extra_args:
+                    sys.argv.extend(extra_args)
+                import data.fetch_ranks_gsheets as fg
+                fg.main()
+                _finish_ok()
+            except SystemExit as e:
+                if str(e.code) == "0" or e.code == 0:
+                    _finish_ok()
+                else:
+                    _finish_err(f"Exited with code {e.code}")
+            except Exception as e:
+                _finish_err(str(e))
+            finally:
+                sys.stdout   = old_out
+                sys.stderr   = old_err
+                sys.argv     = old_argv
+                cmds.running = False
+                cmds._proc   = None
+                cmds._thread = None
+
+        threading.Thread(target=_bg_frozen, daemon=True, name=label).start()
+        return
+
+    # ── Dev mode: subprocess with live stdout streaming ───────────────────────
     def _bg():
         proc = None
         try:
@@ -286,75 +374,81 @@ def _run_script(label, script_name, extra_args=None):
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                env={**os.environ, "PYTHONUNBUFFERED": "1"},
             )
             cmds._proc = proc
             _PROGRESS_RE = re.compile(r'\[(\d+)/(\d+)\]')
             for line in proc.stdout:
                 line = line.rstrip()
                 if line:
-                    col = C["win"][:3] if line.startswith("✓") or "complete" in line.lower() \
-                          else C["loss"][:3] if line.startswith("[ERR") or "error" in line.lower() \
-                          else C["txt"][:3]
+                    col = (C["win"][:3]  if line.startswith("✓") or "complete" in line.lower()
+                           else C["loss"][:3] if line.startswith("[ERR") or "error" in line.lower()
+                           else C["txt"][:3])
                     _log(line, col)
                     m = _PROGRESS_RE.search(line)
                     if m:
                         n, total = int(m.group(1)), int(m.group(2))
                         if total > 0:
-                            pct = n / total
-                            cmds.progress = pct
-                            if dpg.does_item_exist("cmd_progress"):
-                                dpg.set_value("cmd_progress", pct)
+                            cmds.progress = n / total
             try:
                 proc.wait(timeout=300)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
-                _log("[ERR] Timed out after 5 minutes.", C["loss"][:3])
+                _finish_err("Timed out after 5 minutes.")
                 return
             if proc.returncode == 0:
-                _log(f"✓  {label} complete.", C["win"][:3])
-                ts_str = time.strftime("Last run: %H:%M:%S")
-                cmds._last_run[ts_key] = ts_str
-                tag = _TS_TAG.get(ts_key)
-                if tag and dpg.does_item_exist(tag):
-                    dpg.configure_item(tag, default_value=ts_str)
-                cmds.progress = 1.0
-                if dpg.does_item_exist("cmd_progress"):
-                    dpg.set_value("cmd_progress", 1.0)
+                _finish_ok()
             else:
-                _log(f"[!] Exited with code {proc.returncode}.", C["loss"][:3])
-                cmds.progress = 0.0
-                if dpg.does_item_exist("cmd_progress"):
-                    dpg.set_value("cmd_progress", 0.0)
+                _finish_err(f"Exited with code {proc.returncode}.")
         except FileNotFoundError:
-            _log(f"[ERR] Script not found: {script_name}", C["loss"][:3])
+            _finish_err(f"Script not found: {script_name}")
         except Exception as e:
-            _log(f"[ERR] {e}", C["loss"][:3])
+            _finish_err(str(e))
         finally:
             cmds.running = False
             cmds._proc   = None
+            cmds._thread = None
 
     threading.Thread(target=_bg, daemon=True, name=label).start()
 
 
 def _stop_process():
-    proc = cmds._proc
-    if proc is None:
+    if not cmds.running:
         _log("[!] No process is running.", C["txt_dim"][:3])
         return
-    try:
-        proc.terminate()
+
+    # Dev mode: terminate subprocess
+    proc = cmds._proc
+    if proc is not None:
         try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        except Exception as e:
+            _log(f"[ERR] Stop failed: {e}", C["loss"][:3])
+        finally:
+            cmds.running = False
+            cmds._proc   = None
         _log("[!] Process stopped.", C["loss"][:3])
-    except Exception as e:
-        _log(f"[ERR] Stop failed: {e}", C["loss"][:3])
-    finally:
+        return
+
+    # Frozen mode: raise SystemExit in the background thread
+    t = cmds._thread
+    if t is not None and t.is_alive():
+        tid = ctypes.c_ulong(t.ident)
+        res = ctypes.pythonapi.PyThreadState_SetAsyncExc(tid, ctypes.py_object(SystemExit))
+        if res == 0:
+            _log("[ERR] Could not signal thread (invalid id).", C["loss"][:3])
+        else:
+            _log("[!] Stop signal sent — waiting for process to exit…", C["loss"][:3])
+            cmds.running = False
+    else:
+        _log("[!] No active process found.", C["txt_dim"][:3])
         cmds.running = False
-        cmds._proc   = None
 
 
 def _run_fetch_ranks():
@@ -370,7 +464,44 @@ def _run_setup_draft():
 
 
 def _run_inhouse():
-    _run_script("Logging inhouse game…", "inhouse_tracker.py")
+    if cmds.running:
+        _log("[!] A command is already running.", C["loss"][:3])
+        return
+    cfg = load_config()
+    if not cfg.get("sheet_url"):
+        _log("[!] No Google Sheet URL set — configure it in Settings.", C["loss"][:3])
+        return
+    cmds.running  = True
+    cmds.progress = 0.0
+    if dpg.does_item_exist("cmd_progress"):
+        dpg.set_value("cmd_progress", 0.0)
+    _log("▶  Connecting to League client…", C["gold"][:3])
+
+    from data.reader import log_inhouse_games_from_client
+
+    def _done(n):
+        _log(f"✓  {n} new game{'s' if n != 1 else ''} logged.", C["win"][:3])
+        cmds.running  = False
+        cmds.progress = 1.0
+        if dpg.does_item_exist("cmd_progress"):
+            dpg.set_value("cmd_progress", 1.0)
+        ts_str = time.strftime("Last run: %H:%M:%S")
+        cmds._last_run["inhouse_tracker.py"] = ts_str
+        if dpg.does_item_exist("ts_inhouse"):
+            dpg.configure_item("ts_inhouse", default_value=ts_str)
+
+    def _err(msg):
+        _log(f"[ERR] {msg}", C["loss"][:3])
+        cmds.running  = False
+        cmds.progress = 0.0
+        if dpg.does_item_exist("cmd_progress"):
+            dpg.set_value("cmd_progress", 0.0)
+
+    log_inhouse_games_from_client(
+        on_progress=lambda msg: _log(msg, C["txt"][:3]),
+        on_done=_done,
+        on_error=_err,
+    )
 
 
 _JOIN_WIN = "cmd_join_dialog"

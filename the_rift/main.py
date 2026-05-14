@@ -26,7 +26,7 @@ from ui.commands import draw_commands
 from ui.feed import draw_feed
 from data.reader import live, load_live_data, check_for_update
 
-__version__ = "2.1.0"   # bump this on each release
+__version__ = "2.2.0"   # bump this on each release
 
 WIN_W, WIN_H = 1280, 800
 TITLE_H      = 52    # titlebar height
@@ -200,7 +200,7 @@ def _draw_titlebar(dl, w):
     dpg.delete_item(dl, children_only=True)
     dpg.draw_rectangle((0,0),(w,h), fill=C["panel"], color=(0,0,0,0), parent=dl)
     dpg.draw_line((0,h-1),(w,h-1), color=C["rule_dark"], thickness=1, parent=dl)
-    t = dpg.draw_text((18, h//2-14), "THE RIFT", color=C["rift_purple"], size=28, parent=dl)
+    t = dpg.draw_text((18, h//2-14), "THE RIFT", color=C["rift_purple"], size=29, parent=dl)
     if "cinzel_28" in _FONTS:
         dpg.bind_item_font(t, _FONTS["cinzel_28"])
     # Close button
@@ -339,7 +339,7 @@ def _draw_splash(dl, sp: Splash, vw, vh):
         sub   = sp.SUBTITLE
         sw    = len(sub) * 8
         s_tag = dpg.draw_text((cx - sw//2, cy + 90), sub,
-                              color=(*C["txt2"][:3], sa), size=14, parent=dl)
+                              color=(*C["txt2"][:3], sa), size=15, parent=dl)
         if "raj_sb_14" in _FONTS:
             dpg.bind_item_font(s_tag, _FONTS["raj_sb_14"])
 
@@ -355,12 +355,12 @@ def _draw_splash(dl, sp: Splash, vw, vh):
                            color=(*C["rule_gold"][:3], fa2),
                            rounding=4, parent=dl)
         lbl = dpg.draw_text((crd_x+14, crd_y+10), "DID YOU KNOW",
-                            color=(*C["gold_dk"][:3], fa2), size=14, parent=dl)
+                            color=(*C["gold_dk"][:3], fa2), size=15, parent=dl)
         if "raj_sb_14" in _FONTS: dpg.bind_item_font(lbl, _FONTS["raj_sb_14"])
         lines = _wrap(sp.fun_fact, 48)
         for i, line in enumerate(lines[:3]):
             ft = dpg.draw_text((crd_x+14, crd_y+30+i*20), line,
-                               color=(*C["txt2"][:3], fa2), size=16, parent=dl)
+                               color=(*C["txt2"][:3], fa2), size=17, parent=dl)
             if "raj_r_16" in _FONTS: dpg.bind_item_font(ft, _FONTS["raj_r_16"])
 
     # --- Loading bar ---
@@ -439,10 +439,12 @@ def _sidebar_tick(vw, vh):
     dpg.draw_rectangle((0,0),(sw,h), fill=C["panel"], color=(0,0,0,0), parent=dl)
     dpg.draw_line((sw-1,0),(sw-1,h), color=C["rule_dark"], thickness=1, parent=dl)
 
-    # Hovered tab index
+    # Hovered tab index. `ry` is already viewport-local (mouse[1] - vp[1]),
+    # so do NOT subtract vp[1] again — that bug made bottom tabs unreachable
+    # whenever the window wasn't fullscreen.
     hov_idx = -1
     if in_sb:
-        idx = int((ry - vp[1] - TITLE_H - TOP_PAD) // ITEM_H)
+        idx = int((ry - TITLE_H - TOP_PAD) // ITEM_H)
         if 0 <= idx < len(TABS):
             hov_idx = idx
 
@@ -471,12 +473,12 @@ def _sidebar_tick(vw, vh):
             text_col = (*C["gold"][:3], label_alpha) if is_active else \
                        (*C["txt"][:3],  label_alpha)
             dpg.draw_text((text_x, iy + ITEM_H//2 - 9), label,
-                          color=text_col, size=16, parent=dl)
+                          color=text_col, size=17, parent=dl)
 
     # Click handling
     clicked = False
     if dpg.is_mouse_button_clicked(0) and in_sb:
-        idx = int((ry - vp[1] - TITLE_H - TOP_PAD) // ITEM_H)
+        idx = int((ry - TITLE_H - TOP_PAD) // ITEM_H)
         if 0 <= idx < len(TABS):
             new_tab = TABS[idx][0]
             if new_tab != state.active_tab:
@@ -527,6 +529,15 @@ def main():
     _load_all_textures()
     setup_theme()
     _FONTS = setup_fonts()
+    # Bind Rajdhani as the application-default font so ALL widgets — including
+    # add_text/add_button/add_input_text calls that never had an explicit
+    # bind_item_font — render in our theme typeface instead of DPG's pixelated
+    # ProggyClean bitmap default. This is what was showing in the scout report
+    # panel and other places.
+    for _default_key in ("raj_r_18", "raj_r_16", "raj_16"):
+        if _default_key in _FONTS:
+            dpg.bind_font(_FONTS[_default_key])
+            break
     register_wheel_handler()
 
     # Measure actual rendered width of splash title so centering is exact
@@ -548,6 +559,16 @@ def main():
     dpg.setup_dearpygui()
     dpg.show_viewport()
     dpg.toggle_viewport_fullscreen()   # start fullscreen by default
+
+    # Per-window theme: kill ItemSpacing inside root so the titlebar/sidebar/
+    # content drawlists butt up against each other with no panel-bg gap
+    # showing through (the "black bar" bug).
+    with dpg.theme() as _root_zero_spacing:
+        with dpg.theme_component(dpg.mvAll):
+            dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing,    0.0, 0.0)
+            dpg.add_theme_style(dpg.mvStyleVar_WindowPadding,  0.0, 0.0)
+            dpg.add_theme_style(dpg.mvStyleVar_ChildBorderSize, 0.0)
+            dpg.add_theme_style(dpg.mvStyleVar_ChildRounding,  0.0)
 
     # --- Root window ---
     with dpg.window(tag="root", no_title_bar=True, no_resize=True,
@@ -572,6 +593,7 @@ def main():
         with dpg.drawlist(tag="splash_dl", width=WIN_W, height=WIN_H):
             pass
 
+    dpg.bind_item_theme("root", _root_zero_spacing)
     dpg.set_primary_window("root", True)
     dpg.focus_item("splash_win")
 
@@ -624,6 +646,14 @@ def main():
     _inhouse_populated    = [False]
     _last_vp_size       = [0, 0]   # tracks resize
     _f11_was_down       = [False]  # edge-detect for F11
+    _key_was_down       = {}       # edge-detect for tab-switch hotkeys
+
+    # Sidebar TABS list, hoisted so hotkeys can index into it.
+    from ui.sidebar import TABS as _TABS, _OVERLAY_TAGS as _OVL
+    _TAB_HOTKEYS = [
+        (dpg.mvKey_1, 0), (dpg.mvKey_2, 1), (dpg.mvKey_3, 2), (dpg.mvKey_4, 3),
+        (dpg.mvKey_5, 4), (dpg.mvKey_6, 5), (dpg.mvKey_7, 6), (dpg.mvKey_8, 7),
+    ]
 
     while dpg.is_dearpygui_running():
         anim.tick()
@@ -638,6 +668,32 @@ def main():
             dpg.toggle_viewport_fullscreen()
             _is_fullscreen[0] = not _is_fullscreen[0]
         _f11_was_down[0] = f11_down
+
+        # ── Keyboard hotkeys: 1-8 switch tabs, Esc closes active overlay ─────
+        # Suppress while splash is up so the user can't tab away mid-intro.
+        if state.splash_done:
+            for key, tab_idx in _TAB_HOTKEYS:
+                down = dpg.is_key_down(key)
+                if down and not _key_was_down.get(key, False) and tab_idx < len(_TABS):
+                    new_tab = _TABS[tab_idx][0]
+                    if new_tab != state.active_tab:
+                        old_tag = _OVL.get(state.active_tab)
+                        if old_tag and dpg.does_item_exist(old_tag):
+                            dpg.delete_item(old_tag)
+                        state.active_tab = new_tab
+                        if dpg.does_item_exist("content_win"):
+                            dpg.set_y_scroll("content_win", 0)
+                _key_was_down[key] = down
+
+            esc_down = dpg.is_key_down(dpg.mvKey_Escape)
+            if esc_down and not _key_was_down.get(dpg.mvKey_Escape, False):
+                # Close any tab overlay first; if none, dismiss the update notif.
+                cur_tag = _OVL.get(state.active_tab)
+                if cur_tag and dpg.does_item_exist(cur_tag):
+                    dpg.delete_item(cur_tag)
+                elif dpg.does_item_exist(_UPDATE_WIN):
+                    dpg.delete_item(_UPDATE_WIN)
+            _key_was_down[dpg.mvKey_Escape] = esc_down
 
         # Resize: update all containers when viewport dimensions change
         if vw != _last_vp_size[0] or vh != _last_vp_size[1]:
@@ -738,11 +794,11 @@ def main():
                                        color=(0, 0, 0, 0), rounding=2)
                     t1 = dpg.draw_text((14, 10),
                                        f"◆  UPDATE AVAILABLE: {latest_tag}",
-                                       color=(*C["gold_lt"][:3], 240), size=16)
+                                       color=(*C["gold_lt"][:3], 240), size=17)
                     if "raj_sb_16" in _FONTS: dpg.bind_item_font(t1, _FONTS["raj_sb_16"])
                     t2 = dpg.draw_text((14, 40),
                                        "A new version of The Rift is ready to download.",
-                                       color=(*C["txt"][:3], 200), size=13)
+                                       color=(*C["txt"][:3], 200), size=15)
                     if "raj_r_12" in _FONTS: dpg.bind_item_font(t2, _FONTS["raj_r_12"])
                 with dpg.group(horizontal=True):
                     dpg.add_spacer(width=14)
@@ -762,6 +818,12 @@ def main():
         if not state.splash_done:
             _draw_splash("splash_dl", splash, vw, vh)
             if splash.loading_done and splash.phase == SplashPhase.LOADING:
+                splash.finish()
+            # Click-to-skip — only once we've finished loading so we don't
+            # dismiss before live data has populated the tabs.
+            if (dpg.is_mouse_button_clicked(0)
+                    and splash.loading_done
+                    and splash.phase != SplashPhase.FADE_OUT):
                 splash.finish()
             dpg.focus_item("splash_win")
         else:

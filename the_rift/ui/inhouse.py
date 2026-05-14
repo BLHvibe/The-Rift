@@ -4,7 +4,7 @@ Left panel: leaderboard (rank, player, GP, W-L, WR, KDA, Avg DMG, Avg Gold).
 Right panel: player detail — slides in on row click, shows champion breakdown + sparkline.
 Top-right notification: "GAME LOGGED" card slams in on new game detected.
 """
-import math, time, random as _rnd, os
+import math, time, random as _rnd, os, queue as _queue
 import dearpygui.dearpygui as dpg
 from theme import C, RANK_COLORS
 from core.animations import anim
@@ -120,9 +120,9 @@ class _GameLoggedNotif:
                             fill=(*C["gold"][:3], al),
                             color=(0,0,0,0), rounding=3, parent=dl)
         # Title
-        _txt(dl, nx+16, ny+10, "◆  GAME LOGGED", (*C["gold_lt"][:3], al), 17, "raj_sb_18")
+        _txt(dl, nx+16, ny+10, "◆  GAME LOGGED", (*C["gold_lt"][:3], al), 18, "raj_sb_18")
         # Summary
-        _txt(dl, nx+16, ny+38, getattr(self, "summary", ""), (*C["txt"][:3], int(al*0.8)), 13, "raj_14")
+        _txt(dl, nx+16, ny+38, getattr(self, "summary", ""), (*C["txt"][:3], int(al*0.8)), 16, "raj_16")
 
 
 _notif = _GameLoggedNotif()
@@ -132,7 +132,9 @@ _notif = _GameLoggedNotif()
 # ---------------------------------------------------------------------------
 _AVATAR_REG     = "rift_avatar_reg"
 _avatar_textures = {}   # display_name (lowercase) → dpg texture tag
-_pending_avatars = []   # [(name, path)] queued from background threads → registered on main thread
+# Thread-safe queue: background download/sync threads enqueue (name, path);
+# the main render thread drains it via _flush_pending() each frame.
+_pending_avatars = _queue.SimpleQueue()
 _avatars_scanned = False
 
 
@@ -177,27 +179,30 @@ def _scan_local_avatars():
             if fname.lower().endswith((".png", ".jpg", ".jpeg")):
                 name = os.path.splitext(fname)[0]
                 path = os.path.join(adir, fname)
-                _pending_avatars.append((name, path))
-    except Exception:
-        pass
+                _pending_avatars.put((name, path))
+    except Exception as _e:
+        print(f"[avatar] _scan_local_avatars failed: {type(_e).__name__}: {_e}")
 
 
 def _flush_pending():
     """Call from main draw thread to register queued textures."""
-    while _pending_avatars:
-        name, path = _pending_avatars.pop(0)
+    while True:
+        try:
+            name, path = _pending_avatars.get_nowait()
+        except _queue.Empty:
+            return
         _register_tex(name, path)
 
 
 def queue_avatar_reload(name, path):
     """Called from settings after upload completes (may be background thread)."""
-    _pending_avatars.append((name, path))
+    _pending_avatars.put((name, path))
 
 
 def queue_avatars_reload_all(avatar_map):
     """Called after 'Sync All Avatars' — avatar_map is {name: local_path}."""
     for name, path in avatar_map.items():
-        _pending_avatars.append((name, path))
+        _pending_avatars.put((name, path))
 
 
 def _get_avatar_tex(name):
@@ -463,7 +468,7 @@ def _draw_idle(dl, vw, vh):
     a = int(90 + t*110)
     _txt(dl, cx-180, cy-30, "IN-HOUSE CUSTOMS", (*C["gold"][:3], a), 36, "raj_36")
     hint = "Connecting to Google Sheets…" if not live.loaded else "No in-house data found"
-    _txt(dl, cx-165, cy+14, hint, (*C["txt_dim"][:3], int(a*0.6)), 18, "raj_18")
+    _txt(dl, cx-165, cy+14, hint, (*C["txt_dim"][:3], int(a*0.6)), 19, "raj_18")
 
 
 def _draw_loading(dl, vw, vh):
@@ -472,10 +477,10 @@ def _draw_loading(dl, vw, vh):
     a  = int(80 + t*130)
     dots = "." * (int(inhouse._load_t*2) % 4)
     label = f"FETCHING LEADERBOARD{dots}"
-    _txt(dl, cx - len(label)*7, cy-30, label, (*C["gold_dk"][:3], a), 26, "raj_28")
+    _txt(dl, cx - len(label)*7, cy-30, label, (*C["gold_dk"][:3], a), 27, "raj_36")
     tip = inhouse._tip
     tip_x = max(40, cx - len(tip) * 5)
-    _txt(dl, tip_x, cy+16, tip, (*C["txt_dim"][:3], int(a*0.8)), 18, "raj_r_18")
+    _txt(dl, tip_x, cy+16, tip, (*C["txt_dim"][:3], int(a*0.8)), 19, "raj_r_18")
     # Animated loading bar
     bar_w = min(400, vw - 120)
     bar_x = cx - bar_w // 2
@@ -496,9 +501,9 @@ def _draw_top_bar(dl, vw, header_w):
                         color=(0,0,0,0), parent=dl)
     dpg.draw_line((0,TOP_BAR_H-1),(header_w,TOP_BAR_H-1),
                   color=C["rule_dark"], thickness=1, parent=dl)
-    _txt(dl, PAD, 12, "IN-HOUSE CUSTOMS", (*C["gold"][:3],220), 22, "raj_24")
+    _txt(dl, PAD, 12, "IN-HOUSE CUSTOMS", (*C["gold"][:3],220), 23, "raj_24")
     _txt(dl, PAD+256, 18, "Click a player row to view champion breakdown",
-         (*C["txt_dim"][:3],160), 16, "raj_r_16")
+         (*C["txt_dim"][:3],160), 17, "raj_r_16")
 
     # "LOG GAME" button — anchored to header_w right edge
     bw, bh = 160, 36
@@ -511,12 +516,12 @@ def _draw_top_bar(dl, vw, header_w):
     lbl_col  = (*C["txt_dim"][:3], 160) if is_logging else (*C["gold_lt"][:3], 240)
     dpg.draw_rectangle((bx,by),(bx+bw,by+bh),
                         fill=btn_fill, color=btn_bdr, rounding=4, parent=dl)
-    _txt(dl, bx+14, by+8, btn_lbl, lbl_col, 15, "raj_sb_16")
+    _txt(dl, bx+14, by+8, btn_lbl, lbl_col, 16, "raj_sb_16")
 
     # Most Games Logged label (left of LOG GAME button)
     if _most_games_player:
         mg_lbl = f"Most Games Logged:  {_most_games_player}"
-        _txt(dl, bx - 280, by + 10, mg_lbl, (*C["txt2"][:3], 200), 16, "raj_r_16")
+        _txt(dl, bx - 280, by + 10, mg_lbl, (*C["txt2"][:3], 200), 17, "raj_r_16")
 
     if dpg.is_mouse_button_clicked(0):
         mouse = dpg.get_mouse_pos(local=False)
@@ -621,19 +626,19 @@ def _draw_leaderboard(dl, tx, ty, tw, th, vw, vh):
                 if tex:
                     av_y1 = ry + (ROW_H - av_sz) // 2
                     dpg.draw_image(tex, (vx, av_y1), (vx + av_sz, av_y1 + av_sz), parent=dl)
-                    _txt(dl, vx + av_sz + 6, vy, val, (*name_col[:3], al), 17, "raj_20")
+                    _txt(dl, vx + av_sz + 6, vy, val, (*name_col[:3], al), 18, "raj_20")
                 else:
-                    _txt(dl, vx, vy, val, (*name_col[:3],al), 17, "raj_20")
+                    _txt(dl, vx, vy, val, (*name_col[:3],al), 18, "raj_20")
             elif ci == 2:
-                _txt(dl, vx, vy+2, val, (*C["txt"][:3],al), 15, "raj_16")
+                _txt(dl, vx, vy+2, val, (*C["txt"][:3],al), 16, "raj_16")
             elif ci == 3:
-                _txt(dl, vx, vy+2, val, (*C["txt2"][:3],al), 15, "raj_16")
+                _txt(dl, vx, vy+2, val, (*C["txt2"][:3],al), 16, "raj_16")
             elif ci == 4:
-                _txt(dl, vx, vy, val, (*wr_col[:3],al), 16, "raj_18")
+                _txt(dl, vx, vy, val, (*wr_col[:3],al), 17, "raj_18")
             elif ci == 5:
-                _txt(dl, vx, vy+2, val, (*C["platinum"][:3],al), 15, "raj_16")
+                _txt(dl, vx, vy+2, val, (*C["platinum"][:3],al), 16, "raj_16")
             elif ci in (6,7):
-                _txt(dl, vx, vy+2, val, (*C["txt2"][:3],al), 17, "raj_18")
+                _txt(dl, vx, vy+2, val, (*C["txt2"][:3],al), 18, "raj_18")
             elif ci == 8:
                 _draw_sparkline(dl, vx, ry+8, cw-16, ROW_H-16, n, al)
 
@@ -644,7 +649,7 @@ def _draw_leaderboard(dl, tx, ty, tw, th, vw, vh):
     for ci, ((lbl,_),(cx,cw)) in enumerate(zip(COLS, col_xs)):
         active = (lbl in ("#","PLAYER","WR","KDA"))
         col = C["gold"] if active else C["txt_dim"]
-        _txt(dl, tx+cx+8, ty+HEADER_H//2-9, lbl, (*col[:3], ha), 13, "raj_sb_14")
+        _txt(dl, tx+cx+8, ty+HEADER_H//2-9, lbl, (*col[:3], ha), 16, "raj_sb_16")
     dpg.draw_line((tx, ty+HEADER_H),(tx+tw, ty+HEADER_H),
                   color=(*C["rule_dark"][:3], ha), thickness=1, parent=dl)
 
@@ -718,17 +723,17 @@ def _draw_detail_panel(dl, vw, vh):
         name_x = px + 16 + av_sz + 14
     else:
         name_x = px + 20
-    _txt(dl, name_x, py+16, name.upper(), (*C["gold_lt"][:3], al), 26, "raj_28")
+    _txt(dl, name_x, py+16, name.upper(), (*C["gold_lt"][:3], al), 27, "raj_36")
 
     # Sub-stats row
     sub = f"#{p['rank']}  ·  {p['games']} games  ·  {p['wins']}-{p['losses']}  ·  {p['wr']} WR  ·  KDA {p['kda']}"
-    _txt(dl, px+20, py+74, sub, (*C["txt"][:3], int(al*0.85)), 16, "raj_r_16")
+    _txt(dl, px+20, py+74, sub, (*C["txt"][:3], int(al*0.85)), 17, "raj_r_16")
 
     dpg.draw_line((px+16, py+98),(vw-16, py+98),
                   color=(*C["rule_dark"][:3], int(180*frac)), thickness=1, parent=dl)
 
     # Champion breakdown label
-    _txt(dl, px+20, py+110, "CHAMPION BREAKDOWN", (*C["gold"][:3], al), 16, "raj_sb_18")
+    _txt(dl, px+20, py+110, "CHAMPION BREAKDOWN", (*C["gold"][:3], al), 17, "raj_sb_18")
 
     # Table header
     champ_hdrs = [("CHAMPION",140),("GP",40),("W-L",56),("WR",52),("KDA",50),("K",36),("D",36),("A",36),("DMG",76)]
@@ -738,7 +743,7 @@ def _draw_detail_panel(dl, vw, vh):
                         fill=(*C["card"][:3], int(160*frac)),
                         color=(0,0,0,0), rounding=3, parent=dl)
     for lbl, cw in champ_hdrs:
-        _txt(dl, hx, hy, lbl, (*C["txt_dim"][:3], al), 15, "raj_sb_14")
+        _txt(dl, hx, hy, lbl, (*C["txt_dim"][:3], al), 18, "raj_sb_16")
         hx += cw
 
     champs = _DEMO_CHAMPS.get(name, [])
@@ -762,12 +767,12 @@ def _draw_detail_panel(dl, vw, vh):
         cx2 = px + 16
         for vi, (v2, cw) in enumerate(zip(vals2, [cw2 for _,cw2 in champ_hdrs])):
             col2 = champ_col if vi==0 else wr_col2 if vi==3 else C["txt"]
-            _txt(dl, cx2, ry4+10, v2, (*col2[:3], al), 13, "raj_14")
+            _txt(dl, cx2, ry4+10, v2, (*col2[:3], al), 16, "raj_16")
             cx2 += cw
 
     # Sparkline history
     spark_y = row_y2 + len(champs)*40 + 20
-    _txt(dl, px+20, spark_y, "RECENT RESULTS  (last 10 games)", (*C["txt_dim"][:3], al), 13, "raj_sb_14")
+    _txt(dl, px+20, spark_y, "RECENT RESULTS  (last 10 games)", (*C["txt_dim"][:3], al), 16, "raj_sb_16")
     history = _LIVE_SPARKLINES.get(name) or _DEMO_SPARKLINES.get(name, [])
     dot_y = spark_y + 28
     dot_spacing = 28
@@ -778,8 +783,8 @@ def _draw_detail_panel(dl, vw, vh):
         dpg.draw_circle((dot_x, dot_y), 10,
                         fill=(*col3[:3], al), color=(0,0,0,0), parent=dl)
         lbl2 = "W" if result else "L"
-        _txt(dl, dot_x-5, dot_y-8, lbl2, (*C["bg"][:3], al), 11, "raj_sb_12")
+        _txt(dl, dot_x-5, dot_y-8, lbl2, (*C["bg"][:3], al), 15, "raj_sb_14")
 
     # Close hint
     _txt(dl, px+20, vh-72, "Click the same row again to close",
-         (*C["txt_dim"][:3], int(al*0.5)), 12, "raj_r_12")
+         (*C["txt_dim"][:3], int(al*0.5)), 15, "raj_r_14")

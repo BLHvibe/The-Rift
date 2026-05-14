@@ -19,7 +19,7 @@ C = {
     "win":         (79,  168, 130, 255),
     "loss":        (184,  69,  53, 255),
     "rule_gold":   (70,  55,  20, 255),
-    "rule_dark":   (26,  35,  53, 255),
+    "rule_dark":   (44,  56,  78, 255),   # bumped from (26,35,53) for better separator contrast against bg
     "txt":         (216, 207, 186, 255),
     "txt2":        (122, 114,  99, 255),
     "txt_dim":     (70,  65,  55, 255),
@@ -117,7 +117,7 @@ def setup_theme():
             dpg.add_theme_style(dpg.mvStyleVar_ScrollbarRounding,  4.0)
             dpg.add_theme_style(dpg.mvStyleVar_WindowBorderSize,   0.0)
             dpg.add_theme_style(dpg.mvStyleVar_ChildBorderSize,    1.0)
-            dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing,        8.0, 6.0)
+            dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing,        10.0, 8.0)
             dpg.add_theme_style(dpg.mvStyleVar_WindowPadding,      0.0, 0.0)
             dpg.add_theme_style(dpg.mvStyleVar_FramePadding,       8.0, 5.0)
 
@@ -151,14 +151,16 @@ def setup_fonts():
                 fonts[key] = dpg.add_font(path, size)
 
         # Rajdhani SemiBold — tab labels, subheaders
-        for size, key in [(22, "raj_sb_22"), (18, "raj_sb_18"), (16, "raj_sb_16"),
+        for size, key in [(26, "raj_sb_26"), (24, "raj_sb_24"), (22, "raj_sb_22"),
+                          (20, "raj_sb_20"), (18, "raj_sb_18"), (16, "raj_sb_16"),
                           (14, "raj_sb_14"), (12, "raj_sb_12"), (11, "raj_sb_11")]:
             path = os.path.join(font_dir, "Rajdhani-SemiBold.ttf")
             if os.path.exists(path):
                 fonts[key] = dpg.add_font(path, size)
 
         # Rajdhani Regular — supporting UI text
-        for size, key in [(20, "raj_r_20"), (18, "raj_r_18"), (16, "raj_r_16"),
+        for size, key in [(26, "raj_r_26"), (24, "raj_r_24"), (22, "raj_r_22"),
+                          (20, "raj_r_20"), (18, "raj_r_18"), (16, "raj_r_16"),
                           (14, "raj_r_14"), (12, "raj_r_12"), (11, "raj_r_11")]:
             path = os.path.join(font_dir, "Rajdhani-Regular.ttf")
             if os.path.exists(path):

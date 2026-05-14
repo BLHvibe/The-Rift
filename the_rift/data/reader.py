@@ -131,7 +131,7 @@ def _read_sheets(cfg):
                 r["games"] = rank_games[r["name"]]
     scout                      = _read_player_stats(sh, rankings)
     known_names                = {r["name"] for r in rankings}
-    inhouse, ih_ch, prim_roles = _read_inhouse(sh, known_names)
+    inhouse, ih_ch, prim_roles = _read_inhouse(sh, known_names, summoner_map)
     return rankings, scout, inhouse, ih_ch, prim_roles, players, summoner_map
 
 
@@ -453,12 +453,22 @@ def _read_player_stats(sh, rankings):
 # Inhouse game log → leaderboard + champion breakdown
 # ---------------------------------------------------------------------------
 
-def _read_inhouse(sh, known_names=None):
+def _read_inhouse(sh, known_names=None, summoner_map=None):
     """
     Read '_InhouseGameLog' tab and compute leaderboard + per-player champ stats.
     known_names: optional set of display names from Final Rankings — used to
     filter out log entries from players not in the group roster.
+    summoner_map: optional {riot_game_name: display_name} for name normalisation.
     """
+    # Build case-insensitive game-name → display-name lookup
+    _name_lkp = {}
+    if summoner_map:
+        for gn, dn in summoner_map.items():
+            _name_lkp[gn.strip().lower()] = dn
+
+    def _resolve(raw):
+        return _name_lkp.get(raw.strip().lower(), raw)
+
     records = []
     try:
         ws   = sh.worksheet("_InhouseGameLog")
@@ -472,7 +482,7 @@ def _read_inhouse(sh, known_names=None):
                 role_raw = str(row[13]).strip().upper() if len(row) > 13 and row[13] else ""
                 records.append({
                     "gameId":   row[0],
-                    "player":   str(row[2]).strip(),
+                    "player":   _resolve(str(row[2]).strip()),
                     "champion": str(row[3]).strip(),
                     "teamId":   int(row[4]) if row[4] else 0,
                     "win":      str(row[5]).upper() in ("TRUE","1"),
@@ -485,8 +495,8 @@ def _read_inhouse(sh, known_names=None):
                 })
             except (ValueError, IndexError):
                 continue
-    except Exception:
-        pass
+    except Exception as _e:
+        print(f"[reader] _read_inhouse failed: {type(_e).__name__}: {_e}")
 
     if not records:
         return [], {}, {}
@@ -613,12 +623,12 @@ def _read_inhouse(sh, known_names=None):
 
     # If _InhouseGameLog was empty, fall back to the pre-computed display sheet
     if not leaderboard:
-        return _read_inhouse_stats_tab(sh, known_names)
+        return _read_inhouse_stats_tab(sh, known_names, summoner_map)
 
     return leaderboard, inhouse_champs, primary_roles
 
 
-def _parse_inhouse_stats_rows(rows, known_names=None):
+def _parse_inhouse_stats_rows(rows, known_names=None, summoner_map=None):
     """
     Parse the 'In-House Stats' display sheet into the same leaderboard/champs
     structure that _read_inhouse returns.  Used as a fallback when _InhouseGameLog
@@ -632,6 +642,15 @@ def _parse_inhouse_stats_rows(rows, known_names=None):
       …
       "IN-HOUSE CHAMPION STATS" section with per-player champion blocks
     """
+    # Build case-insensitive game-name → display-name lookup
+    _name_lkp = {}
+    if summoner_map:
+        for gn, dn in summoner_map.items():
+            _name_lkp[gn.strip().lower()] = dn
+
+    def _resolve(raw):
+        return _name_lkp.get(raw.strip().lower(), raw)
+
     leaderboard    = []
     inhouse_champs = {}
 
@@ -654,7 +673,7 @@ def _parse_inhouse_stats_rows(rows, known_names=None):
 
             try:
                 rank     = int(str(row[0]).strip())
-                name     = str(row[1]).strip()
+                name     = _resolve(str(row[1]).strip())
                 games    = int(str(row[2]).strip())   if len(row) > 2  and row[2]  else 0
                 wins     = int(str(row[3]).strip())   if len(row) > 3  and row[3]  else 0
                 losses   = int(str(row[4]).strip())   if len(row) > 4  and row[4]  else 0
@@ -712,7 +731,7 @@ def _parse_inhouse_stats_rows(rows, known_names=None):
             if "  -  " in first and "games" in first.lower():
                 if current_player and current_champs:
                     inhouse_champs[current_player] = current_champs
-                current_player = first.split("  -  ")[0].strip()
+                current_player = _resolve(first.split("  -  ")[0].strip())
                 current_champs = []
                 i += 1
                 continue
@@ -774,12 +793,12 @@ def _parse_inhouse_stats_rows(rows, known_names=None):
     return leaderboard, inhouse_champs, {}
 
 
-def _read_inhouse_stats_tab(sh, known_names=None):
+def _read_inhouse_stats_tab(sh, known_names=None, summoner_map=None):
     """Read leaderboard from the 'In-House Stats' display sheet."""
     try:
         ws   = sh.worksheet("In-House Stats")
         rows = ws.get_all_values()
-        return _parse_inhouse_stats_rows(rows, known_names)
+        return _parse_inhouse_stats_rows(rows, known_names, summoner_map)
     except Exception:
         return [], {}, {}
 
@@ -1825,7 +1844,7 @@ def log_inhouse_games_from_client(on_progress=None, on_done=None, on_error=None)
 
             # Reload inhouse data into live
             known_names = {r["name"] for r in live.rankings}
-            ib, ic, pr  = _read_inhouse(sh, known_names if known_names else None)
+            ib, ic, pr  = _read_inhouse(sh, known_names if known_names else None, live.summoner_map or None)
             with live._lock:
                 live.inhouse        = ib
                 live.inhouse_champs = ic

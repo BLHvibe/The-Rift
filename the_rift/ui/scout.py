@@ -345,7 +345,7 @@ def _rw_rank_history(r):
                 dpg.draw_line((PAD_L, gy), (PAD_L + pw, gy),
                               color=(*C["rule_dark"][:3], 60), thickness=1, parent=dl)
                 dpg.draw_text((2, gy - 8), f"#{int(rank_line)}",
-                              color=(*C["txt_dim"][:3], 120), size=10, parent=dl)
+                              color=(*C["txt_dim"][:3], 120), size=13, parent=dl)
         pts = [(_px(i), _py(v)) for i, v in enumerate(vals)]
         if len(pts) >= 2:
             dpg.draw_polyline(pts, color=(*C["gold"][:3], 200), thickness=2, parent=dl)
@@ -356,7 +356,7 @@ def _rw_rank_history(r):
         for i in range(0, len(dates), step):
             lbl = str(dates[i])[-5:]
             dpg.draw_text((_px(i) - 14, GH - PAD_B + 4), lbl,
-                          color=(*C["txt_dim"][:3], 140), size=9, parent=dl)
+                          color=(*C["txt_dim"][:3], 140), size=12, parent=dl)
         dpg.draw_line((PAD_L, PAD_T), (PAD_L, PAD_T + ph),
                       color=(*C["rule_dark"][:3], 140), thickness=1, parent=dl)
         dpg.draw_line((PAD_L, PAD_T + ph), (PAD_L + pw, PAD_T + ph),
@@ -907,12 +907,12 @@ def _draw_idle(dl, vw, vh):
     t  = (math.sin(time.monotonic()*1.3)+1)/2
     a  = int(90 + t*110)
     _txt(dl, cx-180, cy-30, "PLAYER SCOUTING", (*C["gold"][:3],a), 36, "raj_36")
-    _txt(dl, cx-160, cy+14, "Fetch latest data to begin", (*C["txt_dim"][:3],int(a*.6)), 18, "raj_18")
+    _txt(dl, cx-160, cy+14, "Fetch latest data to begin", (*C["txt_dim"][:3],int(a*.6)), 19, "raj_18")
     bw, bh = 300, 60
     bx, by = cx-bw//2, cy+56
     dpg.draw_rectangle((bx,by),(bx+bw,by+bh), fill=(*C["gold_dk"][:3],210),
                         color=(*C["gold"][:3],210), rounding=6, parent=dl)
-    _txt(dl, bx+bw//2-110, by+16, "LOAD SCOUT DATA", (*C["gold_lt"][:3],230), 22, "raj_24")
+    _txt(dl, bx+bw//2-110, by+16, "LOAD SCOUT DATA", (*C["gold_lt"][:3],230), 23, "raj_24")
     if dpg.is_mouse_button_clicked(0):
         mouse = dpg.get_mouse_pos(local=False)
         vp    = dpg.get_viewport_pos()
@@ -928,10 +928,10 @@ def _draw_loading(dl, vw, vh):
     cx, cy = vw//2, vh//2
     t  = (math.sin(scout._load_t*2.0)+1)/2
     a  = int(80 + t*130)
-    _txt(dl, cx - len("FETCHING SCOUT DATA...")*7, cy-30, "FETCHING SCOUT DATA...", (*C["gold_dk"][:3],a), 26, "raj_28")
+    _txt(dl, cx - len("FETCHING SCOUT DATA...")*7, cy-30, "FETCHING SCOUT DATA...", (*C["gold_dk"][:3],a), 27, "raj_36")
     tip = scout._tip
     tip_x = max(40, cx - len(tip) * 5)
-    _txt(dl, tip_x, cy+16, tip, (*C["txt_dim"][:3], int(a*0.8)), 18, "raj_r_18")
+    _txt(dl, tip_x, cy+16, tip, (*C["txt_dim"][:3], int(a*0.8)), 19, "raj_r_18")
     # Loading bar
     bar_w = min(400, vw - 120)
     bar_x = cx - bar_w // 2
@@ -951,7 +951,7 @@ def _draw_top_bar(dl, vw, header_w):
     """header_w = width of the table column — bars and buttons stay inside it."""
     dpg.draw_rectangle((0,0),(header_w,TOP_BAR_H), fill=(*C["panel"][:3],220), color=(0,0,0,0), parent=dl)
     dpg.draw_line((0,TOP_BAR_H-1),(header_w,TOP_BAR_H-1), color=C["rule_dark"], thickness=1, parent=dl)
-    _txt(dl, PAD, 12, "PLAYER SCOUTING", (*C["gold_lt"][:3],240), 26, "raj_28")
+    _txt(dl, PAD, 12, "PLAYER SCOUTING", (*C["gold_lt"][:3],240), 27, "raj_36")
 
     labels = [("SCORE","score"),("W/R","wr"),("KDA","kda")]
     bx = header_w - 320   # anchor sort buttons to the right edge of the table column
@@ -963,7 +963,7 @@ def _draw_top_bar(dl, vw, header_w):
                             fill=fc, color=(*bc[:3],200), rounding=4, parent=dl)
         arr  = ("▲" if scout.sort_asc else "▼") if active else ""
         tcol = C["gold_lt"] if active else C["txt"]
-        _txt(dl, bx+8, 18, lbl+arr, (*tcol[:3],220), 16, "raj_18")
+        _txt(dl, bx+8, 18, lbl+arr, (*tcol[:3],220), 17, "raj_18")
         bx += 100
 
     if dpg.is_mouse_button_clicked(0):
@@ -1040,20 +1040,20 @@ def _draw_table(dl, tx, ty, tw, th, vw, vh):
             vx = tx + xo + cx + 8
             vy = ry + ROW_H//2 - 10
             if ci == 0:
-                _txt(dl, vx, vy, val, (*C["txt2"][:3],al), 19, "raj_20")
+                _txt(dl, vx, vy, val, (*C["txt2"][:3],al), 20, "raj_20")
             elif ci == 1:
                 dpg.draw_circle((vx+5,ry+ROW_H//2),8, fill=(*bc[:3],al), color=(0,0,0,0), parent=dl)
-                _txt(dl, vx+20, vy, val.upper(), (*C["gold_lt"][:3],al), 21, "raj_24")
+                _txt(dl, vx+20, vy, val.upper(), (*C["gold_lt"][:3],al), 22, "raj_24")
             elif ci == 2:
-                _txt(dl, vx, vy, val, (*C["gold"][:3],al), 21, "raj_24")
+                _txt(dl, vx, vy, val, (*C["gold"][:3],al), 22, "raj_24")
             elif ci == 3:
                 wr_v  = p.get("wr",50)
                 wrc   = C["win"] if wr_v>=52 else C["loss"] if wr_v<48 else C["txt"]
-                _txt(dl, vx, vy, val, (*wrc[:3],al), 19, "raj_20")
+                _txt(dl, vx, vy, val, (*wrc[:3],al), 20, "raj_20")
             elif ci == 4:
-                _txt(dl, vx, vy, val, (*C["platinum"][:3],al), 19, "raj_20")
+                _txt(dl, vx, vy, val, (*C["platinum"][:3],al), 20, "raj_20")
             else:
-                _txt(dl, vx, vy, val, (*C["txt2"][:3],al), 18, "raj_20")
+                _txt(dl, vx, vy, val, (*C["txt2"][:3],al), 19, "raj_20")
 
     # Column header drawn AFTER rows so it masks any rows that scrolled into its area
     dpg.draw_rectangle((tx,ty),(tx+tw,ty+HEADER_H),
@@ -1061,7 +1061,7 @@ def _draw_table(dl, tx, ty, tw, th, vw, vh):
     for (lbl,_,sk),(cx,cw) in zip(COLS, col_xs):
         active = sk and scout.sort_col == sk
         col    = C["gold_lt"] if active else C["txt2"]
-        _txt(dl, tx+cx+8, ty+HEADER_H//2-10, lbl, (*col[:3],ha), 18, "raj_sb_18")
+        _txt(dl, tx+cx+8, ty+HEADER_H//2-10, lbl, (*col[:3],ha), 19, "raj_sb_18")
     dpg.draw_line((tx,ty+HEADER_H),(tx+tw,ty+HEADER_H),
                   color=(*C["rule_dark"][:3],ha), thickness=1, parent=dl)
 

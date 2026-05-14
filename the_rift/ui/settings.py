@@ -105,7 +105,7 @@ def draw_settings(dl, vw, vh, fonts=None):
                         color=(0,0,0,0), parent=dl)
     dpg.draw_line((0,TOP_BAR_H-1),(vw,TOP_BAR_H-1),
                   color=C["rule_dark"], thickness=1, parent=dl)
-    _txt(dl, PAD, 12, "SETTINGS", (*C["gold"][:3],220), 22, "raj_24")
+    _txt(dl, PAD, 12, "SETTINGS", (*C["gold"][:3],220), 23, "raj_24")
 
     # Settings form lives in a DPG window overlay for native input widgets
     vp_w = dpg.get_viewport_width()

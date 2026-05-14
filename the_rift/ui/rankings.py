@@ -8,6 +8,7 @@ import math, time, random as _rnd
 import dearpygui.dearpygui as dpg
 from theme import C, RANK_COLORS, MEDAL_PARTICLE
 from data.tips import TIPS as _TIPS
+from data.config import load_rank_snapshot, save_rank_snapshot
 from core.state import state
 from core.animations import anim, ParticleSystem, Ripple
 
@@ -100,6 +101,9 @@ class RankingsState:
         self._rest_idx   = 0
         self._load_t     = 0.0
         self._tip        = _rnd.choice(_TIPS)
+        # {player_name: delta_int} — positive = moved up since last snapshot,
+        # negative = moved down, 0 = same, None = new this snapshot.
+        self.deltas      = {}
 
     def reset(self):
         self.__init__()
@@ -118,6 +122,23 @@ class RankingsState:
             self.card_y_off[i] = 0
             self.card_alpha[i] = 0
             self.card_x_off[i] = -80
+        # Compute movement deltas vs the last persisted snapshot, then save the
+        # current ranks for next launch.  Positive delta = climbed (lower rank
+        # number).  Players not in the prior snapshot get delta=None ("NEW").
+        prev = load_rank_snapshot()
+        cur  = {}
+        deltas = {}
+        for idx, p in enumerate(data, start=1):
+            name = p.get("name")
+            if not name:
+                continue
+            cur[name] = idx
+            if name in prev:
+                deltas[name] = prev[name] - idx   # +N = improved
+            else:
+                deltas[name] = None
+        self.deltas = deltas
+        save_rank_snapshot(cur)
         anim.tween(0, 1, 1, "linear", delay_ms=DELAY_BEFORE_1,
                    on_done=self._slam_1)
 
@@ -157,7 +178,7 @@ class RankingsState:
             cx, cy = self._card_center(rank)
             self.particles.append(
                 ParticleSystem(cx, cy, color, count=count,
-                               spread=spread, lifetime_ms=1000, size=5))
+                               spread=spread, lifetime_ms=1000, size=8))
             r1 = Ripple(cx, cy, color,
                         max_radius=240 if is_hero else 180,
                         duration_ms=600, thickness=2)
@@ -269,7 +290,7 @@ def _hex(dl, cx, cy, r, fill, border, label="?", alpha=255):
     dpg.draw_polygon(pts, fill=(*fill[:3], alpha),
                      color=(*border[:3], alpha), thickness=1.5, parent=dl)
     dpg.draw_text((cx - len(label)*3 - 1, cy - 6), label,
-                  color=(*C["txt"][:3], alpha), size=16, parent=dl)
+                  color=(*C["txt"][:3], alpha), size=17, parent=dl)
 
 
 def _avatar_or_hex(dl, cx, cy, r, raw_name, fill, border, label="?", alpha=255):
@@ -329,7 +350,7 @@ def _mystery(dl, x1, y1, x2, y2, t, alpha=255):
     _shimmer(dl, x1, y1, x2, y2, t)
     cx, cy = (x1+x2)//2, (y1+y2)//2
     dpg.draw_text((cx-5, cy-8), "?",
-                  color=(*C["gold_dk"][:3], alpha), size=16, parent=dl)
+                  color=(*C["gold_dk"][:3], alpha), size=17, parent=dl)
 
 
 def _txt(dl, x, y, text, color, size, font_key=None):
@@ -337,6 +358,20 @@ def _txt(dl, x, y, text, color, size, font_key=None):
     if font_key and font_key in _F:
         dpg.bind_item_font(tag, _F[font_key])
     return tag
+
+
+def _draw_delta(dl, x, y, delta, alpha):
+    """Draw a movement indicator: ▲N (green), ▼N (red), – (dim), NEW (gold)."""
+    if alpha <= 0:
+        return
+    if delta is None:
+        _txt(dl, x, y, "NEW", (*C["gold"][:3], alpha), 13, "raj_sb_14")
+    elif delta > 0:
+        _txt(dl, x, y, f"▲{delta}", (*C["win"][:3], alpha), 13, "raj_sb_14")
+    elif delta < 0:
+        _txt(dl, x, y, f"▼{-delta}", (*C["loss"][:3], alpha), 13, "raj_sb_14")
+    else:
+        _txt(dl, x, y, "–", (*C["txt_dim"][:3], alpha), 13, "raj_sb_14")
 
 
 def _name_link(dl, x, y, name_upper, raw_name, color, size, font_key=None):
@@ -374,7 +409,7 @@ def draw_rankings(dl, vw, vh, fonts=None):
     dpg.delete_item(dl, children_only=True)
     rankings.tick()
 
-    dpg.draw_rectangle((0,0),(vw,vh), fill=C["bg"], color=(0,0,0,0), parent=dl)
+    dpg.draw_rectangle((0,0),(vw,3000), fill=C["bg"], color=(0,0,0,0), parent=dl)
 
     phase = rankings.phase
 
@@ -432,10 +467,10 @@ def _draw_loading(dl, vw, vh):
     a  = int(80 + t * 130)
     dots = "." * (int(rankings._load_t * 2) % 4)
     label = f"LOADING RANKINGS{dots}"
-    _txt(dl, cx - len(label) * 7, cy - 30, label, (*C["gold_dk"][:3], a), 26, "raj_28")
+    _txt(dl, cx - len(label) * 7, cy - 30, label, (*C["gold_dk"][:3], a), 27, "raj_36")
     tip = rankings._tip
     tip_x = max(40, cx - len(tip) * 5)
-    _txt(dl, tip_x, cy + 16, tip, (*C["txt_dim"][:3], int(a * 0.8)), 18, "raj_r_18")
+    _txt(dl, tip_x, cy + 16, tip, (*C["txt_dim"][:3], int(a * 0.8)), 19, "raj_r_18")
     # Animated loading bar
     bar_w = min(400, vw - 120)
     bar_x = cx - bar_w // 2
@@ -502,32 +537,34 @@ def _draw_podium_cards(dl):
         rating = str(p.get("rating", tier[:1].upper()))
 
         raw_name = p.get("name", "Unknown")
+        # Movement delta in the top-right corner of every podium card
+        _draw_delta(dl, x2 - 56, y1 + 12, rankings.deltas.get(raw_name), al)
         if rank == 1:
             label_col = (*accent_color[:3], al)
-            _txt(dl, x1+20, y1+18, "CHAMPION", label_col, 14, "raj_sb_18")
-            _txt(dl, x1+20, y1+44, "NO.", (*C["txt_dim"][:3], al), 18, "raj_sb_18")
+            _txt(dl, x1+20, y1+18, "CHAMPION", label_col, 15, "raj_sb_18")
+            _txt(dl, x1+20, y1+44, "NO.", (*C["txt_dim"][:3], al), 19, "raj_sb_18")
             _txt(dl, x1+78, y1+28, "1", (*C["gold_lt"][:3], al), 90, "raj_72")
-            _name_link(dl, x1+20, y1+152, name, raw_name, (*C["gold"][:3], al), 32, "raj_36")
+            _name_link(dl, x1+20, y1+152, name, raw_name, (*C["gold"][:3], al), 31, "raj_36")
             _txt(dl, x2-150, y1+72, fs,
                  (*C["gold_lt"][:3], al), 44, "raj_44")
             _badge(dl, x2-44, y1+44, rating, tier, al, r=38)
             dpg.draw_line((x1+20, y1+192),(x1+col_w-30, y1+192),
                           color=(*C["gold_dk"][:3], al), thickness=1, parent=dl)
             _txt(dl, x1+20, y1+202, f"TIER {ts}  ·  RANK {rs}",
-                 (*C["txt_dim"][:3], al), 12, "raj_r_12")
+                 (*C["txt_dim"][:3], al), 15, "raj_r_14")
             _avatar_or_hex(dl, x2-70, y1+h-52, 44, raw_name,
                            C["card_hover"], (*C["gold"][:3], al),
                            label=name[:2], alpha=al)
         else:
             label = "RUNNER-UP" if rank == 2 else "THIRD"
-            _txt(dl, x1+16, y1+14, label, (*accent_color[:3], al), 13, "raj_sb_14")
-            _txt(dl, x1+16, y1+32, "NO.", (*C["txt_dim"][:3], al), 14, "raj_sb_14")
+            _txt(dl, x1+16, y1+14, label, (*accent_color[:3], al), 16, "raj_sb_16")
+            _txt(dl, x1+16, y1+32, "NO.", (*C["txt_dim"][:3], al), 17, "raj_sb_16")
             _txt(dl, x1+66, y1+18, str(rank), (*C["gold_lt"][:3], al), 68, "raj_56")
-            _name_link(dl, x1+16, y1+118, name, raw_name, (*C["txt"][:3], al), 24, "raj_28")
+            _name_link(dl, x1+16, y1+118, name, raw_name, (*C["txt"][:3], al), 25, "raj_36")
             _txt(dl, x2-120, y1+56, fs,
-                 (*C["gold_lt"][:3], al), 32, "raj_36")
+                 (*C["gold_lt"][:3], al), 31, "raj_36")
             _txt(dl, x1+16, y1+168, f"TIER {ts}  ·  RANK {rs}",
-                 (*C["txt_dim"][:3], al), 11, "raj_r_12")
+                 (*C["txt_dim"][:3], al), 15, "raj_r_14")
             _badge(dl, x2-38, y1+34, rating, tier, al, r=30)
             _avatar_or_hex(dl, x2-58, y1+h-42, 36, raw_name,
                            C["card_hover"], (*border_col[:3], al),
@@ -571,15 +608,17 @@ def _draw_challenger_rows(dl):
 
         raw = p.get("name", "")
         _txt(dl, rx+xo+16, ry+CHAL_H//2-18, f"#{rank}",
-             (*C["txt2"][:3], al), 18, "raj_20")
+             (*C["txt2"][:3], al), 19, "raj_20")
+        # Rank movement delta directly under the rank number
+        _draw_delta(dl, rx+xo+16, ry+CHAL_H//2+4, rankings.deltas.get(raw), al)
         _avatar_or_hex(dl, rx+xo+90, ry+CHAL_H//2, 26, raw,
                        C["panel"], C["rule_dark"], label=name[:2], alpha=al)
         _name_link(dl, rx+xo+122, ry+CHAL_H//2-18, name,
-                   raw, (*C["txt"][:3], al), 20, "raj_20")
+                   raw, (*C["txt"][:3], al), 21, "raj_20")
         _txt(dl, rx+xo+122, ry+CHAL_H//2+6, f"AVG TIER {avg}  ·  RANK {rs}",
-             (*C["txt_dim"][:3], al), 11, "raj_r_12")
+             (*C["txt_dim"][:3], al), 15, "raj_r_14")
         _txt(dl, rx+xo+row_w-110, ry+CHAL_H//2-14, fs,
-             (*C["gold"][:3], al), 22, "raj_24")
+             (*C["gold"][:3], al), 23, "raj_24")
         _badge(dl, rx+xo+row_w-152, ry+CHAL_H//2, rating, tier, al, r=24)
 
 
@@ -593,7 +632,7 @@ def _draw_rest_rows(dl):
     section_y = podium_bot + CHAL_PAD_T + chal_h + SECTION_GAP
 
     _txt(dl, rx, section_y - 22, "FULL STANDINGS",
-         (*C["txt_dim"][:3], 180), 16, "raj_sb_16")
+         (*C["txt_dim"][:3], 180), 17, "raj_sb_16")
     dpg.draw_line((rx, section_y - 4),(rx + row_w, section_y - 4),
                   color=C["rule_dark"], thickness=1, parent=dl)
 
@@ -617,11 +656,15 @@ def _draw_rest_rows(dl):
 
         raw2 = p.get("name", "")
         _txt(dl, rx+xo+14, ry+ROW_H//2-11, f"#{rank}",
-             (*C["txt2"][:3], al), 16, "raj_18")
+             (*C["txt2"][:3], al), 17, "raj_18")
         _avatar_or_hex(dl, rx+xo+72, ry+ROW_H//2, 18, raw2,
                        C["panel"], C["rule_dark"], label=name[:2], alpha=al)
         _name_link(dl, rx+xo+96, ry+ROW_H//2-11, name,
-                   raw2, (*C["txt"][:3], al), 16, "raj_18")
+                   raw2, (*C["txt"][:3], al), 17, "raj_18")
+        # Movement delta to the right of the name
+        name_w = int(len(name) * 17 * 0.58)
+        _draw_delta(dl, rx+xo+96+name_w+10, ry+ROW_H//2-8,
+                    rankings.deltas.get(raw2), al)
         _txt(dl, rx+xo+row_w-90, ry+ROW_H//2-11, fs,
-             (*C["gold"][:3], al), 16, "raj_18")
+             (*C["gold"][:3], al), 17, "raj_18")
         _badge(dl, rx+xo+row_w-118, ry+ROW_H//2, rating, tier, al, r=20)

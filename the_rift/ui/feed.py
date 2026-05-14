@@ -233,11 +233,11 @@ def draw_feed(dl, vw, vh, fonts=None):
                         fill=(*C["panel"][:3], 220), color=(0, 0, 0, 0), parent=dl)
     dpg.draw_line((0, TOP_BAR_H - 1), (vw, TOP_BAR_H - 1),
                   color=C["rule_dark"], thickness=1, parent=dl)
-    _txt(dl, PAD, 12, "ACTIVITY FEED", (*C["gold"][:3], 220), 22, "raj_24")
+    _txt(dl, PAD, 12, "ACTIVITY FEED", (*C["gold"][:3], 220), 23, "raj_24")
 
     # Loading spinner hint
     if _feed.loading:
-        _txt(dl, PAD + 240, 18, "loading…", (*C["txt_dim"][:3], 160), 16, "raj_r_16")
+        _txt(dl, PAD + 240, 18, "loading…", (*C["txt_dim"][:3], 160), 17, "raj_r_16")
 
     # REFRESH button
     bw, bh = 140, 34
@@ -246,7 +246,7 @@ def draw_feed(dl, vw, vh, fonts=None):
     dpg.draw_rectangle((bx, by), (bx + bw, by + bh),
                         fill=(*C["gold_dk"][:3], 200),
                         color=(*C["gold"][:3], 200), rounding=4, parent=dl)
-    _txt(dl, bx + 14, by + 8, "◆  REFRESH", (*C["gold_lt"][:3], 240), 17, "raj_sb_18")
+    _txt(dl, bx + 14, by + 8, "◆  REFRESH", (*C["gold_lt"][:3], 240), 18, "raj_sb_18")
 
     # Click — refresh from sheet first, fallback to local
     if dpg.is_mouse_button_clicked(0):
@@ -324,7 +324,7 @@ def _draw_date_separator(ts_str, parent):
     if lbl:
         with dpg.drawlist(width=-1, height=SEP_H, parent=parent):
             t = dpg.draw_text((PAD, 6), lbl.upper(),
-                               color=(*C["gold_dk"][:3], 200), size=13)
+                               color=(*C["gold_dk"][:3], 200), size=15)
             if "raj_sb_14" in _F:
                 dpg.bind_item_font(t, _F["raj_sb_14"])
             dpg.draw_line((PAD + 100, SEP_H // 2),
@@ -359,14 +359,14 @@ def _draw_event_card(ev, parent):
         # Player name
         name_tag = dpg.draw_text(
             (PAD, 14), f"{icon}  {player.upper()}" if player else icon,
-            color=(*C["gold_lt"][:3], 230), size=16,
+            color=(*C["gold_lt"][:3], 230), size=17,
         )
         if "raj_20" in _F:
             dpg.bind_item_font(name_tag, _F["raj_20"])
         # Description
         desc_tag = dpg.draw_text(
             (PAD, 40), desc,
-            color=(*C["txt"][:3], 190), size=13,
+            color=(*C["txt"][:3], 190), size=15,
         )
         if "raj_r_14" in _F:
             dpg.bind_item_font(desc_tag, _F["raj_r_14"])
@@ -374,7 +374,7 @@ def _draw_event_card(ev, parent):
         if time_ago:
             ta_tag = dpg.draw_text(
                 (PAD, 58), time_ago,
-                color=(*C["txt_dim"][:3], 140), size=11,
+                color=(*C["txt_dim"][:3], 140), size=13,
             )
             if "raj_r_12" in _F:
                 dpg.bind_item_font(ta_tag, _F["raj_r_12"])

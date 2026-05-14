@@ -197,6 +197,11 @@ _ROLE_VALID = {
             "Vel'Koz","Maokai","Poppy","Tahm Kench","Galio"},
 }
 
+# INTENTIONAL: these "Random N" entries are placeholders in the draft pool to
+# represent ad-hoc players who join our inhouse 5v5s but are NOT on the tier list
+# and will NOT be added to the roster. Do not remove them and do not fold them
+# into `_is_real_player()` rejection — they are a first-class part of the draft
+# experience even though they have no scouting data.
 _RANDOM_PLAYERS = [
     {"name": "Random 1", "tier": "Unranked", "final_score": 50.0, "score": 50.0,
      "top_champs": [], "is_random": True},
@@ -420,7 +425,7 @@ def _hex_avatar(dl, cx, cy, r, tier, name, alpha=255):
                      color=(*bc[:3], alpha), thickness=2.5, parent=dl)
     initials = (name[:2] if name else "??").upper()
     dpg.draw_text((cx - len(initials)*8, cy - 13), initials,
-                  color=(*C["txt"][:3], alpha), size=22, parent=dl)
+                  color=(*C["txt"][:3], alpha), size=23, parent=dl)
 
 
 def _role_dot(dl, cx, cy, role, alpha=255):
@@ -428,7 +433,7 @@ def _role_dot(dl, cx, cy, role, alpha=255):
     dpg.draw_circle((cx, cy), 12, fill=(*col, alpha),
                     color=(0,0,0,0), parent=dl)
     dpg.draw_text((cx - 5, cy - 8), role[:1],
-                  color=(*C["txt"][:3], alpha), size=17, parent=dl)
+                  color=(*C["txt"][:3], alpha), size=18, parent=dl)
 
 
 def _panel_bg(dl, x1, y1, x2, y2, accent_color=None, alpha=255):
@@ -500,7 +505,7 @@ def _draw_team_builder_full(dl, vw, vh):
                         fill=(*C["panel"][:3], 235), color=(0,0,0,0), parent=dl)
     dpg.draw_line((0, hdr_h-1), (vw, hdr_h-1),
                   color=C["rule_dark"], thickness=1, parent=dl)
-    _txt(dl, vw//2 - 160, 11, "CONFIGURE TEAMS", (*C["gold"][:3], 230), 28, "raj_28")
+    _txt(dl, vw//2 - 160, 11, "CONFIGURE TEAMS", (*C["gold"][:3], 230), 29, "raj_36")
 
     # BEGIN ANALYSIS button
     bw, bh = 220, 38
@@ -509,7 +514,7 @@ def _draw_team_builder_full(dl, vw, vh):
     dpg.draw_rectangle((bx, by), (bx+bw, by+bh),
                         fill=(*C["gold_dk"][:3], 220), color=(*C["gold"][:3], 220),
                         rounding=4, parent=dl)
-    _txt(dl, bx + 14, by + 7, "BEGIN ANALYSIS", (*C["gold_lt"][:3], 230), 21, "raj_sb_22")
+    _txt(dl, bx + 14, by + 7, "BEGIN ANALYSIS", (*C["gold_lt"][:3], 230), 22, "raj_sb_22")
 
     # CANCEL button
     cw, ch = 90, 38
@@ -518,7 +523,7 @@ def _draw_team_builder_full(dl, vw, vh):
     dpg.draw_rectangle((cx2, cy2), (cx2+cw, cy2+ch),
                         fill=(*C["card"][:3], 160), color=(*C["rule_dark"][:3], 160),
                         rounding=4, parent=dl)
-    _txt(dl, cx2 + 14, cy2 + 7, "CANCEL", (*C["txt2"][:3], 200), 19, "raj_sb_18")
+    _txt(dl, cx2 + 14, cy2 + 7, "CANCEL", (*C["txt2"][:3], 200), 20, "raj_sb_18")
 
     # ── Two team columns ─────────────────────────────────────────
     pad    = 24
@@ -538,7 +543,7 @@ def _draw_team_builder_full(dl, vw, vh):
                         fill=(*C["panel"][:3], 100), color=(220, 90, 90, 50),
                         rounding=6, parent=dl)
 
-    _txt(dl, blue_x+14, slots_top+8, "BLUE TEAM", (*C["platinum"][:3], 220), 21, "raj_sb_22")
+    _txt(dl, blue_x+14, slots_top+8, "BLUE TEAM", (*C["platinum"][:3], 220), 22, "raj_sb_22")
     _txt(dl, red_x+14,  slots_top+8, "RED TEAM",  (220, 90, 90, 220),      21, "raj_sb_22")
 
     _draw_role_slots(dl, blue_x, slots_top+36, col_w, _tb.blue, slot_h)
@@ -548,7 +553,7 @@ def _draw_team_builder_full(dl, vw, vh):
     pool_y = vh - pool_h
     dpg.draw_line((pad, pool_y), (vw-pad, pool_y),
                   color=(*C["rule_dark"][:3], 140), thickness=1, parent=dl)
-    _txt(dl, pad, pool_y+4, "PLAYER POOL", (*C["txt2"][:3], 160), 21, "raj_sb_22")
+    _txt(dl, pad, pool_y+4, "PLAYER POOL", (*C["txt2"][:3], 160), 22, "raj_sb_22")
 
     placed   = _tb_placed_names()
     pool_vis = [p for p in _tb.pool
@@ -570,7 +575,7 @@ def _draw_team_builder_full(dl, vw, vh):
 
     # Empty pool hint
     if not pool_vis and not _tb.drag:
-        _txt(dl, pad, ry+8, "All players assigned.", (*C["txt_dim"][:3], 120), 17, "raj_sb_16")
+        _txt(dl, pad, ry+8, "All players assigned.", (*C["txt_dim"][:3], 120), 18, "raj_sb_16")
 
     # ── Dragged card (top layer) ──────────────────────────────────
     if _tb.drag:
@@ -603,7 +608,7 @@ def _draw_role_slots(dl, x, y, width, slots, slot_h):
         # Role colour strip
         dpg.draw_rectangle((x+8, sy), (x+52, sy+slot_h),
                            fill=(*rc, 40), color=(0,0,0,0), rounding=5, parent=dl)
-        dpg.draw_text((x+14, sy+slot_h//2-10), role, color=(*rc, 255), size=19, parent=dl)
+        dpg.draw_text((x+14, sy+slot_h//2-10), role, color=(*rc, 255), size=20, parent=dl)
 
         if p:
             name  = p.get("name", "?")
@@ -611,13 +616,13 @@ def _draw_role_slots(dl, x, y, width, slots, slot_h):
             tc    = RANK_COLORS.get(tier, RANK_COLORS["Unranked"])
             name_sz = min(28, max(22, slot_h - 26))
             _txt(dl, x+60, sy+max(4, slot_h//2-name_sz//2-2), name.upper(), (*C["gold_lt"][:3], 235), name_sz, "raj_24")
-            _txt(dl, x+60, sy+slot_h-20, tier[:3].upper(), (*tc[:3], 200), 18, "raj_sb_18")
+            _txt(dl, x+60, sy+slot_h-20, tier[:3].upper(), (*tc[:3], 200), 19, "raj_sb_18")
             sc = _tb_score_str(p)
             if sc:
-                _txt(dl, x+width-86, sy+max(4, slot_h//2-13), sc, (*C["txt2"][:3], 200), 21, "raj_20")
+                _txt(dl, x+width-86, sy+max(4, slot_h//2-13), sc, (*C["txt2"][:3], 200), 22, "raj_20")
         else:
             _txt(dl, x+60, sy+slot_h//2-9, "drag here",
-                 (*C["txt_dim"][:3], 70), 18, "raj_sb_18")
+                 (*C["txt_dim"][:3], 70), 19, "raj_sb_18")
 
 
 def _draw_tb_card(dl, x, y, w, h, player, dragging=False):
@@ -636,19 +641,19 @@ def _draw_tb_card(dl, x, y, w, h, player, dragging=False):
         # Dashed top edge to signal "unknown player"
         dpg.draw_line((x+4, y+1), (x+w-4, y+1),
                       color=(100, 120, 170, 80), thickness=1, parent=dl)
-        _txt(dl, x+10, y+5,    name.upper(), (130, 155, 210, al), 20, "raj_20")
-        _txt(dl, x+10, y+h-19, "RAND",       ( 90, 110, 160, int(al*0.7)), 17, "raj_sb_18")
-        _txt(dl, x+w-46, y+5,  "~50",        (*C["txt2"][:3], int(al*0.55)), 17, "raj_20")
+        _txt(dl, x+10, y+5,    name.upper(), (130, 155, 210, al), 21, "raj_20")
+        _txt(dl, x+10, y+h-19, "RAND",       ( 90, 110, 160, int(al*0.7)), 18, "raj_sb_18")
+        _txt(dl, x+w-46, y+5,  "~50",        (*C["txt2"][:3], int(al*0.55)), 18, "raj_20")
     else:
         dpg.draw_rectangle((x, y), (x+w, y+h),
                             fill=(*C["card"][:3], 240 if dragging else 180),
                             color=(*tc[:3], 220 if dragging else 150),
                             rounding=4, parent=dl)
-        _txt(dl, x+10, y+5,    name.upper(),      (*C["gold_lt"][:3], al), 22, "raj_24")
-        _txt(dl, x+10, y+h-19, tier[:3].upper(),  (*tc[:3], int(al*0.85)), 19, "raj_sb_18")
+        _txt(dl, x+10, y+5,    name.upper(),      (*C["gold_lt"][:3], al), 23, "raj_24")
+        _txt(dl, x+10, y+h-19, tier[:3].upper(),  (*tc[:3], int(al*0.85)), 20, "raj_sb_18")
         sc = _tb_score_str(player)
         if sc:
-            _txt(dl, x+w-52, y+5, sc, (*C["txt2"][:3], int(al*0.9)), 19, "raj_20")
+            _txt(dl, x+w-52, y+5, sc, (*C["txt2"][:3], int(al*0.9)), 20, "raj_20")
 
 
 def _tb_slot_hit(sx, sy, sw, sh, pos):
@@ -1031,7 +1036,7 @@ def _draw_idle(dl, vw, vh):
     _txt(dl, cx - 240, cy - 60, "DRAFT WAR ROOM",
          (*C["gold"][:3], a), 44, "raj_44")
     _txt(dl, cx - 200, cy - 4, "Build your teams and run the analysis",
-         (*C["txt2"][:3], int(a * 0.7)), 22, "raj_20")
+         (*C["txt2"][:3], int(a * 0.7)), 23, "raj_20")
 
     bw, bh = 320, 64
     bx, by = cx - bw//2, cy + 40
@@ -1040,7 +1045,7 @@ def _draw_idle(dl, vw, vh):
                         color=(*C["gold"][:3], 220),
                         rounding=6, parent=dl)
     _txt(dl, bx + bw//2 - 130, by + 14, "CONFIGURE TEAMS",
-         (*C["gold_lt"][:3], 230), 28, "raj_28")
+         (*C["gold_lt"][:3], 230), 29, "raj_36")
 
     # ANALYSE DRAFT — shown when a previous draft has teams assigned
     has_prev = bool(draft.blue and len(draft.blue) > 0 and
@@ -1054,7 +1059,7 @@ def _draw_idle(dl, vw, vh):
                             color=(*C["platinum"][:3], 200),
                             rounding=6, parent=dl)
         _txt(dl, abx + 24, aby + 10, "◆  ANALYSE DRAFT",
-             (*C["platinum"][:3], int(a * 0.95)), 26, "raj_28")
+             (*C["platinum"][:3], int(a * 0.95)), 27, "raj_36")
 
     if dpg.is_mouse_button_clicked(0):
         mouse = dpg.get_mouse_pos(local=False)
@@ -1089,14 +1094,14 @@ def _draw_team_area(dl, vw, team_h):
         dpg.draw_rectangle((center + meter_half, 0),(vw, team_h),
                             fill=(58,10,10,rf), color=(0,0,0,0), parent=dl)
 
-    _txt(dl, 24, 12, "BLUE TEAM", (*C["platinum"][:3], 220), 26, "raj_sb_22")
-    _txt(dl, vw - 190, 12, "RED TEAM", (220, 90, 90, 220), 26, "raj_sb_22")
+    _txt(dl, 24, 12, "BLUE TEAM", (*C["platinum"][:3], 220), 27, "raj_sb_22")
+    _txt(dl, vw - 190, 12, "RED TEAM", (220, 90, 90, 220), 27, "raj_sb_22")
     if draft.phase in (DraftPhase.RESULTS, DraftPhase.DONE) and draft.panel_alpha > 0:
         al = draft.panel_alpha
         _txt(dl, 24, 42, f"avg score: {draft.blue_avg:.1f}",
-             (*C["txt"][:3], al), 19, "raj_sb_18")
+             (*C["txt"][:3], al), 20, "raj_sb_18")
         _txt(dl, vw - 190, 42, f"avg score: {draft.red_avg:.1f}",
-             (220, 110, 110, al), 19, "raj_sb_18")
+             (220, 110, 110, al), 20, "raj_sb_18")
 
     dpg.draw_line((center, 0),(center, team_h),
                   color=(*C["rule_gold"][:3], 180), thickness=1, parent=dl)
@@ -1129,10 +1134,10 @@ def _draw_team_area(dl, vw, team_h):
         if al > 60:
             nw = len(name) * 11
             _txt(dl, sx - nw//2, slot_y + hex_r + 12, name.upper(),
-                 (*C["txt"][:3], al), 24, "raj_24")
+                 (*C["txt"][:3], al), 25, "raj_24")
             tier_abbr = tier[:3].upper()
             _txt(dl, sx - len(tier_abbr)*7, slot_y + hex_r + 40, tier_abbr,
-                 (*RANK_COLORS.get(tier, RANK_COLORS["Unranked"])[:3], al), 18, "raj_18")
+                 (*RANK_COLORS.get(tier, RANK_COLORS["Unranked"])[:3], al), 19, "raj_18")
 
     red_start    = center + meter_half + 20
     red_area_w   = vw - red_start - 20
@@ -1157,24 +1162,24 @@ def _draw_team_area(dl, vw, team_h):
         if al > 60:
             nw = len(name) * 11
             _txt(dl, sx - nw//2, slot_y + hex_r + 12, name.upper(),
-                 (*C["txt"][:3], al), 24, "raj_24")
+                 (*C["txt"][:3], al), 25, "raj_24")
             tier_abbr = tier[:3].upper()
             _txt(dl, sx - len(tier_abbr)*7, slot_y + hex_r + 40, tier_abbr,
-                 (*RANK_COLORS.get(tier, RANK_COLORS["Unranked"])[:3], al), 18, "raj_18")
+                 (*RANK_COLORS.get(tier, RANK_COLORS["Unranked"])[:3], al), 19, "raj_18")
 
     if draft.phase == DraftPhase.ANALYSING:
         t  = (math.sin(draft.analyse_t * 2.2) + 1) / 2
         pa = int(100 + t * 130)
         _txt(dl, center - 110, team_h - 38, "ANALYSING...",
-             (*C["gold_dk"][:3], pa), 24, "raj_24")
+             (*C["gold_dk"][:3], pa), 25, "raj_24")
     elif draft.bg_running and draft.phase in (DraftPhase.RESULTS, DraftPhase.DONE):
         t  = (math.sin(time.monotonic() * 2.0) + 1) / 2
         pa = int(60 + t * 60)
         _txt(dl, center - 140, team_h - 24, draft.bg_status,
-             (*C["txt2"][:3], pa), 18, "raj_sb_18")
+             (*C["txt2"][:3], pa), 19, "raj_sb_18")
     elif draft.bg_status and not draft.bg_running and draft.phase in (DraftPhase.RESULTS, DraftPhase.DONE):
         _txt(dl, center - 140, team_h - 24, draft.bg_status,
-             (*C["txt2"][:3], 160), 18, "raj_sb_18")
+             (*C["txt2"][:3], 160), 19, "raj_sb_18")
 
     # NEW DRAFT button — visible in results/done phase
     if draft.phase in (DraftPhase.RESULTS, DraftPhase.DONE):
@@ -1184,7 +1189,7 @@ def _draw_team_area(dl, vw, team_h):
         dpg.draw_rectangle((nbx, nby), (nbx+nbw, nby+nbh),
                             fill=(*C["card"][:3], 200), color=(*C["gold"][:3], 180),
                             rounding=4, parent=dl)
-        _txt(dl, nbx+16, nby+6, "◆  NEW DRAFT", (*C["gold_lt"][:3], 220), 20, "raj_sb_22")
+        _txt(dl, nbx+16, nby+6, "◆  NEW DRAFT", (*C["gold_lt"][:3], 220), 21, "raj_sb_22")
         if dpg.is_mouse_button_clicked(0):
             mouse = dpg.get_mouse_pos(local=False)
             vp    = dpg.get_viewport_pos()
@@ -1231,8 +1236,8 @@ def _draw_win_meter(dl, cx, team_h):
                             fill=(*col, ma), color=(0,0,0,0), rounding=3, parent=dl)
 
     label = f"{draft.win_pct_display:.1f}%"
-    _txt(dl, cx - 32, my - 42, label, (*col, ma), 32, "raj_28")
-    _txt(dl, cx - 32, my + mh//2 + 8, "BLUE WIN", (*C["txt"][:3], ma), 22, "raj_sb_22")
+    _txt(dl, cx - 32, my - 42, label, (*col, ma), 31, "raj_26")
+    _txt(dl, cx - 32, my + mh//2 + 8, "BLUE WIN", (*C["txt"][:3], ma), 23, "raj_sb_22")
 
 
 def _win_color(pct):
@@ -1250,12 +1255,12 @@ def _win_color(pct):
 def _draw_strategy_panel(dl, px, py, pw, ph, al, header, header_col,
                          bans, comps, ban_detail=None, comp_detail=None):
     _panel_bg(dl, px, py, px+pw, py+ph, header_col, al)
-    _txt(dl, px+18, py+14, header, (*header_col[:3], al), 22, "raj_sb_22")
+    _txt(dl, px+18, py+14, header, (*header_col[:3], al), 23, "raj_sb_22")
     dpg.draw_line((px+18, py+48),(px+pw-18, py+48),
                   color=(*C["rule_dark"][:3], al), thickness=1, parent=dl)
 
     _txt(dl, px+18, py+58, "PRIORITY BANS",
-         (*C["gold_lt"][:3], al), 19, "raj_sb_18")
+         (*C["gold_lt"][:3], al), 20, "raj_sb_18")
 
     has_rich_bans = bool(ban_detail)
     ban_h  = 78 if has_rich_bans else 52
@@ -1281,7 +1286,7 @@ def _draw_strategy_panel(dl, px, py, pw, ph, al, header, header_col,
         dpg.draw_line((xs,ys),(xe,ye), color=(*C["loss"][:3],al), thickness=1.5, parent=dl)
         dpg.draw_line((xe,ys),(xs,ye), color=(*C["loss"][:3],al), thickness=1.5, parent=dl)
         name_y = (ban_y + 6) if has_rich_bans else (ban_y + ban_h//2 - 10)
-        _txt(dl, bx+24, name_y, champ, (*C["txt"][:3], al), 20, "raj_20")
+        _txt(dl, bx+24, name_y, champ, (*C["txt"][:3], al), 21, "raj_20")
         if detail:
             player = str(detail.get("player", ""))
             wr_val = detail.get("wr", "")
@@ -1297,10 +1302,10 @@ def _draw_strategy_panel(dl, px, py, pw, ph, al, header, header_col,
                 else:
                     sub = player[:16]
                 _txt(dl, bx+8, ban_y+32, sub,
-                     (*C["txt"][:3], al), 17, "raj_sb_18")
+                     (*C["txt"][:3], al), 18, "raj_sb_18")
             pc = _PRIORITY_COLORS.get(pri, C["txt"][:3])
             if pri:
-                _txt(dl, bx+8, ban_y+53, pri, (*pc, al), 17, "raj_sb_18")
+                _txt(dl, bx+8, ban_y+53, pri, (*pc, al), 18, "raj_sb_18")
 
     if not bans:
         for i in range(5):
@@ -1310,14 +1315,14 @@ def _draw_strategy_panel(dl, px, py, pw, ph, al, header, header_col,
                                 color=(*C["loss"][:3], int(al*0.25)),
                                 rounding=4, parent=dl)
             _txt(dl, bx + slot_w//2 - 6, ban_y + ban_h//2 - 11, "?",
-                 (*C["txt_dim"][:3], int(al*0.6)), 21, "raj_20")
+                 (*C["txt_dim"][:3], int(al*0.6)), 22, "raj_20")
 
     div_y = ban_y + ban_h + 14
     dpg.draw_line((px+18, div_y),(px+pw-18, div_y),
                   color=(*C["rule_dark"][:3], al), thickness=1, parent=dl)
 
     _txt(dl, px+18, div_y+10, "TEAM COMPOSITIONS",
-         (*C["gold_lt"][:3], al), 19, "raj_sb_18")
+         (*C["gold_lt"][:3], al), 20, "raj_sb_18")
 
     comp_y   = div_y + 36
     has_rich = bool(comp_detail)
@@ -1346,7 +1351,7 @@ def _draw_strategy_panel(dl, px, py, pw, ph, al, header, header_col,
                             fill=(*header_col[:3], al),
                             color=(0,0,0,0), rounding=2, parent=dl)
         dpg.draw_text((px+26, cy2+comp_h//2-10), str(i+1),
-                      color=(*C["txt2"][:3], al), size=19, parent=dl)
+                      color=(*C["txt2"][:3], al), size=20, parent=dl)
         if detail:
             arch  = detail.get("archetype", comp)
             viab  = detail.get("viability", "VIABLE")
@@ -1356,20 +1361,20 @@ def _draw_strategy_panel(dl, px, py, pw, ph, al, header, header_col,
             spike = detail.get("spike", "")
             sb    = detail.get("score_breakdown", {}) or {}
             vc    = _VIAB_COLORS.get(viab, C["txt"][:3])
-            _txt(dl, px+40, cy2 + 5, arch, (*C["gold_lt"][:3], al), 21, "raj_20")
+            _txt(dl, px+40, cy2 + 5, arch, (*C["gold_lt"][:3], al), 22, "raj_20")
             viab_short = viab[:4] if viab == "NOT RECOMMENDED" else viab
             vx = px + pw - 18 - len(viab_short) * 9 - 4
-            _txt(dl, vx, cy2 + 6, viab_short, (*vc, al), 18, "raj_sb_18")
+            _txt(dl, vx, cy2 + 6, viab_short, (*vc, al), 19, "raj_sb_18")
             if picks and comp_h >= 50:
                 champ_str = "  ·  ".join(
                     p.get("champion", "") for p in picks[:5] if p.get("champion"))
                 if champ_str:
                     _txt(dl, px+40, cy2 + 28, champ_str,
-                         (*C["txt"][:3], al), 18, "raj_sb_18")
+                         (*C["txt"][:3], al), 19, "raj_sb_18")
             # Win condition — bumped to readable size + brighter colour
             if wcond and comp_h >= 70:
                 _txt(dl, px+40, cy2 + 52, "→ " + wcond,
-                     (*C["txt"][:3], al), 17, "raj_sb_18")
+                     (*C["txt"][:3], al), 18, "raj_sb_18")
             # AP/AD ratio — right side, same readable tier
             if sb and comp_h >= 70:
                 ap_r = sb.get("ap_ratio", 0.5)
@@ -1378,7 +1383,7 @@ def _draw_strategy_panel(dl, px, py, pw, ph, al, header, header_col,
                 bd_str = f"AP/AD {ap_pct}/{ad_pct}"
                 bdx = px + pw - 18 - len(bd_str) * 10 - 4
                 _txt(dl, bdx, cy2 + 52, bd_str,
-                     (*C["txt"][:3], al), 17, "raj_sb_18")
+                     (*C["txt"][:3], al), 18, "raj_sb_18")
             # Synergy dots — top-right under viability label
             if comp_h >= 44:
                 dot_y = cy2 + 33
@@ -1389,7 +1394,7 @@ def _draw_strategy_panel(dl, px, py, pw, ph, al, header, header_col,
                                     fill=fc, color=(0,0,0,0), parent=dl)
         else:
             text_y = cy2 + comp_h//2 - 11
-            _txt(dl, px+40, text_y, comp, (*C["gold_lt"][:3], al), 21, "raj_20")
+            _txt(dl, px+40, text_y, comp, (*C["gold_lt"][:3], al), 22, "raj_20")
 
 
 def _draw_blue_panel(dl, px, py, pw, ph, al):
@@ -1404,14 +1409,14 @@ def _draw_pvp_panel(dl, px, py, pw, ph, al):
     _panel_bg(dl, px, py, px+pw, py+ph, C["gold"], al)
 
     _txt(dl, px+18, py+14, "LANE ADVANTAGE",
-         (*C["gold"][:3], al), 22, "raj_sb_22")
+         (*C["gold"][:3], al), 23, "raj_sb_22")
     dpg.draw_line((px+18, py+48),(px+pw-18, py+48),
                   color=(*C["rule_dark"][:3], al), thickness=1, parent=dl)
 
     src_label = "Rank History + inhouse WR" if draft.prediction_src == "sheets" \
                 else "Score ratio (local)"
     _txt(dl, px+18, py+54, f"Lane matchup  ·  Win % via {src_label}",
-         (*C["txt"][:3], al), 17, "raj_sb_18")
+         (*C["txt"][:3], al), 18, "raj_sb_18")
 
     rows    = draft.pvp_rows
     row_h   = max(68, (ph - 86) // max(len(rows), 1)) if rows else 68
@@ -1419,7 +1424,7 @@ def _draw_pvp_panel(dl, px, py, pw, ph, al):
 
     if not rows:
         _txt(dl, px+18, start_y+16, "Configure teams to see matchups",
-             (*C["txt_dim"][:3], al), 16, "raj_sb_16")
+             (*C["txt_dim"][:3], al), 17, "raj_sb_16")
         return
 
     for i, (role, blue_name, red_name, blue_win, note) in enumerate(rows):
@@ -1431,10 +1436,10 @@ def _draw_pvp_panel(dl, px, py, pw, ph, al):
         rc = _ROLE_COLORS.get(role, (120,120,120))
         dpg.draw_rectangle((px+12, ry),(px+16, ry+row_h),
                             fill=(*rc, al), color=(0,0,0,0), rounding=2, parent=dl)
-        _txt(dl, px+22, ry+4, role, (*rc, al), 18, "raj_sb_18")
+        _txt(dl, px+22, ry+4, role, (*rc, al), 19, "raj_sb_18")
 
         _txt(dl, px+22, ry+row_h//2-10, blue_name.upper(),
-             (*C["platinum"][:3], al), 20, "raj_20")
+             (*C["platinum"][:3], al), 21, "raj_20")
 
         bar_x, bar_w, bh2 = px + pw//2 - 60, 120, 8
         bar_y = ry + row_h//2 - bh2//2
@@ -1447,14 +1452,14 @@ def _draw_pvp_panel(dl, px, py, pw, ph, al):
                             fill=(*bar_col, al), color=(0,0,0,0), rounding=3, parent=dl)
 
         pct_str = f"{blue_win:.0f}%"
-        _txt(dl, px + pw//2 - 24, ry + row_h//2 - 25, pct_str, (*bar_col, al), 22, "raj_20")
+        _txt(dl, px + pw//2 - 24, ry + row_h//2 - 25, pct_str, (*bar_col, al), 23, "raj_20")
 
         rname_x = px + pw - 18 - len(red_name) * 12
-        _txt(dl, rname_x, ry + row_h//2 - 10, red_name.upper(), (220, 90, 90, al), 20, "raj_20")
+        _txt(dl, rname_x, ry + row_h//2 - 10, red_name.upper(), (220, 90, 90, al), 21, "raj_20")
 
         if row_h > 40 and note:
             _txt(dl, px+22, ry+row_h-21, note,
-                 (*C["txt"][:3], al), 17, "raj_sb_18")
+                 (*C["txt"][:3], al), 18, "raj_sb_18")
 
 
 def _draw_red_panel(dl, px, py, pw, ph, al):
