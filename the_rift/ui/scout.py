@@ -912,7 +912,7 @@ def _draw_idle(dl, vw, vh):
         pass
     t  = (math.sin(time.monotonic()*1.3)+1)/2
     a  = int(90 + t*110)
-    _txt(dl, cx-180, cy-30, "PLAYER SCOUTING", (*C["gold"][:3],a), 36, "raj_36")
+    _txt(dl, cx-220, cy-30, "PLAYER SCOUTING", (*C["gold"][:3],a), 36, "cinzel_36")
     _txt(dl, cx-160, cy+14, "Fetch latest data to begin", (*C["txt_dim"][:3],int(a*.6)), 19, "raj_18")
     bw, bh = 300, 60
     bx, by = cx-bw//2, cy+56
@@ -963,7 +963,7 @@ def _draw_top_bar(dl, vw, header_w):
     """header_w = width of the table column — bars and buttons stay inside it."""
     dpg.draw_rectangle((0,0),(header_w,TOP_BAR_H), fill=(*C["panel"][:3],220), color=(0,0,0,0), parent=dl)
     dpg.draw_line((0,TOP_BAR_H-1),(header_w,TOP_BAR_H-1), color=C["rule_dark"], thickness=1, parent=dl)
-    _txt(dl, PAD, 12, "PLAYER SCOUTING", (*C["gold_lt"][:3],240), 27, "raj_36")
+    _txt(dl, PAD, 12, "PLAYER SCOUTING", (*C["gold_lt"][:3],240), 24, "cinzel_24")
 
     labels = [("SCORE","score"),("W/R","wr"),("KDA","kda")]
     bx = header_w - 320   # anchor sort buttons to the right edge of the table column

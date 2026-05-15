@@ -25,11 +25,13 @@ from ui.settings import draw_settings, close_settings_window
 from ui.commands import draw_commands
 from ui.feed import draw_feed
 from data.reader import live, load_live_data, check_for_update
+from data import patch_ticker
 
-__version__ = "2.3.1"   # bump this on each release
+__version__ = "2.4.0"   # bump this on each release
 
 WIN_W, WIN_H = 1280, 800
 TITLE_H      = 52    # titlebar height
+TICKER_H     = 26    # bottom patch-ticker rail height
 SIDEBAR_W    = 68    # collapsed sidebar width
 SIDEBAR_EXP  = 200   # expanded sidebar width
 
@@ -526,6 +528,73 @@ def _sidebar_tick(vw, vh):
     return clicked
 
 # ---------------------------------------------------------------------------
+# Bottom patch-ticker rail
+# ---------------------------------------------------------------------------
+_TICKER_PX_PER_SEC = 60   # marquee scroll speed
+
+def _draw_ticker(dl, vw):
+    """Bottom marquee — scrolling patch / free-rotation / flavor strings."""
+    if not dpg.does_item_exist(dl):
+        return
+    dpg.delete_item(dl, children_only=True)
+
+    # Background bar
+    dpg.draw_rectangle((0, 0), (vw, TICKER_H),
+                       fill=(*C["panel"][:3], 255),
+                       color=(0, 0, 0, 0), parent=dl)
+    dpg.draw_line((0, 0), (vw, 0), color=C["rule_dark"],
+                  thickness=1, parent=dl)
+    # Left "PATCH" pill
+    patch = patch_ticker.get_patch_version()
+    pill_label = f"PATCH {patch}" if patch else "THE RIFT"
+    pill_w = 8 + len(pill_label) * 8
+    dpg.draw_rectangle((0, 0), (pill_w + 12, TICKER_H),
+                       fill=(*C["gold_dk"][:3], 240),
+                       color=(0, 0, 0, 0), parent=dl)
+    t = dpg.draw_text((8, 6), pill_label,
+                      color=(*C["gold_lt"][:3], 255), size=14, parent=dl)
+    if "raj_sb_14" in _FONTS:
+        dpg.bind_item_font(t, _FONTS["raj_sb_14"])
+
+    # Marquee content
+    items = patch_ticker.get_ticker_items()
+    if not items:
+        return
+    sep   = "    ◆    "
+    text  = sep.join(items) + sep
+    # repeat enough times that the scrolling window always has content
+    full  = (text + text + text)
+    char_w = 8
+    full_px = len(full) * char_w
+    track_start = pill_w + 24
+
+    elapsed = time.monotonic() * _TICKER_PX_PER_SEC
+    offset  = int(elapsed) % max(1, len(text) * char_w)
+    x_draw  = track_start - offset
+
+    # Clip mask via a clip rectangle would be ideal — DPG draw_text doesn't
+    # auto-clip, so we just draw the long string starting at x_draw. Anything
+    # to the left of pill draws over the pill briefly when it wraps; cover by
+    # redrawing the pill on top below.
+    txt_id = dpg.draw_text((x_draw, 6), full,
+                           color=(*C["txt"][:3], 220),
+                           size=14, parent=dl)
+    if "raj_sb_14" in _FONTS:
+        dpg.bind_item_font(txt_id, _FONTS["raj_sb_14"])
+
+    # Re-paint pill on top so the marquee appears to slide out from behind it
+    dpg.draw_rectangle((0, 0), (pill_w + 12, TICKER_H),
+                       fill=(*C["gold_dk"][:3], 255),
+                       color=(0, 0, 0, 0), parent=dl)
+    t2 = dpg.draw_text((8, 6), pill_label,
+                       color=(*C["gold_lt"][:3], 255), size=14, parent=dl)
+    if "raj_sb_14" in _FONTS:
+        dpg.bind_item_font(t2, _FONTS["raj_sb_14"])
+    dpg.draw_line((pill_w + 12, 0), (pill_w + 12, TICKER_H),
+                  color=(*C["gold"][:3], 200), thickness=1, parent=dl)
+
+
+# ---------------------------------------------------------------------------
 # Content routing
 # ---------------------------------------------------------------------------
 def _draw_content(dl, w, h):
@@ -607,15 +676,19 @@ def main():
                     no_move=True, no_scrollbar=True):
         with dpg.drawlist(tag="titlebar_dl", width=WIN_W, height=TITLE_H):
             pass
+        _mid_h = WIN_H - TITLE_H - TICKER_H
         with dpg.group(horizontal=True):
-            with dpg.child_window(tag="sidebar_win", width=SIDEBAR_W, height=WIN_H-TITLE_H,
+            with dpg.child_window(tag="sidebar_win", width=SIDEBAR_W, height=_mid_h,
                                   border=False, no_scrollbar=True, no_scroll_with_mouse=True):
-                with dpg.drawlist(tag="sidebar_dl", width=SIDEBAR_W, height=WIN_H-TITLE_H):
+                with dpg.drawlist(tag="sidebar_dl", width=SIDEBAR_W, height=_mid_h):
                     pass
-            with dpg.child_window(tag="content_win", width=WIN_W-SIDEBAR_W, height=WIN_H-TITLE_H,
+            with dpg.child_window(tag="content_win", width=WIN_W-SIDEBAR_W, height=_mid_h,
                                   border=False, no_scrollbar=True, no_scroll_with_mouse=False):
                 with dpg.drawlist(tag="content_dl", width=WIN_W-SIDEBAR_W, height=3000):
                     pass
+        # Patch-ticker rail at the very bottom of the window
+        with dpg.drawlist(tag="ticker_dl", width=WIN_W, height=TICKER_H):
+            pass
 
     # --- Splash overlay window (on top of root) ---
     with dpg.window(tag="splash_win", no_title_bar=True, no_resize=True,
@@ -672,6 +745,9 @@ def main():
             _pending_update[0] = (latest_tag, download_url)
 
     check_for_update(__version__, on_done=_on_update_result)
+
+    # Kick off live patch/rotation ticker refresh in the background.
+    patch_ticker.start_background_refresh()
 
     _rankings_triggered   = [False]
     _scout_populated      = [False]
@@ -732,12 +808,13 @@ def main():
             _last_vp_size[0], _last_vp_size[1] = vw, vh
             sw        = _sb_w[0]
             content_w = vw - sw
-            content_h = vh - TITLE_H
+            content_h = vh - TITLE_H - TICKER_H
             dpg.configure_item("titlebar_dl",  width=vw,        height=TITLE_H)
             dpg.configure_item("sidebar_win",  width=sw,        height=content_h)
             dpg.configure_item("sidebar_dl",   width=sw,        height=content_h)
             dpg.configure_item("content_win",  width=content_w, height=content_h)
             dpg.configure_item("content_dl",   width=content_w)
+            dpg.configure_item("ticker_dl",    width=vw,        height=TICKER_H)
             dpg.configure_item("splash_win",   width=vw,        height=vh)
             dpg.configure_item("splash_dl",    width=vw,        height=vh)
             _draw_titlebar("titlebar_dl", vw)
@@ -764,7 +841,8 @@ def main():
 
         # Sidebar & content
         _sidebar_tick(vw, vh)
-        _draw_content("content_dl", vw-_sb_w[0], vh-TITLE_H)
+        _draw_content("content_dl", vw-_sb_w[0], vh-TITLE_H-TICKER_H)
+        _draw_ticker("ticker_dl", vw)
 
         # Kick off rankings reveal once splash is done
         if state.splash_done and not _rankings_triggered[0]:

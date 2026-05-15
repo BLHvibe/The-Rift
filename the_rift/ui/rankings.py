@@ -374,6 +374,56 @@ def _draw_delta(dl, x, y, delta, alpha):
         _txt(dl, x, y, "–", (*C["txt_dim"][:3], alpha), 13, "raj_sb_14")
 
 
+def _player_streak(raw_name):
+    """Return signed current streak for a player.
+    Positive = consecutive wins, negative = consecutive losses, 0 = none.
+    Looks up live.inhouse leaderboard (chronological recent_results: 1=W, 0=L).
+    """
+    try:
+        from data.reader import live
+        for p in (live.inhouse or []):
+            if p.get("player") == raw_name:
+                results = p.get("recent_results") or []
+                if not results:
+                    return 0
+                last = results[-1]
+                run = 0
+                for r in reversed(results):
+                    if r == last:
+                        run += 1
+                    else:
+                        break
+                return run if last else -run
+    except Exception:
+        pass
+    return 0
+
+
+def _draw_streak_medallion(dl, x, y, streak, alpha=255, min_streak=3):
+    """Draw a flame (win streak) or ice (loss streak) medallion next to a name.
+    Only shown when |streak| >= min_streak so it stays meaningful.
+    Returns the pixel width consumed (0 if nothing drawn).
+    """
+    if abs(streak) < min_streak:
+        return 0
+    if streak > 0:
+        glyph = "\U0001F525"   # 🔥
+        col   = (255, 140, 60)
+    else:
+        glyph = "❄"       # ❄
+        col   = (130, 200, 240)
+    label = f"{glyph}{abs(streak)}"
+    # Pill background
+    pw = 32
+    dpg.draw_rectangle((x, y), (x + pw, y + 18),
+                       fill=(*col, max(0, min(255, int(alpha * 0.18)))),
+                       color=(*col, max(0, min(255, int(alpha * 0.55)))),
+                       rounding=9, thickness=1, parent=dl)
+    dpg.draw_text((x + 4, y + 1), label,
+                  color=(*col, alpha), size=14, parent=dl)
+    return pw + 6
+
+
 def _name_link(dl, x, y, name_upper, raw_name, color, size, font_key=None):
     """Draw a player name as an underlined clickable link and register its hitbox."""
     tag = _txt(dl, x, y, name_upper, color, size, font_key)
@@ -661,6 +711,17 @@ def _draw_rest_rows(dl):
 
         name   = p.get("name","").upper()
         tier   = p.get("tier","Unranked")
+        # Rank-tier ambient tint — slow per-row pulse keyed off tier color.
+        _tc      = RANK_COLORS.get(tier, RANK_COLORS["Unranked"])
+        _t       = (math.sin(time.monotonic() * 1.2 + i * 0.4) + 1) / 2
+        _pulse_a = int((10 + _t * 22) * (al / 255.0))
+        dpg.draw_rectangle((rx+xo, ry),(rx+row_w+xo, ry+ROW_H),
+                           fill=(*_tc[:3], _pulse_a),
+                           color=(0,0,0,0), rounding=2, parent=dl)
+        # Left edge tier-color accent strip
+        dpg.draw_rectangle((rx+xo, ry),(rx+xo+3, ry+ROW_H),
+                           fill=(*_tc[:3], int(al * 0.75)),
+                           color=(0,0,0,0), rounding=1, parent=dl)
         fs     = str(p.get("final_score", p.get("score", "?")))
         rating = str(p.get("rating", tier[:1].upper()))
 

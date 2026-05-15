@@ -83,7 +83,7 @@ def draw_commands(dl, vw, vh, fonts=None):
                         color=(0,0,0,0), parent=dl)
     dpg.draw_line((0,TOP_BAR_H-1),(vw,TOP_BAR_H-1),
                   color=C["rule_dark"], thickness=1, parent=dl)
-    _txt(dl, PAD, 12, "ADMIN / COMMANDS", (*C["gold"][:3],220), 23, "raj_24")
+    _txt(dl, PAD, 12, "ADMIN / COMMANDS", (*C["gold"][:3],220), 22, "cinzel_22")
 
     # Overlay window: position relative to actual sidebar width, not hardcoded 68
     vp_w = dpg.get_viewport_width()

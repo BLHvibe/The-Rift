@@ -14,6 +14,10 @@ from core.animations import anim
 from data.reader import live, load_prediction_data, write_draft_picks, run_draft_subprocess, read_draft_results, write_activity_event
 from data.config import load_config
 from data import draft_engine as _eng
+from data.draft_board import (DraftBoardState, recommend_action,
+                              DRAFT_SEQUENCE)
+from data import draft_lcu
+from data import champion_icons
 from ui.effects import (draw_orbital_spinner, draw_drift_field,
                          draw_breathing_ring, breathing_alpha)
 
@@ -283,12 +287,13 @@ TEAM_FLASH_MS    = 280
 # State machine
 # ---------------------------------------------------------------------------
 class DraftPhase:
-    IDLE        = "idle"
+    IDLE        = "idle"          # now the mode-select landing
     TEAM_BUILD  = "team_build"
     ASSEMBLING  = "assembling"
     ANALYSING   = "analysing"
     RESULTS     = "results"
     DONE        = "done"
+    BOARD       = "board"         # interactive tournament-draft board
 
 
 class DraftState:
@@ -328,6 +333,20 @@ class DraftState:
         self.bg_running       = False
         self.bg_status        = ""
         self.prediction_ready = False
+        # Interactive draft board (tournament-draft mode)
+        self.board            = None    # DraftBoardState | None
+        self.board_rec        = None    # cached recommend_action() result
+        self.board_live       = False   # live Riot import vs manual entry
+        self.board_pool_page    = 0     # legacy (unused, kept for compat)
+        self.board_pool_search  = ""    # type-to-filter the manual pool grid
+        self.board_pool_scroll  = 0     # row offset for the scrollable pool grid
+        self._board_key_was_down = {}   # edge-detection for keyboard search input
+        self._board_top_call_sig  = None # (champ, tag) — detect rec change
+        self._board_top_call_anim = 1.0  # 0 = just appeared, 1 = settled
+        self.board_live_session = None  # latest parsed LCU snapshot | None
+        self.board_live_status  = ""    # poller status line for the header
+        self.board_live_stop    = False # poller stop flag
+        self._board_live_sig    = None  # last-mirrored snapshot signature
 
     def reset(self):
         self.__init__()
@@ -478,6 +497,25 @@ def _panel_bg(dl, x1, y1, x2, y2, accent_color=None, alpha=255):
                             fill=(*accent_color[:3], alpha),
                             color=(0,0,0,0), rounding=2, parent=dl)
 
+
+def _gradient_frame(dl, x1, y1, x2, y2, c_top, c_bot, alpha=255, layers=4):
+    """Draw a vertical-gradient frame around an existing panel.
+    Stacks `layers` rectangle outlines, each one pixel further out, with
+    color interpolated from c_top (outer) to c_bot (inner) — creates a
+    subtle team-color halo around the panel.
+    """
+    def lerp(a, b, t): return int(a + (b - a) * t)
+    for i in range(layers):
+        t = i / max(layers - 1, 1)
+        r = lerp(c_top[0], c_bot[0], t)
+        g = lerp(c_top[1], c_bot[1], t)
+        b = lerp(c_top[2], c_bot[2], t)
+        a = int(alpha * (1.0 - t * 0.55))  # outer brightest, fades inward
+        dpg.draw_rectangle((x1 - i, y1 - i), (x2 + i, y2 + i),
+                            fill=(0, 0, 0, 0),
+                            color=(r, g, b, a),
+                            thickness=1, rounding=6 + i, parent=dl)
+
 # ---------------------------------------------------------------------------
 # Full-screen drag-and-drop team builder
 # ---------------------------------------------------------------------------
@@ -495,17 +533,23 @@ class _TBState:
         self.drag      = None          # player dict being dragged
         self.drag_from = None          # ("pool",) | ("blue",i) | ("red",i)
         self.drag_pos  = (0, 0)
+        self.target    = "batch"       # "batch" | "board"
+        self.board_live = False        # board mode: live Riot import
+        self.board_side = "BLUE"       # board mode: which side is "us"
 
 _tb = _TBState()
 
 
-def _tb_open(vw, vh):
+def _tb_open(vw, vh, target="batch", board_live=False):
     pool = _get_player_pool()
     _tb.blue      = [None] * 5
     _tb.red       = [None] * 5
     _tb.pool      = list(pool)
     _tb.drag      = None
     _tb.drag_from = None
+    _tb.target    = target
+    _tb.board_live = board_live
+    _tb.board_side = "BLUE"
 
 
 def _tb_placed_names():
@@ -537,16 +581,41 @@ def _draw_team_builder_full(dl, vw, vh):
                         fill=(*C["panel"][:3], 235), color=(0,0,0,0), parent=dl)
     dpg.draw_line((0, hdr_h-1), (vw, hdr_h-1),
                   color=C["rule_dark"], thickness=1, parent=dl)
-    _txt(dl, vw//2 - 160, 11, "CONFIGURE TEAMS", (*C["gold"][:3], 230), 29, "raj_36")
+    _txt(dl, vw//2 - 180, 11, "CONFIGURE TEAMS", (*C["gold"][:3], 230), 29, "cinzel_28")
 
-    # BEGIN ANALYSIS button
+    # Board mode: "you are" side toggle (left of the action button)
+    if _tb.target == "board":
+        tg_w, tg_h = 150, 34
+        tg_x = vw - 220 - 110 - tg_w - 14
+        tg_y = (hdr_h - tg_h) // 2
+        is_blue = _tb.board_side == "BLUE"
+        dpg.draw_rectangle((tg_x, tg_y), (tg_x+tg_w, tg_y+tg_h),
+                            fill=(*C["card"][:3], 170),
+                            color=(*C["rule_dark"][:3], 160),
+                            rounding=4, parent=dl)
+        half = tg_w // 2
+        dpg.draw_rectangle(
+            (tg_x + (0 if is_blue else half), tg_y),
+            (tg_x + (half if is_blue else tg_w), tg_y+tg_h),
+            fill=(*(C["platinum"][:3] if is_blue else (210, 90, 90)), 150),
+            color=(0, 0, 0, 0), rounding=4, parent=dl)
+        _txt(dl, tg_x + 14, tg_y + 8, "BLUE",
+             (*C["gold_lt"][:3], 235 if is_blue else 150), 17, "raj_sb_18")
+        _txt(dl, tg_x + half + 18, tg_y + 8, "RED",
+             (*C["gold_lt"][:3], 235 if not is_blue else 150), 17, "raj_sb_18")
+        _txt(dl, tg_x, tg_y - 16, "YOU ARE",
+             (*C["txt2"][:3], 150), 12, "raj_sb_12")
+
+    # Action button (label depends on mode)
     bw, bh = 220, 38
     bx = vw - bw - 110
     by = (hdr_h - bh) // 2
+    _act_label = ("START DRAFT BOARD" if _tb.target == "board"
+                  else "BEGIN ANALYSIS")
     dpg.draw_rectangle((bx, by), (bx+bw, by+bh),
                         fill=(*C["gold_dk"][:3], 220), color=(*C["gold"][:3], 220),
                         rounding=4, parent=dl)
-    _txt(dl, bx + 14, by + 7, "BEGIN ANALYSIS", (*C["gold_lt"][:3], 230), 22, "raj_sb_22")
+    _txt(dl, bx + 14, by + 7, _act_label, (*C["gold_lt"][:3], 230), 22, "raj_sb_22")
 
     # CANCEL button
     cw, ch = 90, 38
@@ -681,6 +750,17 @@ def _draw_tb_card(dl, x, y, w, h, player, dragging=False):
                             fill=(*C["card"][:3], 240 if dragging else 180),
                             color=(*tc[:3], 220 if dragging else 150),
                             rounding=4, parent=dl)
+        # Rank-tier ambient backdrop: subtle pulsing tinted fill keyed to tier
+        # color. Higher tiers feel "lit"; low tiers stay dim/cool.
+        _t        = (math.sin(time.monotonic() * 1.4 + hash(name) % 100) + 1) / 2
+        _pulse_a  = int(18 + _t * 26)
+        dpg.draw_rectangle((x+1, y+1), (x+w-1, y+h-1),
+                            fill=(*tc[:3], _pulse_a),
+                            color=(0, 0, 0, 0), rounding=4, parent=dl)
+        # Bottom edge accent strip in tier color — anchors the glow
+        dpg.draw_rectangle((x+4, y+h-3), (x+w-4, y+h-1),
+                            fill=(*tc[:3], 130),
+                            color=(0, 0, 0, 0), rounding=1, parent=dl)
         _txt(dl, x+10, y+5,    name.upper(),      (*C["gold_lt"][:3], al), 23, "raj_24")
         _txt(dl, x+10, y+h-19, tier[:3].upper(),  (*tc[:3], int(al*0.85)), 20, "raj_sb_18")
         sc = _tb_score_str(player)
@@ -723,11 +803,23 @@ def _tb_handle_input(vw, vh):
 
     # ── Button clicks ─────────────────────────────────────────────
     if dpg.is_mouse_button_clicked(0):
+        # Board-mode "you are" side toggle
+        if _tb.target == "board":
+            tg_w, tg_h = 150, 34
+            tg_x = vw - 220 - 110 - tg_w - 14
+            tg_y = (hdr_h - tg_h) // 2
+            if tg_x <= mx <= tg_x+tg_w and tg_y <= my <= tg_y+tg_h:
+                _tb.board_side = "RED" if mx >= tg_x + tg_w // 2 else "BLUE"
+                return
+
         bw, bh = 220, 38
         bx = vw - bw - 110
         by = (hdr_h - bh) // 2
         if bx <= mx <= bx+bw and by <= my <= by+bh:
-            _tb_begin_analysis()
+            if _tb.target == "board":
+                _board_begin()
+            else:
+                _tb_begin_analysis()
             return
 
         cw3, ch3 = 90, 38
@@ -904,6 +996,932 @@ def _tb_begin_analysis():
 
     _analyse_teams(blue_players, red_players)
 
+
+# ---------------------------------------------------------------------------
+# Interactive tournament-draft board (U1 layout + U2 interaction)
+# ---------------------------------------------------------------------------
+
+_BOARD_TAG_COL = {
+    "POWER":  (230, 170, 60),
+    "SAFE":   (90, 180, 120),
+    "COUNTER": (212, 90, 80),
+    "FLEX":   (155, 140, 222),
+    "COMFORT": (150, 178, 208),
+    "BAN-P1": (212, 110, 90),
+    "BAN-P2": (212, 145, 80),
+}
+
+
+def _draw_glyph(dl, cx, cy, kind, size, color):
+    """Tiny vector glyph for tag chips. `size` ~= total span."""
+    s = max(3, size // 2)
+    col = color
+    if kind == "POWER":
+        # Lightning bolt — angular zigzag polygon
+        pts = [
+            (cx,        cy - s),
+            (cx - s + 1, cy - 1),
+            (cx - 1,    cy - 1),
+            (cx,        cy + s),
+            (cx + s - 1, cy + 1),
+            (cx + 1,    cy + 1),
+        ]
+        dpg.draw_polygon(pts, fill=col, color=(0, 0, 0, 0), parent=dl)
+    elif kind == "SAFE":
+        # Shield — flat top, pointed bottom
+        pts = [
+            (cx - s + 1, cy - s + 1),
+            (cx + s - 1, cy - s + 1),
+            (cx + s - 1, cy),
+            (cx,        cy + s),
+            (cx - s + 1, cy),
+        ]
+        dpg.draw_polygon(pts, fill=col, color=(0, 0, 0, 0), parent=dl)
+    elif kind == "COUNTER":
+        # Crossed swords
+        dpg.draw_line((cx - s + 1, cy - s + 1), (cx + s - 1, cy + s - 1),
+                      color=col, thickness=2.5, parent=dl)
+        dpg.draw_line((cx - s + 1, cy + s - 1), (cx + s - 1, cy - s + 1),
+                      color=col, thickness=2.5, parent=dl)
+    elif kind == "FLEX":
+        # Diamond
+        pts = [(cx, cy - s), (cx + s, cy), (cx, cy + s), (cx - s, cy)]
+        dpg.draw_polygon(pts, fill=col, color=(0, 0, 0, 0), parent=dl)
+    elif kind == "COMFORT":
+        # Checkmark
+        dpg.draw_line((cx - s + 1, cy + 1),
+                      (cx - 1,    cy + s - 2),
+                      color=col, thickness=2.5, parent=dl)
+        dpg.draw_line((cx - 1,    cy + s - 2),
+                      (cx + s,    cy - s + 2),
+                      color=col, thickness=2.5, parent=dl)
+    elif kind in ("BAN-P1", "BAN-P2"):
+        # Forbidden — circle + diagonal slash
+        dpg.draw_circle((cx, cy), s - 1, fill=(0, 0, 0, 0),
+                        color=col, thickness=2, parent=dl)
+        dpg.draw_line((cx - s + 2, cy - s + 2), (cx + s - 2, cy + s - 2),
+                      color=col, thickness=2, parent=dl)
+    else:
+        # Fallback dot
+        dpg.draw_circle((cx, cy), max(2, s - 2), fill=col,
+                        color=(0, 0, 0, 0), parent=dl)
+
+
+def _draw_portrait(dl, x, y, size, champ_name, fallback_color, alpha=255,
+                   rounding=6, border_w=2):
+    """Champion square portrait. Falls back to a colored placeholder with
+    the first letter of the champion name while the texture is loading
+    or missing. Always draws something in the (x, y, size, size) region."""
+    if champ_name:
+        try:
+            tex = champion_icons.get_texture(champ_name)
+        except Exception:
+            tex = None
+    else:
+        tex = None
+    if tex:
+        try:
+            dpg.draw_image(tex, (x, y), (x + size, y + size), parent=dl)
+        except Exception:
+            tex = None
+    if not tex:
+        # Placeholder: filled square in fallback color, first letter centered
+        dpg.draw_rectangle((x, y), (x + size, y + size),
+                           fill=(*C["bg"][:3], int(alpha * 0.78)),
+                           color=(*fallback_color[:3], int(alpha * 0.55)),
+                           thickness=border_w, rounding=rounding, parent=dl)
+        if champ_name:
+            ch = champ_name[:1].upper()
+            # Center the letter — rough heuristic for size at this scale
+            font_sz = max(14, int(size * 0.55))
+            font_key = None
+            if font_sz >= 44:
+                font_key = "raj_44"
+            elif font_sz >= 36:
+                font_key = "raj_36"
+            elif font_sz >= 28:
+                font_key = "raj_28"
+            elif font_sz >= 24:
+                font_key = "raj_24"
+            else:
+                font_key = "raj_20"
+            _txt(dl, x + size // 2 - font_sz // 3,
+                 y + size // 2 - font_sz // 2,
+                 ch, (*fallback_color[:3], alpha), font_sz, font_key)
+        return False
+    # Texture loaded — draw thin border on top for polish
+    dpg.draw_rectangle((x, y), (x + size, y + size),
+                       fill=(0, 0, 0, 0),
+                       color=(*fallback_color[:3], int(alpha * 0.85)),
+                       thickness=border_w, rounding=rounding, parent=dl)
+    return True
+
+
+def _draw_tag_chip(dl, x, y, tag, alpha=255, big=False):
+    """Filled pill with glyph + label. Returns the consumed width in px."""
+    if not tag:
+        return 0
+    col = _BOARD_TAG_COL.get(tag, C["txt"][:3])
+    h        = 28 if big else 22
+    txt_sz   = 15 if big else 13
+    font_key = "raj_sb_16" if big else "raj_sb_14"
+    glyph_d  = h - 10
+    label_w  = len(tag) * (8 if big else 7)
+    pad_l    = 10 if big else 8
+    pad_mid  = 6 if big else 5
+    pad_r    = 12 if big else 10
+    chip_w   = pad_l + glyph_d + pad_mid + label_w + pad_r
+    # Pill
+    dpg.draw_rectangle((x, y), (x + chip_w, y + h),
+                       fill=(*col, int(alpha * 0.88)),
+                       color=(*col, alpha),
+                       rounding=h // 2, parent=dl)
+    # Glyph (left)
+    glyph_cx = x + pad_l + glyph_d // 2
+    glyph_cy = y + h // 2
+    bg_col   = (*C["bg"][:3], alpha)
+    _draw_glyph(dl, glyph_cx, glyph_cy, tag, glyph_d, bg_col)
+    # Label
+    txt_x = glyph_cx + glyph_d // 2 + pad_mid
+    txt_y = y + (h - txt_sz) // 2 - 2
+    _txt(dl, txt_x, txt_y, tag, bg_col, txt_sz, font_key)
+    return chip_w
+
+# Click regions registered by _draw_board, consumed by _board_handle_input.
+# Each entry: (x, y, w, h, action, payload)
+_board_hits = []
+
+# Mouse position in content-area coords, updated each frame by _draw_board.
+# Lets every render helper compute hover state without re-doing the offset math.
+_mouse_xy = (0, 0)
+
+
+def _hover(x, y, w, h):
+    mx, my = _mouse_xy
+    return x <= mx <= x + w and y <= my <= y + h
+
+
+# Manual-pool rect (set each draw, read by the mouse-wheel handler so it
+# only scrolls when the cursor is actually over the pool region).
+_pool_rect = None
+
+# Mouse-wheel handler is registered once on the first board draw.
+_wheel_registered = [False]
+
+# Letter / digit keys for type-to-filter search input.
+_SEARCH_LETTER_KEYS = (
+    (dpg.mvKey_A, 'A'), (dpg.mvKey_B, 'B'), (dpg.mvKey_C, 'C'),
+    (dpg.mvKey_D, 'D'), (dpg.mvKey_E, 'E'), (dpg.mvKey_F, 'F'),
+    (dpg.mvKey_G, 'G'), (dpg.mvKey_H, 'H'), (dpg.mvKey_I, 'I'),
+    (dpg.mvKey_J, 'J'), (dpg.mvKey_K, 'K'), (dpg.mvKey_L, 'L'),
+    (dpg.mvKey_M, 'M'), (dpg.mvKey_N, 'N'), (dpg.mvKey_O, 'O'),
+    (dpg.mvKey_P, 'P'), (dpg.mvKey_Q, 'Q'), (dpg.mvKey_R, 'R'),
+    (dpg.mvKey_S, 'S'), (dpg.mvKey_T, 'T'), (dpg.mvKey_U, 'U'),
+    (dpg.mvKey_V, 'V'), (dpg.mvKey_W, 'W'), (dpg.mvKey_X, 'X'),
+    (dpg.mvKey_Y, 'Y'), (dpg.mvKey_Z, 'Z'),
+)
+_SEARCH_DIGIT_KEYS = (
+    (dpg.mvKey_0, '0'), (dpg.mvKey_1, '1'), (dpg.mvKey_2, '2'),
+    (dpg.mvKey_3, '3'), (dpg.mvKey_4, '4'), (dpg.mvKey_5, '5'),
+    (dpg.mvKey_6, '6'), (dpg.mvKey_7, '7'), (dpg.mvKey_8, '8'),
+    (dpg.mvKey_9, '9'),
+)
+
+
+def _filter_pool(pool, query):
+    """Case-insensitive substring filter on champion name in (champ, role) tuples."""
+    if not query:
+        return pool
+    q = query.upper()
+    return [(c, r) for c, r in pool if q in c.upper()]
+
+
+def _on_pool_wheel(sender, app_data):
+    """Mouse-wheel callback: scroll the manual-pool grid when hovered."""
+    if draft.phase != DraftPhase.BOARD or _pool_rect is None:
+        return
+    try:
+        mouse = dpg.get_mouse_pos(local=False)
+        vp = dpg.get_viewport_pos()
+    except Exception:
+        return
+    mx = mouse[0] - vp[0] - 68
+    my = mouse[1] - vp[1] - 52
+    px1, py1, px2, py2 = _pool_rect
+    if not (px1 <= mx <= px2 and py1 <= my <= py2):
+        return
+    # app_data: +1 wheel up, -1 wheel down — invert so up reduces scroll
+    delta = -int(app_data)
+    draft.board_pool_scroll = max(0, draft.board_pool_scroll + delta)
+
+
+def _ensure_board_wheel():
+    """Register the mouse-wheel handler once."""
+    if _wheel_registered[0]:
+        return
+    try:
+        with dpg.handler_registry():
+            dpg.add_mouse_wheel_handler(callback=_on_pool_wheel)
+        _wheel_registered[0] = True
+    except Exception:
+        pass
+
+
+def _board_begin():
+    """Build a DraftBoardState from the team-builder rosters and enter BOARD."""
+    pool_by_name = {p["name"]: p for p in _tb.pool}
+    blue_players, red_players = [], []
+    for i, role in enumerate(_ROLES):
+        bp_src = _tb.blue[i]
+        rp_src = _tb.red[i]
+        bn = bp_src["name"] if bp_src else f"Blue {i+1}"
+        rn = rp_src["name"] if rp_src else f"Red {i+1}"
+        bp = dict(pool_by_name.get(bn, {"name": bn, "tier": "Unranked",
+                                        "final_score": 50.0, "score": 50.0}))
+        rp = dict(pool_by_name.get(rn, {"name": rn, "tier": "Unranked",
+                                        "final_score": 50.0, "score": 50.0}))
+        bp["role"] = role
+        rp["role"] = role
+        blue_players.append(bp)
+        red_players.append(rp)
+    draft.board = DraftBoardState(blue_players, red_players,
+                                  our_side=_tb.board_side)
+    draft.board_live = _tb.board_live
+    draft.board_pool_search = ""
+    draft.board_pool_scroll = 0
+    draft.board_live_session = None
+    draft.board_live_status = ""
+    draft.board_live_stop = False
+    draft._board_live_sig = None
+    draft.phase = DraftPhase.BOARD
+    _board_recompute()
+    if draft.board_live:
+        import threading
+        threading.Thread(target=_lcu_poll_loop, daemon=True,
+                         name="lcu_poll").start()
+
+
+def _board_recompute():
+    b = draft.board
+    if b is None:
+        draft.board_rec = None
+        return
+    try:
+        draft.board_rec = recommend_action(
+            b, getattr(live, "inhouse_champs", {}) or {},
+            getattr(live, "primary_roles", {}) or {}, n=6)
+    except Exception as e:                       # pragma: no cover
+        draft.board_rec = {
+            "done": b.is_complete(), "action": b.current_action(),
+            "kind": None, "our_turn": False, "suggestions": [],
+            "target_comp": {}, "cohesion": [], "enemy_weakness": {},
+            "notes": [f"recommend error: {e}"]}
+
+
+def _board_apply(champ, role=None):
+    if draft.board is None or not champ:
+        return
+    if draft.board.apply(champ, role):
+        draft.board_pool_search = ""        # fresh action → reset search/scroll
+        draft.board_pool_scroll = 0
+        _board_recompute()
+
+
+def _lcu_poll_loop():
+    """Daemon: mirror the live League champ-select into draft.board_live_*.
+    Only writes plain attributes — the render thread does the actual board
+    mirror + recompute (same thread-safety pattern as the prediction thread)."""
+    import threading  # noqa: F401  (kept local; thread already running)
+    try:
+        cli = draft_lcu.connect()
+    except Exception:
+        cli = None
+    if cli is None:
+        draft.board_live_status = "League client not found - manual entry"
+        return
+    try:
+        idmap = draft_lcu.champion_id_map()
+    except Exception:
+        idmap = {}
+    draft.board_live_status = "Connected - waiting for champ select…"
+    while (draft.phase == DraftPhase.BOARD and draft.board_live
+           and not draft.board_live_stop):
+        try:
+            snap = draft_lcu.parse_session(cli.champ_select(), idmap)
+        except Exception:
+            snap = None
+        if snap:
+            draft.board_live_session = snap
+            draft.board_live_status = "LIVE - synced to champ select"
+        else:
+            draft.board_live_session = None
+            draft.board_live_status = "Connected - waiting for champ select…"
+        time.sleep(1.5)
+
+
+def _board_live_sync():
+    """Render-thread: fold the latest LCU snapshot into the board (only when
+    it changed) so recommendations track the live draft."""
+    snap = draft.board_live_session
+    if not snap or draft.board is None:
+        return
+    sig = (snap.get("our_side"),
+           snap.get("completed"),
+           tuple(sorted(snap.get("bans", {}).get("BLUE", []))),
+           tuple(sorted(snap.get("bans", {}).get("RED", []))),
+           tuple(sorted(snap.get("picks", {}).get("BLUE", {}).items())),
+           tuple(sorted(snap.get("picks", {}).get("RED", {}).items())))
+    if sig == draft._board_live_sig:
+        return
+    draft._board_live_sig = sig
+    draft.board.mirror(snap.get("picks", {}), snap.get("bans", {}),
+                       snap.get("completed", 0), snap.get("our_side"))
+    _board_recompute()
+
+
+def _board_legal_pool(state, action):
+    """[(champ, role|None)] the user may legally lock for `action`."""
+    used = state.used_champs()
+    rv = getattr(_eng, "ROLE_VALID", {}) or {}
+    if action.kind == "pick":
+        seen = {}
+        for r in state.open_roles(action.side):
+            for c in sorted(rv.get(r, ())):
+                if c not in used and c not in seen:
+                    seen[c] = r
+        return sorted(seen.items())
+    allc = set()
+    for r in _ROLES:
+        allc |= set(rv.get(r, ()))
+    return [(c, None) for c in sorted(allc) if c not in used]
+
+
+def _draw_board(dl, vw, vh):
+    _board_hits.clear()
+    _ensure_board_wheel()                   # one-time mouse-wheel handler
+    champion_icons.flush_pending()          # register any downloaded icons
+    global _mouse_xy
+    try:
+        mp = dpg.get_mouse_pos(local=False)
+        vp = dpg.get_viewport_pos()
+        _mouse_xy = (mp[0] - vp[0] - 68, mp[1] - vp[1] - 52)
+    except Exception:
+        _mouse_xy = (0, 0)
+    b = draft.board
+    if b is None:
+        draft.phase = DraftPhase.IDLE
+        return
+    if draft.board_live:
+        _board_live_sync()                 # fold latest LCU snapshot in
+    rec = draft.board_rec or {}
+    act = rec.get("action")
+    our = b.our_side
+    live_connected = (draft.board_live and draft.board_live_session
+                      is not None)
+
+    # ── Header ───────────────────────────────────────────────────────
+    hdr_h = 54
+    dpg.draw_rectangle((0, 0), (vw, hdr_h), fill=(*C["panel"][:3], 235),
+                       color=(0, 0, 0, 0), parent=dl)
+    dpg.draw_line((0, hdr_h - 1), (vw, hdr_h - 1),
+                  color=C["rule_dark"], thickness=1, parent=dl)
+    _txt(dl, 24, 10, "DRAFT BOARD", (*C["gold"][:3], 240), 32, "cinzel_32")
+    if draft.board_live:
+        st = draft.board_live_status or "Connecting…"
+        st_col = (90, 195, 175) if live_connected else (210, 160, 70)
+        _txt(dl, 260, 18, st[:46], (*st_col, 220), 17, "raj_sb_18")
+    else:
+        _txt(dl, 260, 18, "MANUAL", (*C["txt2"][:3], 200), 17, "raj_sb_18")
+    side_col = C["platinum"][:3] if our == "BLUE" else (215, 95, 95)
+    _txt(dl, vw - 340, 18, f"YOU: {our}", (*side_col, 235), 17, "raj_sb_18")
+
+    # UNDO (manual only — in live the client is authoritative) + EXIT
+    if not live_connected:
+        ub_w, ub_h = 100, 38
+        ub_x = vw - ub_w - 124
+        ub_y = (hdr_h - ub_h) // 2
+        can_undo = bool(b._history)
+        dpg.draw_rectangle((ub_x, ub_y), (ub_x+ub_w, ub_y+ub_h),
+                           fill=(*C["card"][:3], 175 if can_undo else 75),
+                           color=(*C["rule_dark"][:3], 170),
+                           rounding=5, parent=dl)
+        _txt(dl, ub_x + 22, ub_y + 8, "UNDO",
+             (*C["gold_lt"][:3], 230 if can_undo else 95), 20, "raj_sb_20")
+        if can_undo:
+            _board_hits.append((ub_x, ub_y, ub_w, ub_h, "undo", None))
+    cb_w, cb_h = 100, 38
+    cb_x = vw - cb_w - 14
+    cb_y = (hdr_h - cb_h) // 2
+    dpg.draw_rectangle((cb_x, cb_y), (cb_x+cb_w, cb_y+cb_h),
+                       fill=(*C["card"][:3], 165),
+                       color=(*C["rule_dark"][:3], 170), rounding=5, parent=dl)
+    _txt(dl, cb_x + 26, cb_y + 8, "EXIT", (*C["txt2"][:3], 210), 20, "raj_sb_20")
+    _board_hits.append((cb_x, cb_y, cb_w, cb_h, "exit", None))
+
+    # ── Timeline strip (20 actions) ──────────────────────────────────
+    tl_y = hdr_h + 10
+    phase_h = 24
+    cells_h = 64
+    tl_h    = phase_h + cells_h
+    cells_y = tl_y + phase_h
+    cell_w  = (vw - 32) / 20.0
+
+    # Phase header band: BANS 1 · PICKS 1 · BANS 2 · PICKS 2
+    PHASE_LABEL_COLOR = (*C["gold_lt"][:3], 215)
+    PHASE_DIV_COLOR   = (*C["gold_dk"][:3], 230)
+    phase_spans = (("BANS 1", 0, 6), ("PICKS 1", 6, 12),
+                   ("BANS 2", 12, 16), ("PICKS 2", 16, 20))
+    # Soft background under the phase labels
+    dpg.draw_rectangle((16, tl_y), (16 + 20 * cell_w, tl_y + phase_h),
+                       fill=(*C["panel"][:3], 200),
+                       color=(0, 0, 0, 0), rounding=3, parent=dl)
+    for label, start, end in phase_spans:
+        cx_lo = 16 + start * cell_w
+        cx_hi = 16 + end   * cell_w
+        lbl_w = len(label) * 8
+        lx    = cx_lo + ((cx_hi - cx_lo) - lbl_w) // 2
+        _txt(dl, lx, tl_y + 5, label, PHASE_LABEL_COLOR, 14, "raj_sb_14")
+    # Vertical dividers between phases (after action 5, 11, 15)
+    for boundary in (6, 12, 16):
+        bx = int(16 + boundary * cell_w)
+        dpg.draw_line((bx, tl_y), (bx, cells_y + cells_h),
+                      color=PHASE_DIV_COLOR, thickness=2, parent=dl)
+    # Outer baseline under the whole timeline
+    dpg.draw_line((16, cells_y + cells_h),
+                  (int(16 + 20 * cell_w), cells_y + cells_h),
+                  color=(*C["rule_dark"][:3], 200),
+                  thickness=1, parent=dl)
+
+    for a in DRAFT_SEQUENCE:
+        cx0 = 16 + a.idx * cell_w
+        is_cur = (act is not None and a.idx == act.idx)
+        done = a.idx < b.pointer
+        side_c = C["platinum"][:3] if a.side == "BLUE" else (210, 90, 90)
+        if is_cur:
+            pulse = (math.sin(time.monotonic() * 4) + 1) / 2
+            fill_a = int(70 + pulse * 90)
+        elif done:
+            fill_a = 60
+        else:
+            fill_a = 22
+        dpg.draw_rectangle((cx0 + 1, cells_y),
+                           (cx0 + cell_w - 1, cells_y + cells_h),
+                           fill=(*side_c, fill_a),
+                           color=(*side_c, 210 if is_cur else 80),
+                           thickness=2 if is_cur else 1,
+                           rounding=4, parent=dl)
+        kind_c = (C["gold_lt"][:3] if a.kind == "pick" else (210, 120, 100))
+        side_letter = "B" if a.side == "BLUE" else "R"
+        label_str = f"{side_letter} {a.kind.upper()}"
+        _txt(dl, cx0 + 6, cells_y + 6, label_str,
+             (*kind_c, 230 if (is_cur or done) else 140), 16, "raj_sb_16")
+        locked = b.locked_at(a.idx)         # exact (from history)
+        if locked:
+            _txt(dl, cx0 + 6, cells_y + 34, locked[:8],
+                 (*C["txt"][:3], 230), 18, "raj_sb_18")
+
+    # ── Team columns + center recommendation panel ───────────────────
+    body_y = tl_y + tl_h + 14
+    col_w = 250
+    cen_x = 16 + col_w + 16
+    cen_w = vw - 32 - (col_w + 16) * 2
+    body_h = vh - body_y - 14
+
+    _draw_board_team(dl, 16, body_y, col_w, body_h, b, "BLUE", act)
+    _draw_board_team(dl, vw - 16 - col_w, body_y, col_w, body_h, b, "RED", act)
+    _draw_board_center(dl, cen_x, body_y, cen_w, body_h, b, rec,
+                       interactive=not live_connected)
+
+
+def _draw_board_team(dl, x, y, w, h, b, side, act):
+    accent = C["platinum"][:3] if side == "BLUE" else (215, 95, 95)
+    _panel_bg(dl, x, y, x + w, y + h, accent, 255)
+    on_clock = (act is not None and act.side == side)
+    label = f"{side} TEAM" + ("   * ON THE CLOCK" if on_clock else "")
+    _txt(dl, x + 14, y + 12, label, (*accent, 235), 24, "raj_sb_24")
+    ry = y + 56
+    slot_h = 56
+    for i, role in enumerate(_ROLES):
+        pl = b.players[side][i]
+        champ = b.picks[side].get(role)
+        dpg.draw_rectangle((x + 10, ry), (x + w - 10, ry + slot_h),
+                           fill=(*C["card"][:3], 165),
+                           color=(*C["rule_dark"][:3], 135),
+                           rounding=5, parent=dl)
+        # Role accent stripe (left edge)
+        rc = _ROLE_COLORS.get(role, (120, 120, 120))
+        dpg.draw_rectangle((x + 10, ry), (x + 14, ry + slot_h),
+                           fill=(*rc, 220), color=(0, 0, 0, 0),
+                           rounding=2, parent=dl)
+        # Champion portrait (40×40, only when locked — otherwise blank)
+        port_sz = 40
+        port_x  = x + 20
+        port_y  = ry + (slot_h - port_sz) // 2
+        if champ:
+            _draw_portrait(dl, port_x, port_y, port_sz, champ, rc,
+                           alpha=240, rounding=5, border_w=2)
+        else:
+            # Subtle empty placeholder
+            dpg.draw_rectangle((port_x, port_y),
+                               (port_x + port_sz, port_y + port_sz),
+                               fill=(*C["bg"][:3], 110),
+                               color=(*rc, 80),
+                               thickness=1, rounding=5, parent=dl)
+        # Role + player text (shifted right of portrait)
+        txt_x = port_x + port_sz + 8
+        _txt(dl, txt_x, ry + 5, role, (*C["txt2"][:3], 190), 16, "raj_sb_16")
+        _txt(dl, txt_x, ry + 26, (pl.get("name", "?")[:8]),
+             (*C["txt"][:3], 225), 18, "raj_sb_18")
+        # Locked-champion name (right side, smaller now since portrait conveys identity)
+        cc = (*C["gold_lt"][:3], 240) if champ else (*C["txt2"][:3], 125)
+        cstr = (champ or "—")[:8]
+        ctw  = len(cstr) * 11
+        _txt(dl, x + w - 16 - ctw, ry + 20, cstr, cc, 19, "raj_sb_20")
+        ry += slot_h + 6
+    # bans row
+    _txt(dl, x + 14, ry + 6, "BANS", (*C["txt2"][:3], 185), 14, "raj_sb_14")
+    by = ry + 30
+    bw_each = (w - 28) // 5
+    for j in range(5):
+        bx = x + 14 + j * bw_each
+        ch = b.bans[side][j] if j < len(b.bans[side]) else None
+        dpg.draw_rectangle((bx, by), (bx + bw_each - 4, by + 32),
+                           fill=(*C["bg"][:3], 185),
+                           color=(210, 90, 90, 135), rounding=4, parent=dl)
+        _txt(dl, bx + 5, by + 7, (ch or "—")[:6],
+             (*(210, 130, 120), 230 if ch else 105), 14, "raj_sb_14")
+
+
+def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
+    _gradient_frame(dl, x, y, x + w, y + h,
+                    C["gold"][:3], C["gold_dk"][:3], alpha=150, layers=3)
+    _panel_bg(dl, x, y, x + w, y + h, C["gold"], 255)
+
+    if rec.get("done") or b.is_complete():
+        _txt(dl, x + w//2 - 120, y + h//2 - 60, "DRAFT COMPLETE",
+             (*C["gold"][:3], 235), 30, "cinzel_28")
+        _txt(dl, x + w//2 - 150, y + h//2 - 18,
+             "Full team comps locked - review the board",
+             (*C["txt2"][:3], 180), 16, "raj_sb_14")
+        nb_w, nb_h = 220, 46
+        nbx = x + w//2 - nb_w//2
+        nby = y + h//2 + 24
+        dpg.draw_rectangle((nbx, nby), (nbx+nb_w, nby+nb_h),
+                           fill=(*C["gold_dk"][:3], 220),
+                           color=(*C["gold"][:3], 220), rounding=6, parent=dl)
+        _txt(dl, nbx + 46, nby + 11, "NEW DRAFT",
+             (*C["gold_lt"][:3], 235), 22, "raj_sb_22")
+        _board_hits.append((nbx, nby, nb_w, nb_h, "new", None))
+        return
+
+    act = rec.get("action")
+    our_turn = rec.get("our_turn")
+
+    # ── Side-tinted top edge stripe (subtle side identity wash) ──────
+    if act:
+        side_tint = (90, 160, 240) if act.side == "BLUE" else (220, 110, 110)
+        for i in range(10):
+            ta = int(38 * (1 - i / 10))
+            dpg.draw_line((x + 6, y + 2 + i),
+                          (x + w - 6, y + 2 + i),
+                          color=(*side_tint, ta),
+                          thickness=1, parent=dl)
+
+    # ── Action banner: side-tinted, phase + step counter ─────────────
+    banner = (220, 170, 60) if our_turn else (120, 130, 150)
+    dpg.draw_rectangle((x + 10, y + 10), (x + w - 10, y + 68),
+                       fill=(*banner, 55), color=(*banner, 215),
+                       thickness=2, rounding=5, parent=dl)
+    if act:
+        head = f"{'YOUR' if our_turn else 'OPPONENT'} {act.kind.upper()}"
+        sub = f"{act.label}  ·  phase {act.phase}  ·  step {act.idx+1}/20"
+    else:
+        head, sub = "—", ""
+    _txt(dl, x + 22, y + 18, head, (*C["gold_lt"][:3], 240), 26, "raj_sb_26")
+    _txt(dl, x + 22, y + 48, sub, (*C["txt2"][:3], 215), 15, "raj_sb_16")
+
+    ny = y + 80
+    tc = rec.get("target_comp") or {}
+    if tc.get("label"):
+        _txt(dl, x + 16, ny, f"BUILD  ->  {tc.get('label','')[:42]}",
+             (*C["gold"][:3], 225), 16, "raj_sb_16")
+        ny += 23
+    # Phase reason (the meaningful note, not the redundant header echo)
+    for note in (rec.get("notes") or [])[1:2]:
+        _txt(dl, x + 16, ny, note[:62], (*C["txt2"][:3], 205),
+             14, "raj_sb_14")
+        ny += 21
+    for cw_ in (rec.get("cohesion") or [])[:2]:
+        _txt(dl, x + 16, ny, f"!  {cw_[:56]}", (220, 140, 90, 230),
+             15, "raj_sb_16")
+        ny += 21
+    for exp in (rec.get("exploit") or [])[:2]:
+        _txt(dl, x + 16, ny, f"EXPLOIT  {exp[:52]}", (90, 195, 175, 230),
+             15, "raj_sb_16")
+        ny += 21
+
+    # ── PRIMARY CALL — the #1 recommendation, emphasised ─────────────
+    sug = rec.get("suggestions") or []
+    pool_region_h = 240
+    if sug:
+        s0 = sug[0]
+        tag = s0.get("tag", "")
+        tcol = _BOARD_TAG_COL.get(tag, C["platinum"][:3])
+        pc_h = 110
+        ny += 8
+
+        # Detect recommendation change → trigger slide-up ease-in
+        sig = (s0.get("champion", ""), tag)
+        if sig != draft._board_top_call_sig:
+            draft._board_top_call_sig = sig
+            draft._board_top_call_anim = 0.0
+            def _set_tc(v):
+                draft._board_top_call_anim = v
+            anim.tween(0.0, 1.0, 300, "out_cubic", on_update=_set_tc)
+        t = draft._board_top_call_anim
+        anim_dy = int((1 - t) * 16)
+        card_y = ny + anim_dy
+
+        # Hover detection (brightens border, slight halo bump)
+        hovered = (interactive
+                   and _hover(x + 14, card_y, w - 28, pc_h))
+
+        # Halo glow — tag-colored radiating outlines around the card (subtle)
+        halo_dk = (max(0, tcol[0] - 90),
+                   max(0, tcol[1] - 90),
+                   max(0, tcol[2] - 90))
+        halo_alpha = 130 if hovered else 90
+        _gradient_frame(dl, x + 14, card_y, x + w - 14, card_y + pc_h,
+                        c_top=tcol, c_bot=halo_dk,
+                        alpha=halo_alpha, layers=4 if hovered else 3)
+        # Backdrop
+        dpg.draw_rectangle((x + 14, card_y), (x + w - 14, card_y + pc_h),
+                           fill=(*tcol, 50 if hovered else 42),
+                           color=(*tcol, 245 if hovered else 225),
+                           thickness=3 if hovered else 2,
+                           rounding=6, parent=dl)
+        # Champion portrait (left, 96×96 with tag-colored border)
+        portrait_sz = 96
+        port_x = x + 20
+        port_y = card_y + (pc_h - portrait_sz) // 2
+        _draw_portrait(dl, port_x, port_y, portrait_sz,
+                       s0.get("champion", ""), tcol,
+                       alpha=245, rounding=8, border_w=3)
+        # Text content shifted right of portrait
+        text_x = port_x + portrait_sz + 18
+        # "TOP CALL" caption + tag pill (same row)
+        _txt(dl, text_x, card_y + 14, "TOP CALL",
+             (*tcol, 230), 13, "raj_sb_14")
+        _draw_tag_chip(dl, text_x + 96, card_y + 9, tag, alpha=245, big=True)
+        # Champion name — the hero
+        _txt(dl, text_x, card_y + 44, s0.get("champion", "?")[:16],
+             (*C["gold_lt"][:3], 248), 36, "raj_36")
+        # Why text
+        _txt(dl, text_x, card_y + 88, str(s0.get("why", ""))[:54],
+             (*C["txt2"][:3], 220), 17, "raj_sb_18")
+        if interactive:
+            _board_hits.append((x + 14, ny, w - 28, pc_h, "pick",
+                                (s0.get("champion"), s0.get("role"))))
+        ny += pc_h + 14
+
+    # ── Alternatives ────────────────────────────────────────────────
+    if len(sug) > 1:
+        _txt(dl, x + 16, ny, "ALTERNATIVES", (*C["gold_lt"][:3], 215),
+             16, "raj_sb_16")
+        ny += 28
+        row_h = 52
+        for s in sug[1:6]:
+            if ny + row_h > y + h - pool_region_h:
+                break
+            tag = s.get("tag", "")
+            tcol = _BOARD_TAG_COL.get(tag, C["platinum"][:3])
+            # Hover lift — brighten border + fill on mouseover
+            alt_hover = (interactive
+                         and _hover(x + 14, ny, w - 28, row_h - 6))
+            # Backdrop card
+            dpg.draw_rectangle((x + 14, ny), (x + w - 14, ny + row_h - 6),
+                               fill=(*C["card"][:3], 210 if alt_hover else 175),
+                               color=(*tcol, 220 if alt_hover else 170),
+                               thickness=2 if alt_hover else 1,
+                               rounding=5, parent=dl)
+            # Mini tag pill (vertically centered with the row)
+            chip_h = 22
+            chip_y = ny + (row_h - 6 - chip_h) // 2
+            chip_w_used = _draw_tag_chip(dl, x + 22, chip_y, tag,
+                                          alpha=235, big=False)
+            # Champion portrait (40×40)
+            port_sz = 40
+            port_x  = x + 22 + chip_w_used + 12
+            port_y  = ny + (row_h - 6 - port_sz) // 2
+            _draw_portrait(dl, port_x, port_y, port_sz,
+                           s.get("champion", ""), tcol,
+                           alpha=235, rounding=5, border_w=2)
+            # Right column: champion name + why
+            cx_x = port_x + port_sz + 12
+            _txt(dl, cx_x, ny + 4, s.get("champion", "?")[:12],
+                 (*C["gold_lt"][:3], 240), 22, "raj_sb_22")
+            _txt(dl, cx_x, ny + 30, str(s.get("why", ""))[:42],
+                 (*C["txt2"][:3], 195), 14, "raj_sb_14")
+            if interactive:
+                _board_hits.append((x + 14, ny, w - 28, row_h - 6, "pick",
+                                    (s.get("champion"), s.get("role"))))
+            ny += row_h + 4
+
+    # ── Manual pool (bottom region: search box + scrollable grid) ────
+    global _pool_rect
+    if act is None:
+        _pool_rect = None
+        return
+    if not interactive:                    # live: client is authoritative
+        _pool_rect = None
+        py = y + h - 40
+        dpg.draw_line((x + 14, py), (x + w - 14, py),
+                      color=(*C["rule_dark"][:3], 150), thickness=1,
+                      parent=dl)
+        _txt(dl, x + 16, py + 10,
+             "Mirroring live champ select - picks/bans follow the client",
+             (90, 195, 175, 210), 15, "raj_sb_16")
+        return
+
+    py = y + h - pool_region_h
+    dpg.draw_line((x + 14, py), (x + w - 14, py),
+                  color=(*C["rule_dark"][:3], 150), thickness=1, parent=dl)
+
+    full_pool = _board_legal_pool(b, act)
+    filtered = _filter_pool(full_pool, draft.board_pool_search)
+
+    # Header: title (left) + result count (right)
+    _txt(dl, x + 16, py + 8, "OR LOCK ANY CHAMPION",
+         (*C["txt2"][:3], 215), 16, "raj_sb_16")
+    if draft.board_pool_search:
+        cnt_str = f"{len(filtered)} of {len(full_pool)}"
+    else:
+        cnt_str = f"{len(full_pool)} champions"
+    cnt_w = len(cnt_str) * 8
+    _txt(dl, x + w - 16 - cnt_w, py + 10, cnt_str,
+         (*C["txt_dim"][:3], 195), 14, "raj_sb_14")
+
+    # Search box
+    sb_y = py + 36
+    sb_h = 38
+    sb_x = x + 16
+    sb_w = w - 32
+    dpg.draw_rectangle((sb_x, sb_y), (sb_x + sb_w, sb_y + sb_h),
+                       fill=(*C["bg"][:3], 205),
+                       color=(*C["gold_dk"][:3], 210),
+                       thickness=2, rounding=6, parent=dl)
+    _txt(dl, sb_x + 14, sb_y + 10, "SEARCH",
+         (*C["txt2"][:3], 180), 14, "raj_sb_14")
+    # Vertical divider after the SEARCH label
+    dpg.draw_line((sb_x + 84, sb_y + 8), (sb_x + 84, sb_y + sb_h - 8),
+                  color=(*C["rule_dark"][:3], 170),
+                  thickness=1, parent=dl)
+    # Query text with blinking caret
+    cursor = "|" if int(time.monotonic() * 2) % 2 == 0 else " "
+    if draft.board_pool_search:
+        _txt(dl, sb_x + 96, sb_y + 6,
+             draft.board_pool_search + cursor,
+             (*C["gold_lt"][:3], 240), 22, "raj_sb_22")
+    else:
+        _txt(dl, sb_x + 96, sb_y + 8, cursor,
+             (*C["gold_lt"][:3], 200), 22, "raj_sb_22")
+        _txt(dl, sb_x + 108, sb_y + 10, "type to filter…",
+             (*C["txt_dim"][:3], 150), 17, "raj_sb_18")
+    # Clear "X" button (only when there's text)
+    if draft.board_pool_search:
+        cx_x = sb_x + sb_w - 36
+        cx_y = sb_y + 7
+        dpg.draw_rectangle((cx_x, cx_y), (cx_x + 24, cx_y + 24),
+                           fill=(*C["card"][:3], 180),
+                           color=(*C["rule_dark"][:3], 170),
+                           rounding=4, parent=dl)
+        _txt(dl, cx_x + 7, cx_y + 3, "X",
+             (*C["gold_lt"][:3], 225), 18, "raj_sb_18")
+        _board_hits.append((cx_x, cx_y, 24, 24, "clear_search", None))
+
+    # Grid: scrollable, bigger cells
+    gy0 = sb_y + sb_h + 8
+    grid_bottom = y + h - 10
+    gx_n = max(1, sb_w // 124)
+    gw = sb_w // gx_n
+    gh = 38
+    visible_rows = max(1, (grid_bottom - gy0) // gh)
+    total_rows = (len(filtered) + gx_n - 1) // gx_n if filtered else 0
+    max_scroll = max(0, total_rows - visible_rows)
+    draft.board_pool_scroll = max(0, min(draft.board_pool_scroll, max_scroll))
+
+    # Stash region for the wheel handler
+    _pool_rect = (sb_x, gy0, sb_x + sb_w, grid_bottom)
+
+    if not filtered:
+        _txt(dl, sb_x + 14, gy0 + 12,
+             f"No champions match  '{draft.board_pool_search}'",
+             (*C["txt_dim"][:3], 200), 16, "raj_sb_16")
+        return
+
+    start = draft.board_pool_scroll * gx_n
+    end = start + visible_rows * gx_n
+    for k_rel, (cmp_, role) in enumerate(filtered[start:end]):
+        gx = sb_x + (k_rel % gx_n) * gw
+        gy = gy0 + (k_rel // gx_n) * gh
+        cell_hover = _hover(gx + 2, gy + 2, gw - 4, gh - 4)
+        dpg.draw_rectangle((gx + 2, gy + 2), (gx + gw - 4, gy + gh - 4),
+                           fill=(*C["bg"][:3], 220 if cell_hover else 170),
+                           color=(*C["gold_lt"][:3], 220) if cell_hover
+                                 else (*C["rule_dark"][:3], 140),
+                           thickness=2 if cell_hover else 1,
+                           rounding=4, parent=dl)
+        _txt(dl, gx + 9, gy + 8, cmp_[:12],
+             (*C["gold_lt"][:3], 245) if cell_hover
+             else (*C["txt"][:3], 230),
+             16, "raj_sb_16")
+        _board_hits.append((gx + 2, gy + 2, gw - 4, gh - 4, "pick",
+                            (cmp_, role)))
+
+    # Scrollbar indicator on the right edge
+    if max_scroll > 0:
+        sb_track_x = sb_x + sb_w - 6
+        sb_track_y0 = gy0 + 2
+        sb_track_y1 = grid_bottom - 2
+        track_h = sb_track_y1 - sb_track_y0
+        dpg.draw_rectangle((sb_track_x, sb_track_y0),
+                           (sb_track_x + 4, sb_track_y1),
+                           fill=(*C["rule_dark"][:3], 110),
+                           color=(0, 0, 0, 0), rounding=2, parent=dl)
+        thumb_frac = max(0.08, visible_rows / max(total_rows, 1))
+        thumb_h = max(22, int(track_h * thumb_frac))
+        thumb_pos = int((draft.board_pool_scroll / max_scroll)
+                        * (track_h - thumb_h))
+        dpg.draw_rectangle((sb_track_x,
+                            sb_track_y0 + thumb_pos),
+                           (sb_track_x + 4,
+                            sb_track_y0 + thumb_pos + thumb_h),
+                           fill=(*C["gold_lt"][:3], 210),
+                           color=(0, 0, 0, 0), rounding=2, parent=dl)
+
+
+def _board_handle_input(vw, vh):
+    # ── Keyboard: type-to-filter the manual pool ─────────────────────
+    kw = draft._board_key_was_down
+    for key, ch in _SEARCH_LETTER_KEYS:
+        down = dpg.is_key_down(key)
+        if down and not kw.get(key, False):
+            draft.board_pool_search += ch
+            draft.board_pool_scroll = 0
+        kw[key] = down
+    for key, ch in _SEARCH_DIGIT_KEYS:
+        down = dpg.is_key_down(key)
+        if down and not kw.get(key, False):
+            draft.board_pool_search += ch
+            draft.board_pool_scroll = 0
+        kw[key] = down
+    # Backspace pops last char
+    bs = dpg.mvKey_Back
+    bs_down = dpg.is_key_down(bs)
+    if bs_down and not kw.get(bs, False) and draft.board_pool_search:
+        draft.board_pool_search = draft.board_pool_search[:-1]
+        draft.board_pool_scroll = 0
+    kw[bs] = bs_down
+    # Arrow keys scroll the grid (one row at a time)
+    for key, step in ((dpg.mvKey_Down, 1), (dpg.mvKey_Up, -1),
+                      (dpg.mvKey_Next, 5), (dpg.mvKey_Prior, -5)):
+        d = dpg.is_key_down(key)
+        if d and not kw.get(key, False):
+            draft.board_pool_scroll = max(0, draft.board_pool_scroll + step)
+        kw[key] = d
+
+    # ── Mouse clicks against registered hit rects ────────────────────
+    mouse = dpg.get_mouse_pos(local=False)
+    vp = dpg.get_viewport_pos()
+    mx = mouse[0] - vp[0] - 68
+    my = mouse[1] - vp[1] - 52
+    if not dpg.is_mouse_button_clicked(0):
+        return
+    for (hx, hy, hw, hh, kind, payload) in list(_board_hits):
+        if hx <= mx <= hx + hw and hy <= my <= hy + hh:
+            if kind == "exit":
+                draft.board_live_stop = True
+                draft.phase = DraftPhase.IDLE
+            elif kind == "undo":
+                if draft.board and draft.board.undo():
+                    draft.board_pool_scroll = 0
+                    draft.board_pool_search = ""
+                    _board_recompute()
+            elif kind == "new":
+                draft.board_live_stop = True
+                draft.board = None
+                draft.board_rec = None
+                draft.board_pool_scroll = 0
+                draft.board_pool_search = ""
+                draft.phase = DraftPhase.IDLE
+            elif kind == "clear_search":
+                draft.board_pool_search = ""
+                draft.board_pool_scroll = 0
+            elif kind == "pick" and payload:
+                _board_apply(payload[0], payload[1])
+            return
+
+
 # ---------------------------------------------------------------------------
 # Background draft pipeline
 # ---------------------------------------------------------------------------
@@ -1054,6 +2072,11 @@ def draw_draft(dl, vw, vh, fonts=None):
         _tb_handle_input(vw, vh)
         return
 
+    if phase == DraftPhase.BOARD:
+        _draw_board(dl, vw, vh)
+        _board_handle_input(vw, vh)
+        return
+
     team_h  = int(vh * 0.42)
     panel_y = team_h + 16
     pad     = 18
@@ -1074,51 +2097,99 @@ def draw_draft(dl, vw, vh, fonts=None):
             _draw_red_panel (dl, pad*3 + col_w*2,  panel_y, col_w, ph, ar)
 
 
+def _mode_cards(vw, vh):
+    """Geometry for the three mode-select cards. Returns list of
+    (key, x, y, w, h, title, subtitle)."""
+    cw, chh = 300, 188
+    gap = 28
+    total = cw * 3 + gap * 2
+    x0 = vw // 2 - total // 2
+    y0 = vh // 2 - chh // 2 + 24
+    return [
+        ("batch", x0,                 y0, cw, chh, "BATCH ANALYSIS",
+         "Assign 10 players, get bans / comps / win-meter at once"),
+        ("board_manual", x0+cw+gap,   y0, cw, chh, "DRAFT BOARD",
+         "Tournament pick/ban order - advice each slot (manual)"),
+        ("board_live", x0+(cw+gap)*2, y0, cw, chh, "DRAFT BOARD - LIVE",
+         "Auto-follow an in-progress Riot champ select"),
+    ]
+
+
 def _draw_idle(dl, vw, vh):
-    cx, cy = vw // 2, vh // 2
-    # Ambient drift field behind the idle title
+    """Mode-select landing shown when the Draft tab opens."""
+    cx = vw // 2
     draw_drift_field(dl, 0, 0, vw, vh, alpha=180,
                      accent=C["gold"][:3], n_dots=22, seed=11)
     t = (math.sin(time.monotonic() * 1.2) + 1) / 2
-    a = int(100 + t * 120)
+    a = int(150 + t * 90)
 
-    _txt(dl, cx - 240, cy - 60, "DRAFT WAR ROOM",
-         (*C["gold"][:3], a), 44, "raj_44")
-    _txt(dl, cx - 200, cy - 4, "Build your teams and run the analysis",
-         (*C["txt2"][:3], int(a * 0.7)), 23, "raj_20")
+    _txt(dl, cx - 150, vh // 2 - 150, "DRAFT WAR ROOM",
+         (*C["gold"][:3], a), 40, "cinzel_44")
+    _txt(dl, cx - 132, vh // 2 - 104, "Choose how you want to draft",
+         (*C["txt2"][:3], 180), 21, "raj_20")
 
-    bw, bh = 320, 64
-    bx, by = cx - bw//2, cy + 40
-    dpg.draw_rectangle((bx, by),(bx+bw, by+bh),
-                        fill=(*C["gold_dk"][:3], 220),
-                        color=(*C["gold"][:3], 220),
-                        rounding=6, parent=dl)
-    _txt(dl, bx + bw//2 - 130, by + 14, "CONFIGURE TEAMS",
-         (*C["gold_lt"][:3], 230), 29, "raj_36")
+    mp = dpg.get_mouse_pos(local=False)
+    vp = dpg.get_viewport_pos()
+    rx = mp[0] - vp[0] - 68
+    ry = mp[1] - vp[1] - 52
 
-    # ANALYSE DRAFT — shown when a previous draft has teams assigned
+    for key, x, y, w, h, title, sub in _mode_cards(vw, vh):
+        hot = x <= rx <= x + w and y <= ry <= y + h
+        _panel_bg(dl, x, y, x + w, y + h,
+                  accent_color=C["gold"] if hot else C["platinum"],
+                  alpha=255)
+        if hot:
+            dpg.draw_rectangle((x, y), (x + w, y + h),
+                               fill=(*C["gold"][:3], 16),
+                               color=(*C["gold"][:3], 200),
+                               rounding=6, parent=dl)
+        _txt(dl, x + 20, y + 28, title, (*C["gold_lt"][:3], 235),
+             25, "raj_sb_24")
+        # word-wrapped subtitle
+        words, line, ly = sub.split(), "", y + 76
+        for wd in words:
+            if len(line) + len(wd) + 1 > 30:
+                _txt(dl, x + 20, ly, line, (*C["txt2"][:3], 190),
+                     16, "raj_sb_14")
+                ly += 22
+                line = wd
+            else:
+                line = (line + " " + wd).strip()
+        if line:
+            _txt(dl, x + 20, ly, line, (*C["txt2"][:3], 190),
+                 16, "raj_sb_14")
+        _txt(dl, x + 20, y + h - 34,
+             "CLICK TO START", (*C["gold"][:3], 200 if hot else 110),
+             15, "raj_sb_14")
+
+    # Re-analyse a previous batch draft, if one exists
     has_prev = bool(draft.blue and len(draft.blue) > 0 and
                     any(isinstance(p, dict) for p in draft.blue))
-    abw, abh = 280, 52
+    abw, abh = 260, 44
     abx = cx - abw // 2
-    aby = by + bh + 18
+    aby = vh // 2 + 150
     if has_prev:
-        dpg.draw_rectangle((abx, aby),(abx+abw, aby+abh),
-                            fill=(*C["card"][:3], 200),
-                            color=(*C["platinum"][:3], 200),
+        dpg.draw_rectangle((abx, aby), (abx + abw, aby + abh),
+                            fill=(*C["card"][:3], 190),
+                            color=(*C["platinum"][:3], 180),
                             rounding=6, parent=dl)
-        _txt(dl, abx + 24, aby + 10, "ANALYSE DRAFT",
-             (*C["platinum"][:3], int(a * 0.95)), 27, "raj_36")
+        _txt(dl, abx + 22, aby + 9, "RE-ANALYSE PREVIOUS DRAFT",
+             (*C["platinum"][:3], 220), 18, "raj_sb_18")
 
     if dpg.is_mouse_button_clicked(0):
-        mouse = dpg.get_mouse_pos(local=False)
-        vp    = dpg.get_viewport_pos()
-        rx    = mouse[0] - vp[0] - 68
-        ry    = mouse[1] - vp[1] - 52
-        if bx <= rx <= bx+bw and by <= ry <= by+bh:
-            draft.phase = DraftPhase.TEAM_BUILD
-            _tb_open(vw, vh)
-        elif has_prev and abx <= rx <= abx+abw and aby <= ry <= aby+abh:
+        for key, x, y, w, h, _t, _s in _mode_cards(vw, vh):
+            if x <= rx <= x + w and y <= ry <= y + h:
+                if key == "batch":
+                    draft.phase = DraftPhase.TEAM_BUILD
+                    _tb_open(vw, vh, target="batch")
+                elif key == "board_manual":
+                    draft.phase = DraftPhase.TEAM_BUILD
+                    _tb_open(vw, vh, target="board", board_live=False)
+                elif key == "board_live":
+                    draft.phase = DraftPhase.TEAM_BUILD
+                    _tb_open(vw, vh, target="board", board_live=True)
+                return
+        if has_prev and abx <= rx <= abx + abw and aby <= ry <= aby + abh:
             _analyse_teams(list(draft.blue), list(draft.red))
 
 # ---------------------------------------------------------------------------
@@ -2003,7 +3074,7 @@ def _draw_strategy_panel(dl, px, py, pw, ph, al, header, header_col,
                          bans, comps, ban_detail=None, comp_detail=None,
                          opposing_comp_detail=None):
     _panel_bg(dl, px, py, px+pw, py+ph, header_col, al)
-    _txt(dl, px+18, py+14, header, (*header_col[:3], al), 23, "raj_sb_22")
+    _txt(dl, px+18, py+14, header, (*header_col[:3], al), 22, "cinzel_22")
     dpg.draw_line((px+18, py+48),(px+pw-18, py+48),
                   color=(*C["rule_dark"][:3], al), thickness=1, parent=dl)
 
@@ -2058,6 +3129,9 @@ def _draw_blue_panel(dl, px, py, pw, ph, al):
                          ban_detail=draft.ban_detail_blue or None,
                          comp_detail=draft.comp_detail_blue or None,
                          opposing_comp_detail=draft.comp_detail_red or None)
+    # Team-color gradient halo (bright blue → deep navy)
+    _gradient_frame(dl, px, py, px + pw, py + ph,
+                    c_top=(90, 160, 240), c_bot=(20, 36, 84), alpha=al)
 
 
 def _draw_lane_card(dl, px, py, pw, ph, role, blue_name, red_name,
@@ -2174,7 +3248,7 @@ def _draw_pvp_panel(dl, px, py, pw, ph, al):
     _panel_bg(dl, px, py, px+pw, py+ph, C["gold"], al)
 
     _txt(dl, px+18, py+14, "LANE ADVANTAGE",
-         (*C["gold"][:3], al), 23, "raj_sb_22")
+         (*C["gold"][:3], al), 22, "cinzel_22")
     dpg.draw_line((px+18, py+48),(px+pw-18, py+48),
                   color=(*C["rule_dark"][:3], al), thickness=1, parent=dl)
 
@@ -2213,3 +3287,6 @@ def _draw_red_panel(dl, px, py, pw, ph, al):
                          ban_detail=draft.ban_detail_red or None,
                          comp_detail=draft.comp_detail_red or None,
                          opposing_comp_detail=draft.comp_detail_blue or None)
+    # Team-color gradient halo (bright red → deep maroon)
+    _gradient_frame(dl, px, py, px + pw, py + ph,
+                    c_top=(240, 120, 120), c_bot=(96, 24, 24), alpha=al)

@@ -466,7 +466,7 @@ def _draw_idle(dl, vw, vh):
     cx, cy = vw//2, vh//2
     t = (math.sin(time.monotonic()*1.3)+1)/2
     a = int(90 + t*110)
-    _txt(dl, cx-180, cy-30, "IN-HOUSE CUSTOMS", (*C["gold"][:3], a), 36, "raj_36")
+    _txt(dl, cx-220, cy-30, "IN-HOUSE CUSTOMS", (*C["gold"][:3], a), 36, "cinzel_36")
     hint = "Connecting to Google Sheets…" if not live.loaded else "No in-house data found"
     _txt(dl, cx-165, cy+14, hint, (*C["txt_dim"][:3], int(a*0.6)), 19, "raj_18")
 

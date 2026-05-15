@@ -135,8 +135,11 @@ def setup_fonts():
 
     fonts = {}
     with dpg.font_registry():
-        # Cinzel Decorative — splash title only
-        for size, key in [(52, "cinzel_52"), (28, "cinzel_28"), (20, "cinzel_20")]:
+        # Cinzel Decorative — splash + ceremonial headers (tab titles, panel titles)
+        for size, key in [(52, "cinzel_52"), (44, "cinzel_44"), (36, "cinzel_36"),
+                          (32, "cinzel_32"), (28, "cinzel_28"), (24, "cinzel_24"),
+                          (22, "cinzel_22"), (20, "cinzel_20"), (18, "cinzel_18"),
+                          (16, "cinzel_16"), (14, "cinzel_14")]:
             path = os.path.join(font_dir, "CinzelDecorative-Bold.ttf")
             if os.path.exists(path):
                 fonts[key] = dpg.add_font(path, size)

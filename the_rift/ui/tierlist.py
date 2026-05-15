@@ -336,7 +336,7 @@ def _draw_detection_screen(dl, vw, vh):
         return
 
     # --- Normal detection screen ---
-    _txt(dl, cx - 120, cy - 80, "TIER LIST", (*C["gold"][:3], a), 44, "raj_44")
+    _txt(dl, cx - 140, cy - 80, "TIER LIST", (*C["gold"][:3], a), 44, "cinzel_44")
     _txt(dl, cx - 168, cy - 20, "Identify yourself to begin rating",
          (*C["txt_dim"][:3], int(a * 0.7)), 17, "raj_r_16")
 
@@ -477,7 +477,7 @@ def _draw_top_bar(dl, vw):
                         color=(0,0,0,0), parent=dl)
     dpg.draw_line((0,TOP_BAR_H-1),(vw,TOP_BAR_H-1),
                   color=C["rule_dark"], thickness=1, parent=dl)
-    _txt(dl, PAD, 12, "TIER LIST BUILDER", (*C["gold"][:3],220), 23, "raj_24")
+    _txt(dl, PAD, 12, "TIER LIST BUILDER", (*C["gold"][:3],220), 22, "cinzel_22")
     _txt(dl, PAD+270, 18, "Drag players from the pool into tiers  ·  Right-click a card to remove",
          (*C["txt_dim"][:3],150), 17, "raj_r_16")
 

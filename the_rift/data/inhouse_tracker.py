@@ -356,6 +356,20 @@ def compute_stats_from_log(records):
                 break
         ps["win_streak"] = streak
 
+        # Signed current streak: positive = win streak, negative = loss streak.
+        # Surfaces "on fire" / "in slump" medallions in the UI.
+        if outcomes:
+            last = outcomes[-1]
+            run = 0
+            for w in reversed(outcomes):
+                if w == last:
+                    run += 1
+                else:
+                    break
+            ps["current_streak"] = run if last else -run
+        else:
+            ps["current_streak"] = 0
+
         best = cur = 0
         for win in outcomes:
             cur = cur + 1 if win else 0

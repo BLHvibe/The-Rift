@@ -156,6 +156,30 @@ def _read_rank_data_games(sh):
         return {}
 
 
+def _read_rank_data_current(sh):
+    """Read each player's actual current Riot rank from the Rank Data tab.
+    Returns {display_name: {"tier": "Diamond", "division": "II"}}."""
+    try:
+        ws   = sh.worksheet("Rank Data")
+        rows = ws.get_all_values()
+        result = {}
+        for row in rows[2:]:
+            if len(row) < 4 or not row[1]:
+                continue
+            name = str(row[1]).strip()
+            tier_raw = str(row[2]).strip()
+            div_raw  = str(row[3]).strip()
+            if not tier_raw:
+                continue
+            result[name] = {
+                "tier":     _normalise_tier(tier_raw),
+                "division": div_raw,
+            }
+        return result
+    except Exception:
+        return {}
+
+
 # ---------------------------------------------------------------------------
 # Players tab → roster + summoner map
 # ---------------------------------------------------------------------------
@@ -212,6 +236,11 @@ def _read_final_rankings(sh):
     if len(rows) < 2:
         return _read_rank_data(sh)
 
+    # Pull actual current Riot ranks (tier + division) from Rank Data so
+    # we show the real in-game rank rather than a number derived from the
+    # avg-tier histogram.
+    current_ranks = _read_rank_data_current(sh)
+
     results    = []
     seen_names = set()
     pos = 0
@@ -246,11 +275,20 @@ def _read_final_rankings(sh):
             continue
 
         pos += 1
-        tier = _tier_from_avg(avg_tier)
+        # Prefer the player's actual current Riot rank; fall back to the
+        # avg-tier-derived label only if Rank Data has no entry for them.
+        cur = current_ranks.get(name)
+        if cur and cur.get("tier"):
+            tier     = cur["tier"]
+            division = cur.get("division", "")
+        else:
+            tier     = _tier_from_avg(avg_tier)
+            division = ""
         results.append({
             "rank":       pos,
             "name":       name,
             "tier":       tier,
+            "division":   division,
             "avg_tier":   avg_tier,
             "tier_score": tier_score,
             "rank_score": rank_score,
@@ -316,22 +354,29 @@ def _read_rank_data(sh):
 
 
 def _tier_from_avg(avg_tier_str):
-    """Convert a numeric avg_tier (e.g. '5.08') to a display tier name."""
+    """Convert a numeric avg_tier (e.g. '5.08') to a display tier name.
+    Current League order (post-Emerald, 2023+):
+      Iron=1, Bronze=2, Silver=3, Gold=4, Platinum=5, Emerald=6,
+      Diamond=7, Master=8, GM=9, Challenger=10.
+    The integer part of avg_tier is the tier itself; the decimal is the
+    progress through that tier (e.g. 5.06 = early Platinum-equivalent in
+    the legacy scoring, but per the post-Emerald order this lands in
+    Platinum — wait, this codebase's avg_tier is computed against the
+    post-Emerald scale where 5.x = Emerald). Threshold at the integer
+    boundary so 5.0 → Emerald, 4.0 → Platinum, etc."""
     try:
         v = float(avg_tier_str)
     except (ValueError, TypeError):
         return _normalise_tier(str(avg_tier_str))
-    # Approximate mapping: Iron=1, Bronze=2, Silver=3, Gold=4, Emerald=5,
-    # Platinum=6 (pre-Emerald legacy), Diamond=7, Master=8, GM=9, Chall=10
-    if v >= 9.5:  return "Challenger"
-    if v >= 8.5:  return "Grandmaster"
-    if v >= 7.5:  return "Master"
-    if v >= 6.5:  return "Diamond"
-    if v >= 5.5:  return "Emerald"
-    if v >= 4.5:  return "Platinum"
-    if v >= 3.5:  return "Gold"
-    if v >= 2.5:  return "Silver"
-    if v >= 1.5:  return "Bronze"
+    if v >= 9.0:  return "Challenger"
+    if v >= 8.0:  return "Grandmaster"
+    if v >= 7.0:  return "Master"
+    if v >= 6.0:  return "Diamond"
+    if v >= 5.0:  return "Emerald"
+    if v >= 4.0:  return "Platinum"
+    if v >= 3.0:  return "Gold"
+    if v >= 2.0:  return "Silver"
+    if v >= 1.0:  return "Bronze"
     return "Iron"
 
 
