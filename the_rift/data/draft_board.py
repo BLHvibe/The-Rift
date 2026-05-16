@@ -558,11 +558,39 @@ def target_archetype(
     side: str,
     inhouse_champs: Dict[str, List[Dict]],
     primary_roles: Dict[str, str],
+    forced_arch: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Best archetype this side's *players* support (via recommend_comps),
     plus the per-axis deficit vs locked picks so picks can be steered toward a
-    coherent win condition. Safe empty dict if engine unavailable."""
-    if _eng is None or not hasattr(_eng, "recommend_comps"):
+    coherent win condition. If `forced_arch` is given, that archetype is used
+    directly (the user's draft-board pick), skipping the auto-detection — the
+    deficit is still computed against locked picks so steering adapts as the
+    draft progresses (incl. across bans which reduce the candidate pool used
+    downstream)."""
+    if _eng is None:
+        return {}
+    arches = getattr(_eng, "ARCHETYPES", {}) or {}
+
+    # User-forced archetype: skip recommend_comps, build the deficit directly.
+    if forced_arch and forced_arch in arches:
+        arch_data = arches[forced_arch] or {}
+        target = arch_data.get("target", {}) or {}
+        cur = _eng._team_vector(state.locked_picks(side)) \
+            if hasattr(_eng, "_team_vector") else {}
+        deficit = {ax: max(0.0, target.get(ax, 0.0) - cur.get(ax, 0.0))
+                   for ax in target}
+        return {
+            "archetype":     forced_arch,
+            "label":         arch_data.get("label", forced_arch),
+            "win_condition": arch_data.get("win_condition", ""),
+            "spike":         arch_data.get("spike", ""),
+            "viability":     "USER PICK",
+            "deficit":       deficit,
+            "forced":        True,
+        }
+
+    # Auto: engine picks the best archetype for these players.
+    if not hasattr(_eng, "recommend_comps"):
         return {}
     try:
         comps = _eng.recommend_comps(
@@ -578,19 +606,19 @@ def target_archetype(
         return {}
     top = comps[0]
     arch = top.get("archetype", "")
-    arches = getattr(_eng, "ARCHETYPES", {})
     target = (arches.get(arch, {}) or {}).get("target", {}) or {}
     cur = _eng._team_vector(state.locked_picks(side)) \
         if hasattr(_eng, "_team_vector") else {}
     deficit = {ax: max(0.0, target.get(ax, 0.0) - cur.get(ax, 0.0))
                for ax in target}
     return {
-        "archetype": arch,
-        "label": top.get("label", arch),
+        "archetype":     arch,
+        "label":         top.get("label", arch),
         "win_condition": top.get("win_condition", ""),
-        "spike": top.get("spike", ""),
-        "viability": top.get("viability", ""),
-        "deficit": deficit,
+        "spike":         top.get("spike", ""),
+        "viability":     top.get("viability", ""),
+        "deficit":       deficit,
+        "forced":        False,
     }
 
 
@@ -715,6 +743,7 @@ def recommend_action(
     inhouse_champs: Optional[Dict[str, List[Dict]]] = None,
     primary_roles: Optional[Dict[str, str]] = None,
     n: int = 5,
+    forced_arch: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Recommend the current action.
@@ -776,7 +805,8 @@ def recommend_action(
 
     else:  # pick — E3: comfort + blind-safety + counter + flex + steering
         open_r = state.open_roles(a.side)
-        tcomp = target_archetype(state, a.side, inhouse_champs, primary_roles)
+        tcomp = target_archetype(state, a.side, inhouse_champs, primary_roles,
+                                  forced_arch=forced_arch)
         deficit = tcomp.get("deficit", {}) if tcomp else {}
         # Both-side best-comfort maps → contested detection (built once/call).
         blue_map = side_best_comfort(state.players["BLUE"], ROLES,

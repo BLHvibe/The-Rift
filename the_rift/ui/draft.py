@@ -344,6 +344,7 @@ class DraftState:
         self.board_pool_search  = ""    # type-to-filter the manual pool grid
         self.board_pool_scroll  = 0     # row offset for the scrollable pool grid
         self._board_key_was_down = {}   # edge-detection for keyboard search input
+        self.board_target_arch  = None  # user-locked archetype (None = engine auto)
         self._board_top_call_sig  = None # (champ, tag) — detect rec change
         self._board_top_call_anim = 1.0  # 0 = just appeared, 1 = settled
         self._board_actor_sig     = None # (side, kind, action_idx) — actor change
@@ -1319,6 +1320,55 @@ def _is_contested(champ_name, blue_players, red_players):
     return champ_name in _top5(blue_players) and champ_name in _top5(red_players)
 
 
+# Archetype picker: 7 engine archetypes + AUTO. Each chip has a distinct color
+# so the active one reads instantly. AUTO = engine picks automatically.
+_ARCH_PICKER = (
+    (None,                "AUTO",     (230, 190,  80)),
+    ("Teamfight",         "TF",       (210, 110,  90)),
+    ("Pick",              "Pick",     (170, 120, 220)),
+    ("Split Push",        "Split",    (110, 180, 120)),
+    ("Poke / Siege",      "Poke",     (220, 180,  80)),
+    ("Protect the Carry", "Protect",  ( 90, 180, 210)),
+    ("Dive",              "Dive",     (235, 130,  70)),
+    ("Scaling",           "Scale",    (110, 140, 220)),
+)
+
+
+def _draw_arch_picker(dl, x, y, w, current):
+    """Horizontal chip row — lets the user lock a target archetype.
+    Returns the consumed height in px."""
+    label = "TARGET COMP"
+    _txt(dl, x + 16, y + 8, label,
+         (*C["txt2"][:3], 215), 13, "raj_sb_14")
+    cx = x + 16 + len(label) * 8 + 12
+    chip_h = 26
+    for arch_key, lbl, col in _ARCH_PICKER:
+        is_active = (arch_key == current)
+        cw = len(lbl) * 7 + 18
+        hov = _hover(cx, y + 4, cw, chip_h)
+        if is_active:
+            # Active: filled chip
+            dpg.draw_rectangle((cx, y + 4), (cx + cw, y + 4 + chip_h),
+                               fill=(*col, 230),
+                               color=(*col, 255),
+                               thickness=2, rounding=13, parent=dl)
+            txt_col = (*C["bg"][:3], 255)
+        else:
+            # Inactive: outline-only, brighter on hover
+            fill_a   = 80 if hov else 28
+            border_a = 235 if hov else 150
+            dpg.draw_rectangle((cx, y + 4), (cx + cw, y + 4 + chip_h),
+                               fill=(*col, fill_a),
+                               color=(*col, border_a),
+                               thickness=2 if hov else 1,
+                               rounding=13, parent=dl)
+            txt_col = (*col, 245 if hov else 210)
+        _txt(dl, cx + 9, y + 7, lbl, txt_col, 13, "raj_sb_14")
+        _board_hits.append((cx, y + 4, cw, chip_h, "set_arch", arch_key))
+        cx += cw + 6
+    return chip_h + 12
+
+
 def _enemy_target_comp(b, act):
     """Run target_archetype for the team that ISN'T currently acting, so the
     STRATEGIC sub-panel can show their wincon alongside ours."""
@@ -1400,6 +1450,7 @@ def _board_begin():
     draft.board_live = _tb.board_live
     draft.board_pool_search = ""
     draft.board_pool_scroll = 0
+    draft.board_target_arch = None
     draft.board_live_session = None
     draft.board_live_status = ""
     draft.board_live_stop = False
@@ -1420,7 +1471,8 @@ def _board_recompute():
     try:
         draft.board_rec = recommend_action(
             b, getattr(live, "inhouse_champs", {}) or {},
-            getattr(live, "primary_roles", {}) or {}, n=6)
+            getattr(live, "primary_roles", {}) or {}, n=6,
+            forced_arch=draft.board_target_arch)
     except Exception as e:                       # pragma: no cover
         draft.board_rec = {
             "done": b.is_complete(), "action": b.current_action(),
@@ -1832,9 +1884,23 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
 
     # ── Action banner: side-tinted, phase + step counter ─────────────
     banner = (220, 170, 60) if our_turn else (120, 130, 150)
+    # Subtle shimmer when it's our turn — pulses the border alpha gently
+    if our_turn:
+        bpulse = (math.sin(time.monotonic() * 1.9) + 1) / 2
+        banner_border_a = int(190 + bpulse * 60)
+        banner_fill_a   = int(50 + bpulse * 16)
+    else:
+        banner_border_a = 215
+        banner_fill_a   = 55
     dpg.draw_rectangle((x + 10, y + 10), (x + w - 10, y + 68),
-                       fill=(*banner, 55), color=(*banner, 215),
+                       fill=(*banner, banner_fill_a),
+                       color=(*banner, banner_border_a),
                        thickness=2, rounding=5, parent=dl)
+    # Top-edge inner highlight (rich-card feel)
+    for hi in range(5):
+        ha = int(60 * (1 - hi / 5))
+        dpg.draw_line((x + 14, y + 12 + hi), (x + w - 14, y + 12 + hi),
+                      color=(*banner, ha), thickness=1, parent=dl)
     if act:
         head = f"{'YOUR' if our_turn else 'OPPONENT'} {act.kind.upper()}"
         sub = f"{act.label}  ·  phase {act.phase}  ·  step {act.idx+1}/20"
@@ -1844,6 +1910,11 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
     _txt(dl, x + 22, y + 48, sub, (*C["txt2"][:3], 215), 15, "raj_sb_16")
 
     ny = y + 80
+
+    # ── Archetype picker row (only when interactive, not in live mirror) ─
+    if interactive and act:
+        picker_h = _draw_arch_picker(dl, x, ny, w, draft.board_target_arch)
+        ny += picker_h
 
     # ── STRATEGIC sub-panel: both teams' wincon contrast ──────────────
     tc       = rec.get("target_comp") or {}
@@ -1921,6 +1992,13 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
         hovered = (interactive
                    and _hover(x + 14, card_y, w - 28, pc_h))
 
+        # Pulsing accent line ABOVE the card — a subtle "loading" effect
+        # that visually anchors TOP CALL to the strategic context above.
+        div_pulse = (math.sin(time.monotonic() * 1.4) + 1) / 2
+        div_alpha = int(110 + div_pulse * 70)
+        dpg.draw_line((x + 24, ny - 6), (x + w - 24, ny - 6),
+                      color=(*tcol, div_alpha), thickness=1, parent=dl)
+
         # Halo glow — tag-colored radiating outlines around the card (subtle)
         halo_dk = (max(0, tcol[0] - 90),
                    max(0, tcol[1] - 90),
@@ -1935,6 +2013,14 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
                            color=(*tcol, 245 if hovered else 225),
                            thickness=3 if hovered else 2,
                            rounding=6, parent=dl)
+        # Inner top-edge gradient highlight — gives the card a "lit from above"
+        # feeling instead of looking like a flat colored rectangle.
+        for hi in range(8):
+            ha = int(80 * (1 - hi / 8))
+            dpg.draw_line((x + 18, card_y + 3 + hi),
+                          (x + w - 18, card_y + 3 + hi),
+                          color=(*tcol, ha), thickness=1, parent=dl)
+
         # Champion portrait (left, 96×96 vertically centered)
         portrait_sz = 96
         port_x = x + 20
@@ -1942,6 +2028,14 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
         _draw_portrait(dl, port_x, port_y, portrait_sz,
                        s0.get("champion", ""), tcol,
                        alpha=245, rounding=8, border_w=3)
+        # Inner glow rim around the portrait — 1px inset bright outline,
+        # adds depth and makes the portrait feel "embedded" not "pasted on".
+        dpg.draw_rectangle((port_x + 2, port_y + 2),
+                           (port_x + portrait_sz - 2,
+                            port_y + portrait_sz - 2),
+                           fill=(0, 0, 0, 0),
+                           color=(*tcol, 130),
+                           thickness=1, rounding=6, parent=dl)
 
         # ─ Right-column text content ─────────────────────────────────
         text_x  = port_x + portrait_sz + 18
@@ -2155,6 +2249,12 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
                                color=(*tcol, 220 if alt_hover else 170),
                                thickness=2 if alt_hover else 1,
                                rounding=5, parent=dl)
+            # Subtle top-edge tint stripe — consistency with TOP CALL highlight
+            for hi in range(4):
+                ha = int(40 * (1 - hi / 4))
+                dpg.draw_line((x + 17, ny + 2 + hi),
+                              (x + w - 17, ny + 2 + hi),
+                              color=(*tcol, ha), thickness=1, parent=dl)
             # Mini tag pill (vertically centered with the row)
             chip_h = 22
             chip_y = ny + (row_h - 6 - chip_h) // 2
@@ -2418,6 +2518,14 @@ def _board_handle_input(vw, vh):
             elif kind == "clear_search":
                 draft.board_pool_search = ""
                 draft.board_pool_scroll = 0
+            elif kind == "set_arch":
+                # Toggle: clicking the active chip reverts to AUTO (None).
+                new_arch = payload   # None for AUTO, else archetype name
+                if draft.board_target_arch == new_arch:
+                    draft.board_target_arch = None
+                else:
+                    draft.board_target_arch = new_arch
+                _board_recompute()
             elif kind == "pick" and payload:
                 _board_apply(payload[0], payload[1])
             return

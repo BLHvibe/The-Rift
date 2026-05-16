@@ -27,7 +27,7 @@ from ui.feed import draw_feed
 from data.reader import live, load_live_data, check_for_update
 from data import patch_ticker
 
-__version__ = "2.5.0"   # bump this on each release
+__version__ = "2.6.0"   # bump this on each release
 
 WIN_W, WIN_H = 1280, 800
 TITLE_H      = 52    # titlebar height
@@ -682,8 +682,13 @@ def main():
                                   border=False, no_scrollbar=True, no_scroll_with_mouse=True):
                 with dpg.drawlist(tag="sidebar_dl", width=SIDEBAR_W, height=_mid_h):
                     pass
+            # `no_scroll_with_mouse=True` — every tab manages its own scroll
+            # via _wheel_delta_shared (registered by ui.tierlist). The native
+            # content_win scroll was causing a 1-frame visual glitch on the
+            # Draft Board (wheel shifts the window, then set_y_scroll(0) snaps
+            # it back). Disabling native scroll removes the glitch entirely.
             with dpg.child_window(tag="content_win", width=WIN_W-SIDEBAR_W, height=_mid_h,
-                                  border=False, no_scrollbar=True, no_scroll_with_mouse=False):
+                                  border=False, no_scrollbar=True, no_scroll_with_mouse=True):
                 with dpg.drawlist(tag="content_dl", width=WIN_W-SIDEBAR_W, height=3000):
                     pass
         # Patch-ticker rail at the very bottom of the window
