@@ -15,9 +15,12 @@ from data.reader import live, load_prediction_data, write_draft_picks, run_draft
 from data.config import load_config
 from data import draft_engine as _eng
 from data.draft_board import (DraftBoardState, recommend_action,
-                              DRAFT_SEQUENCE)
+                              DRAFT_SEQUENCE, target_archetype,
+                              ROLES as _BOARD_ROLES,
+                              _candidates_for_player)
 from data import draft_lcu
 from data import champion_icons
+from ui.tierlist import _wheel_delta as _wheel_delta_shared
 from ui.effects import (draw_orbital_spinner, draw_drift_field,
                          draw_breathing_ring, breathing_alpha)
 
@@ -343,6 +346,11 @@ class DraftState:
         self._board_key_was_down = {}   # edge-detection for keyboard search input
         self._board_top_call_sig  = None # (champ, tag) — detect rec change
         self._board_top_call_anim = 1.0  # 0 = just appeared, 1 = settled
+        self._board_actor_sig     = None # (side, kind, action_idx) — actor change
+        self._board_actor_anim    = 1.0  # 0 = just changed, 1 = settled
+        self._board_lock_pop_idx  = -1   # timeline cell idx that just locked
+        self._board_lock_pop_anim = 1.0  # 0 = just popped, 1 = settled
+        self._board_last_pointer  = 0    # detect a new lock
         self.board_live_session = None  # latest parsed LCU snapshot | None
         self.board_live_status  = ""    # poller status line for the header
         self.board_live_stop    = False # poller stop flag
@@ -1161,12 +1169,8 @@ def _hover(x, y, w, h):
     return x <= mx <= x + w and y <= my <= y + h
 
 
-# Manual-pool rect (set each draw, read by the mouse-wheel handler so it
-# only scrolls when the cursor is actually over the pool region).
+# Manual-pool rect (set each draw, used to gate wheel-scroll consumption).
 _pool_rect = None
-
-# Mouse-wheel handler is registered once on the first board draw.
-_wheel_registered = [False]
 
 # Letter / digit keys for type-to-filter search input.
 _SEARCH_LETTER_KEYS = (
@@ -1188,43 +1192,190 @@ _SEARCH_DIGIT_KEYS = (
 )
 
 
+def _player_champ_stats(player_name, champ_name):
+    """Look up a player's per-champion record. Returns dict or None."""
+    if not player_name or not champ_name:
+        return None
+    champs = (getattr(live, "inhouse_champs", {}) or {}).get(player_name, [])
+    for ch in champs:
+        if ch.get("champ") == champ_name:
+            try:
+                wr_pct = int(float(str(ch.get("wr", 0)).replace("%", "") or 0))
+            except (ValueError, TypeError):
+                wr_pct = 0
+            return {
+                "wr":     wr_pct,
+                "games":  int(ch.get("games", 0) or 0),
+                "wins":   int(ch.get("wins", 0) or 0),
+                "losses": int(ch.get("losses", 0) or 0),
+                "kda":    float(ch.get("kda", 0.0) or 0.0),
+            }
+    return None
+
+
+def _player_form(player_name):
+    """Return 'HOT' / 'COLD' / 'MIXED' for a player, or empty string."""
+    if not player_name:
+        return ""
+    for p in (getattr(live, "scout", []) or []):
+        if p.get("name") == player_name:
+            return (p.get("form") or "").upper()
+    return ""
+
+
+_FORM_COLORS = {
+    "HOT":   (235, 130, 70),
+    "COLD":  (90, 160, 230),
+    "MIXED": (170, 170, 170),
+}
+
+# Cyan for synergy callouts — distinct from SAFE chip green and form-HOT orange.
+_SYNERGY_COL_OK   = (90, 200, 215)
+_SYNERGY_COL_BAD  = (220, 110, 110)
+
+
+def _truncate_band(s, max_chars):
+    """Truncate `s` cleanly: prefer the last separator before max_chars, so
+    we never cut a fact mid-word (e.g. '...4.2 K' becomes '...11g')."""
+    if not s or len(s) <= max_chars:
+        return s
+    cut = s[:max_chars]
+    sep = cut.rfind(" · ")
+    if sep <= max_chars // 2:
+        sep = cut.rfind("  ·  ")
+    if sep > max_chars // 2:
+        return s[:sep].rstrip()
+    return cut.rstrip() + "…"
+
+
+def _enemy_threat(champ_name, enemy_players):
+    """Find the enemy player with the strongest profile on `champ_name`.
+    Returns {player, wr, games, kda} or None."""
+    best = None
+    for pl in enemy_players or []:
+        pname = pl.get("name", "")
+        s = _player_champ_stats(pname, champ_name)
+        if not s or s["games"] <= 0:
+            continue
+        weight = s["wr"] * s["games"]   # rough threat = WR × volume
+        if best is None or weight > best["_w"]:
+            best = {**s, "player": pname, "_w": weight}
+    return best
+
+
+def _lane_matchup(your_champ, enemy_champ):
+    """Signed lane advantage for `your_champ` vs `enemy_champ` (~ -8..+8).
+    Looks up engine LANE_MATCHUPS table; flips sign if mirrored entry."""
+    if not your_champ or not enemy_champ:
+        return 0
+    LM = getattr(_eng, "LANE_MATCHUPS", {}) or {}
+    if (your_champ, enemy_champ) in LM:
+        try:
+            return int(LM[(your_champ, enemy_champ)])
+        except (TypeError, ValueError):
+            return 0
+    if (enemy_champ, your_champ) in LM:
+        try:
+            return -int(LM[(enemy_champ, your_champ)])
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+def _synergy_callouts(champ, our_locked):
+    """Return list of (other_champ, kind, strength) where kind is 'syn'|'anti'.
+    Only flags meaningful pairs (|strength| >= 0.20)."""
+    out = []
+    if not champ or not our_locked:
+        return out
+    SYN  = getattr(_eng, "SYNERGIES", {}) or {}
+    ANTI = getattr(_eng, "ANTI_SYNERGIES", {}) or {}
+    for c2 in our_locked:
+        if not c2 or c2 == champ:
+            continue
+        s = SYN.get((champ, c2), SYN.get((c2, champ), 0))
+        if s and s >= 0.20:
+            out.append((c2, "syn", float(s)))
+            continue
+        a = ANTI.get((champ, c2), ANTI.get((c2, champ), 0))
+        if a and a >= 0.20:
+            out.append((c2, "anti", float(a)))
+    return out
+
+
+def _is_contested(champ_name, blue_players, red_players):
+    """True if `champ_name` is a top-5 inhouse champ for at least one player
+    on EACH side (i.e. both teams want it)."""
+    if not champ_name:
+        return False
+    icmp = getattr(live, "inhouse_champs", {}) or {}
+    def _top5(players):
+        s = set()
+        for pl in players or []:
+            for ch in (icmp.get(pl.get("name", ""), []) or [])[:5]:
+                if ch.get("champ"):
+                    s.add(ch["champ"])
+        return s
+    return champ_name in _top5(blue_players) and champ_name in _top5(red_players)
+
+
+def _enemy_target_comp(b, act):
+    """Run target_archetype for the team that ISN'T currently acting, so the
+    STRATEGIC sub-panel can show their wincon alongside ours."""
+    if b is None or act is None:
+        return {}
+    enemy_side = "RED" if act.side == "BLUE" else "BLUE"
+    try:
+        return target_archetype(
+            b, enemy_side,
+            getattr(live, "inhouse_champs", {}) or {},
+            getattr(live, "primary_roles", {}) or {})
+    except Exception:
+        return {}
+
+
+def _enemy_pick_preview(b, side, n=3):
+    """For each open enemy role, return (role, player_name, [top champion candidates]).
+    Used by the bottom-of-team-column 'next-pick' ribbon."""
+    if b is None:
+        return []
+    used = b.used_champs() if hasattr(b, "used_champs") else set()
+    icmp = getattr(live, "inhouse_champs", {}) or {}
+    proles = getattr(live, "primary_roles", {}) or {}
+    out = []
+    if not hasattr(b, "open_roles"):
+        return out
+    for role in b.open_roles(side):
+        pl = b.player_for_role(side, role) if hasattr(b, "player_for_role") else None
+        if not pl:
+            continue
+        try:
+            cands = _candidates_for_player(pl, role, icmp, proles, used, k=n)
+        except Exception:
+            cands = []
+        names = [c[0] for c in cands][:n]
+        out.append((role, pl.get("name", "?"), names))
+    return out
+
+
+def _team_counter_covers(champ_to_ban, our_locked):
+    """True if any of our locked picks 'covers' (counters) `champ_to_ban`,
+    making the ban lower-priority. Uses engine COUNTERS table."""
+    if not champ_to_ban or not our_locked:
+        return False
+    CT = getattr(_eng, "COUNTERS", {}) or {}
+    for our_ch in our_locked:
+        if (our_ch, champ_to_ban) in CT and CT[(our_ch, champ_to_ban)] >= 0.55:
+            return True
+    return False
+
+
 def _filter_pool(pool, query):
     """Case-insensitive substring filter on champion name in (champ, role) tuples."""
     if not query:
         return pool
     q = query.upper()
     return [(c, r) for c, r in pool if q in c.upper()]
-
-
-def _on_pool_wheel(sender, app_data):
-    """Mouse-wheel callback: scroll the manual-pool grid when hovered."""
-    if draft.phase != DraftPhase.BOARD or _pool_rect is None:
-        return
-    try:
-        mouse = dpg.get_mouse_pos(local=False)
-        vp = dpg.get_viewport_pos()
-    except Exception:
-        return
-    mx = mouse[0] - vp[0] - 68
-    my = mouse[1] - vp[1] - 52
-    px1, py1, px2, py2 = _pool_rect
-    if not (px1 <= mx <= px2 and py1 <= my <= py2):
-        return
-    # app_data: +1 wheel up, -1 wheel down — invert so up reduces scroll
-    delta = -int(app_data)
-    draft.board_pool_scroll = max(0, draft.board_pool_scroll + delta)
-
-
-def _ensure_board_wheel():
-    """Register the mouse-wheel handler once."""
-    if _wheel_registered[0]:
-        return
-    try:
-        with dpg.handler_registry():
-            dpg.add_mouse_wheel_handler(callback=_on_pool_wheel)
-        _wheel_registered[0] = True
-    except Exception:
-        pass
 
 
 def _board_begin():
@@ -1358,8 +1509,12 @@ def _board_legal_pool(state, action):
 
 def _draw_board(dl, vw, vh):
     _board_hits.clear()
-    _ensure_board_wheel()                   # one-time mouse-wheel handler
     champion_icons.flush_pending()          # register any downloaded icons
+    # Lock the parent content window's vertical scroll — the board is a fixed
+    # full-viewport layout, and any wheel-scroll should hit only the manual
+    # pool grid, never the outer window.
+    if dpg.does_item_exist("content_win"):
+        dpg.set_y_scroll("content_win", 0)
     global _mouse_xy
     try:
         mp = dpg.get_mouse_pos(local=False)
@@ -1452,6 +1607,18 @@ def _draw_board(dl, vw, vh):
                   color=(*C["rule_dark"][:3], 200),
                   thickness=1, parent=dl)
 
+    # Detect a fresh lock and start the cell-pop animation.
+    if b.pointer != draft._board_last_pointer:
+        if b.pointer > draft._board_last_pointer:
+            draft._board_lock_pop_idx  = b.pointer - 1
+            draft._board_lock_pop_anim = 0.0
+            def _set_pop(v):
+                draft._board_lock_pop_anim = v
+            # out_cubic instead of out_back — rapid back-to-back locks no
+            # longer feel chaotic with overshoot.
+            anim.tween(0.0, 1.0, 260, "out_cubic", on_update=_set_pop)
+        draft._board_last_pointer = b.pointer
+
     for a in DRAFT_SEQUENCE:
         cx0 = 16 + a.idx * cell_w
         is_cur = (act is not None and a.idx == act.idx)
@@ -1464,11 +1631,23 @@ def _draw_board(dl, vw, vh):
             fill_a = 60
         else:
             fill_a = 22
+        # Pop highlight: just-locked cell briefly glows brighter
+        is_pop = (a.idx == draft._board_lock_pop_idx
+                  and draft._board_lock_pop_anim < 1.0)
+        if is_pop:
+            pop_t = draft._board_lock_pop_anim
+            # bright glow that decays to normal as anim completes
+            fill_a = max(fill_a, int(180 * (1 - pop_t) + 60))
+            border_alpha = max(80, int(255 * (1 - pop_t) + 80))
+            border_thick = 3 if pop_t < 0.5 else 2
+        else:
+            border_alpha = 210 if is_cur else 80
+            border_thick = 2 if is_cur else 1
         dpg.draw_rectangle((cx0 + 1, cells_y),
                            (cx0 + cell_w - 1, cells_y + cells_h),
                            fill=(*side_c, fill_a),
-                           color=(*side_c, 210 if is_cur else 80),
-                           thickness=2 if is_cur else 1,
+                           color=(*side_c, border_alpha),
+                           thickness=border_thick,
                            rounding=4, parent=dl)
         kind_c = (C["gold_lt"][:3] if a.kind == "pick" else (210, 120, 100))
         side_letter = "B" if a.side == "BLUE" else "R"
@@ -1477,8 +1656,15 @@ def _draw_board(dl, vw, vh):
              (*kind_c, 230 if (is_cur or done) else 140), 16, "raj_sb_16")
         locked = b.locked_at(a.idx)         # exact (from history)
         if locked:
+            # Pop scale on the locked text — bigger size early in the anim
+            if is_pop:
+                pt = draft._board_lock_pop_anim
+                # ease size from 24 down to baseline 18
+                lock_sz = max(18, int(24 - 6 * pt))
+            else:
+                lock_sz = 18
             _txt(dl, cx0 + 6, cells_y + 34, locked[:8],
-                 (*C["txt"][:3], 230), 18, "raj_sb_18")
+                 (*C["txt"][:3], 230), lock_sz, "raj_sb_18")
 
     # ── Team columns + center recommendation panel ───────────────────
     body_y = tl_y + tl_h + 14
@@ -1547,9 +1733,66 @@ def _draw_board_team(dl, x, y, w, h, b, side, act):
         ch = b.bans[side][j] if j < len(b.bans[side]) else None
         dpg.draw_rectangle((bx, by), (bx + bw_each - 4, by + 32),
                            fill=(*C["bg"][:3], 185),
-                           color=(210, 90, 90, 135), rounding=4, parent=dl)
+                           color=(170, 90, 90, 130), rounding=4, parent=dl)
+        # Banned champion text in a cool gray — signals "removed from game",
+        # not "active threat" (which the side accent already conveys).
         _txt(dl, bx + 5, by + 7, (ch or "—")[:6],
-             (*(210, 130, 120), 230 if ch else 105), 14, "raj_sb_14")
+             (165, 165, 165, 230 if ch else 95), 14, "raj_sb_14")
+
+    # ── Enemy "LIKELY NEXT" preview ribbon ──────────────────────────
+    # Only on the OPPOSING side (the user's intel about the enemy team).
+    # Slides in / fades on each actor change for a polished feel.
+    if hasattr(b, "our_side") and side != b.our_side:
+        ribbon_top = by + 32 + 16
+        if ribbon_top + 40 < y + h - 4:
+            preview = _enemy_pick_preview(b, side, n=3)
+            if preview:
+                # Trigger slide-in fade when the on-the-clock actor changes
+                actor_sig = (act.side, act.kind, act.idx) if act else None
+                if actor_sig != draft._board_actor_sig:
+                    draft._board_actor_sig = actor_sig
+                    draft._board_actor_anim = 0.0
+                    def _set_act(v):
+                        draft._board_actor_anim = v
+                    anim.tween(0.0, 1.0, 280, "out_cubic",
+                               on_update=_set_act)
+                ta = draft._board_actor_anim
+                slide_dx = int((1 - ta) * 14)
+                fade = int(ta * 255)
+
+                rib_x = x + 12 + slide_dx
+                rib_w = w - 24 - slide_dx
+                # Container background
+                dpg.draw_rectangle((rib_x, ribbon_top),
+                                   (rib_x + rib_w, ribbon_top + 22),
+                                   fill=(*C["panel"][:3], int(fade * 0.78)),
+                                   color=(0, 0, 0, 0),
+                                   rounding=4, parent=dl)
+                _txt(dl, rib_x + 8, ribbon_top + 3, "LIKELY NEXT",
+                     (*C["gold_lt"][:3], int(fade * 0.85)), 12, "raj_sb_12")
+                row_y = ribbon_top + 28
+                for role, pname, names in preview[:3]:
+                    if row_y + 22 > y + h - 4:
+                        break
+                    rc = _ROLE_COLORS.get(role, (140, 140, 140))
+                    # Role badge
+                    dpg.draw_rectangle((rib_x + 4, row_y),
+                                       (rib_x + 38, row_y + 18),
+                                       fill=(*rc, int(fade * 0.20)),
+                                       color=(*rc, int(fade * 0.85)),
+                                       rounding=3, parent=dl)
+                    _txt(dl, rib_x + 8, row_y + 1, role[:4],
+                         (*rc, fade), 12, "raj_sb_12")
+                    # Likely champ list — top 2 with shorter separator so
+                    # full champion names survive at narrow column widths.
+                    line = " & ".join(names[:2]) if names else "—"
+                    max_chars = max(10, (rib_w - 52) // 7)
+                    if len(line) > max_chars:
+                        line = line[:max_chars - 1] + "…"
+                    _txt(dl, rib_x + 44, row_y + 1, line,
+                         (*C["txt"][:3], int(fade * 0.92)),
+                         13, "raj_sb_14")
+                    row_y += 22
 
 
 def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
@@ -1601,11 +1844,43 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
     _txt(dl, x + 22, y + 48, sub, (*C["txt2"][:3], 215), 15, "raj_sb_16")
 
     ny = y + 80
-    tc = rec.get("target_comp") or {}
-    if tc.get("label"):
-        _txt(dl, x + 16, ny, f"BUILD  ->  {tc.get('label','')[:42]}",
-             (*C["gold"][:3], 225), 16, "raj_sb_16")
-        ny += 23
+
+    # ── STRATEGIC sub-panel: both teams' wincon contrast ──────────────
+    tc       = rec.get("target_comp") or {}
+    tc_enemy = _enemy_target_comp(b, act)
+    if tc.get("label") or tc_enemy.get("label"):
+        sp_h     = 50
+        OUR_COL  = C["platinum"][:3] if (act and act.side == "BLUE") else (220, 110, 110)
+        ENEMY_COL = (220, 110, 110) if (act and act.side == "BLUE") else C["platinum"][:3]
+        dpg.draw_rectangle((x + 14, ny), (x + w - 14, ny + sp_h),
+                           fill=(*C["panel"][:3], 205),
+                           color=(*C["gold_dk"][:3], 190),
+                           thickness=1, rounding=5, parent=dl)
+        _txt(dl, x + 22, ny + 5, "STRATEGIC",
+             (*C["gold_lt"][:3], 235), 13, "raj_sb_14")
+        # Our line — left-edge color stripe (side-tinted) + label
+        if tc.get("label"):
+            dpg.draw_rectangle((x + 18, ny + 24), (x + 22, ny + 44),
+                               fill=(*OUR_COL, 220), color=(0, 0, 0, 0),
+                               rounding=2, parent=dl)
+            our_label = tc.get("label", "")[:30]
+            our_spike = (tc.get("spike", "") or tc.get("win_condition", ""))[:34]
+            our_line  = f"You:  {our_label}" + (f"  ·  {our_spike}" if our_spike else "")
+            _txt(dl, x + 28, ny + 25, our_line[:62],
+                 (*C["gold"][:3], 240), 14, "raj_sb_14")
+        # Enemy line — right-edge color stripe + label
+        if tc_enemy.get("label"):
+            mid_x = x + w // 2 + 4
+            dpg.draw_rectangle((mid_x, ny + 24), (mid_x + 4, ny + 44),
+                               fill=(*ENEMY_COL, 220), color=(0, 0, 0, 0),
+                               rounding=2, parent=dl)
+            ene_label = tc_enemy.get("label", "")[:30]
+            ene_spike = (tc_enemy.get("spike", "") or tc_enemy.get("win_condition", ""))[:34]
+            ene_line  = f"Enemy:  {ene_label}" + (f"  ·  {ene_spike}" if ene_spike else "")
+            _txt(dl, mid_x + 10, ny + 25, ene_line[:62],
+                 (*ENEMY_COL, 240), 14, "raj_sb_14")
+        ny += sp_h + 8
+
     # Phase reason (the meaningful note, not the redundant header echo)
     for note in (rec.get("notes") or [])[1:2]:
         _txt(dl, x + 16, ny, note[:62], (*C["txt2"][:3], 205),
@@ -1622,12 +1897,12 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
 
     # ── PRIMARY CALL — the #1 recommendation, emphasised ─────────────
     sug = rec.get("suggestions") or []
-    pool_region_h = 240
+    pool_region_h = 220
     if sug:
         s0 = sug[0]
         tag = s0.get("tag", "")
         tcol = _BOARD_TAG_COL.get(tag, C["platinum"][:3])
-        pc_h = 110
+        pc_h = 150
         ny += 8
 
         # Detect recommendation change → trigger slide-up ease-in
@@ -1637,9 +1912,9 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
             draft._board_top_call_anim = 0.0
             def _set_tc(v):
                 draft._board_top_call_anim = v
-            anim.tween(0.0, 1.0, 300, "out_cubic", on_update=_set_tc)
+            anim.tween(0.0, 1.0, 320, "out_cubic", on_update=_set_tc)
         t = draft._board_top_call_anim
-        anim_dy = int((1 - t) * 16)
+        anim_dy = int((1 - t) * 18)
         card_y = ny + anim_dy
 
         # Hover detection (brightens border, slight halo bump)
@@ -1660,25 +1935,200 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
                            color=(*tcol, 245 if hovered else 225),
                            thickness=3 if hovered else 2,
                            rounding=6, parent=dl)
-        # Champion portrait (left, 96×96 with tag-colored border)
+        # Champion portrait (left, 96×96 vertically centered)
         portrait_sz = 96
         port_x = x + 20
         port_y = card_y + (pc_h - portrait_sz) // 2
         _draw_portrait(dl, port_x, port_y, portrait_sz,
                        s0.get("champion", ""), tcol,
                        alpha=245, rounding=8, border_w=3)
-        # Text content shifted right of portrait
-        text_x = port_x + portrait_sz + 18
-        # "TOP CALL" caption + tag pill (same row)
+
+        # ─ Right-column text content ─────────────────────────────────
+        text_x  = port_x + portrait_sz + 18
+        right_x = x + w - 22                       # right edge for chips
+
+        # ROW 1 (header): caption + tag pill on left;
+        #                 score-gap chip + viability chip on right
         _txt(dl, text_x, card_y + 14, "TOP CALL",
              (*tcol, 230), 13, "raj_sb_14")
-        _draw_tag_chip(dl, text_x + 96, card_y + 9, tag, alpha=245, big=True)
-        # Champion name — the hero
-        _txt(dl, text_x, card_y + 44, s0.get("champion", "?")[:16],
+        chip_w_used = _draw_tag_chip(dl, text_x + 96, card_y + 9,
+                                      tag, alpha=245, big=True)
+
+        # Score gap to next-best (only show if meaningful)
+        gap_chip_w = 0
+        if len(sug) >= 2:
+            try:
+                gap = float(s0.get("score", 0)) - float(sug[1].get("score", 0))
+            except (TypeError, ValueError):
+                gap = 0.0
+            if gap >= 0.05:
+                # Pulse alpha when gap is dominant (>= 0.15)
+                if gap >= 0.15:
+                    pulse = (math.sin(time.monotonic() * 2.4) + 1) / 2
+                    g_alpha = int(190 + pulse * 60)
+                else:
+                    g_alpha = 215
+                gap_pts = int(round(gap * 100))
+                gap_lbl = f"+{gap_pts} vs #2"
+                gap_chip_w = len(gap_lbl) * 7 + 18
+                gx = text_x + 96 + chip_w_used + 14
+                dpg.draw_rectangle((gx, card_y + 11),
+                                   (gx + gap_chip_w, card_y + 31),
+                                   fill=(*C["gold"][:3], int(g_alpha * 0.22)),
+                                   color=(*C["gold"][:3], g_alpha),
+                                   rounding=10, parent=dl)
+                _txt(dl, gx + 8, card_y + 12, gap_lbl,
+                     (*C["gold_lt"][:3], 240), 13, "raj_sb_14")
+
+        # Viability chip — right-aligned (uses target_comp data when available)
+        viab = (tc.get("viability") or "").upper()
+        if viab:
+            vcol = _VIAB_COLORS.get(viab, C["txt"][:3])
+            v_short = "NOT REC." if viab == "NOT RECOMMENDED" else viab
+            v_lbl   = v_short
+            v_chip_w = len(v_lbl) * 7 + 16
+            vx = right_x - v_chip_w
+            dpg.draw_rectangle((vx, card_y + 11),
+                               (vx + v_chip_w, card_y + 31),
+                               fill=(*vcol, 80),
+                               color=(*vcol, 240),
+                               thickness=2, rounding=10, parent=dl)
+            _txt(dl, vx + 8, card_y + 12, v_lbl,
+                 (*vcol, 250), 13, "raj_sb_14")
+
+        # Contested mini-glyph (between header and champion name) when applicable
+        contested_here = _is_contested(s0.get("champion", ""),
+                                        b.players.get("BLUE", []),
+                                        b.players.get("RED", []))
+        if contested_here:
+            cx_dot = text_x
+            cy_dot = card_y + 38
+            # diamond glyph + label, tinted with the tag color so it reads
+            # as part of the recommendation (not a separate gold cue).
+            ds = 5
+            dpg.draw_polygon([(cx_dot + ds, cy_dot),
+                              (cx_dot + 2*ds, cy_dot + ds),
+                              (cx_dot + ds, cy_dot + 2*ds),
+                              (cx_dot,        cy_dot + ds)],
+                             fill=(*tcol, 235),
+                             color=(0, 0, 0, 0), parent=dl)
+            _txt(dl, cx_dot + 16, cy_dot - 4, "CONTESTED",
+                 (*tcol, 230), 12, "raj_sb_12")
+            champ_name_y = card_y + 58
+        else:
+            champ_name_y = card_y + 44
+
+        # ROW 2: champion name (the hero)
+        _txt(dl, text_x, champ_name_y, s0.get("champion", "?")[:16],
              (*C["gold_lt"][:3], 248), 36, "raj_36")
-        # Why text
-        _txt(dl, text_x, card_y + 88, str(s0.get("why", ""))[:54],
+
+        # ROW 3: why text
+        why_y = champ_name_y + 44
+        _txt(dl, text_x, why_y, str(s0.get("why", ""))[:60],
              (*C["txt2"][:3], 220), 17, "raj_sb_18")
+
+        # Divider before stats band (fades with the data-band animation)
+        band_alpha = int(min(1.0, max(0.0, (t - 0.35) / 0.65)) * 255)
+        if band_alpha > 0:
+            div_y = why_y + 26
+            dpg.draw_line((text_x, div_y), (right_x, div_y),
+                          color=(*C["rule_dark"][:3], int(band_alpha * 0.7)),
+                          thickness=1, parent=dl)
+
+            # ROW 4: per-player stats data band
+            stats_y    = div_y + 6
+            player     = s0.get("player", "")
+            champ_n    = s0.get("champion", "")
+            role_n     = s0.get("role", "")
+            opp_champ  = None
+            if act and act.kind == "pick" and role_n:
+                opp_side = "RED" if act.side == "BLUE" else "BLUE"
+                opp_champ = b.picks.get(opp_side, {}).get(role_n)
+
+            if act and act.kind == "ban":
+                # BANS: surface the enemy threat (player + games + WR)
+                enemy_side = "RED" if act.side == "BLUE" else "BLUE"
+                threat = _enemy_threat(champ_n, b.players.get(enemy_side, []))
+                covered = _team_counter_covers(
+                    champ_n, b.locked_picks(act.side) if hasattr(b, "locked_picks") else [])
+                if threat:
+                    band = _truncate_band(
+                        f"{threat['player']}: {threat['wr']}% over "
+                        f"{threat['games']}g  ·  {threat['kda']:.1f} KDA",
+                        56)
+                    _txt(dl, text_x, stats_y, band,
+                         (*C["txt"][:3], band_alpha), 14, "raj_sb_14")
+                else:
+                    _txt(dl, text_x, stats_y,
+                         "No inhouse data on this enemy threat",
+                         (*C["txt_dim"][:3], band_alpha), 14, "raj_sb_14")
+                if covered:
+                    cov_lbl = "COVERED  ·  save the ban"
+                    cov_w = len(cov_lbl) * 7 + 16
+                    cov_x = right_x - cov_w
+                    dpg.draw_rectangle((cov_x, stats_y - 3),
+                                       (cov_x + cov_w, stats_y + 19),
+                                       fill=(90, 180, 120, int(band_alpha * 0.22)),
+                                       color=(90, 180, 120, band_alpha),
+                                       rounding=10, parent=dl)
+                    _txt(dl, cov_x + 8, stats_y - 1, cov_lbl,
+                         (90, 200, 130, band_alpha), 12, "raj_sb_12")
+            else:
+                # PICKS: per-player WR / games / KDA / form
+                stats = _player_champ_stats(player, champ_n) if player else None
+                form  = _player_form(player) if player else ""
+                bits  = []
+                if stats:
+                    bits.append(f"{player}:  {stats['wr']}% over {stats['games']}g")
+                    if stats["games"] > 0:
+                        bits.append(f"{stats['kda']:.1f} KDA")
+                elif player:
+                    bits.append(f"{player}:  no inhouse history on {champ_n}")
+                if form and form in _FORM_COLORS:
+                    pass   # rendered as a chip below
+                band_text = _truncate_band("  ·  ".join(bits), 56)
+                _txt(dl, text_x, stats_y, band_text,
+                     (*C["txt"][:3], band_alpha), 14, "raj_sb_14")
+                # Form chip on the right end of stats line
+                if form in _FORM_COLORS:
+                    fcol = _FORM_COLORS[form]
+                    f_lbl = form
+                    f_w = len(f_lbl) * 7 + 16
+                    fx = right_x - f_w
+                    dpg.draw_rectangle((fx, stats_y - 3),
+                                       (fx + f_w, stats_y + 19),
+                                       fill=(*fcol, int(band_alpha * 0.22)),
+                                       color=(*fcol, band_alpha),
+                                       rounding=10, parent=dl)
+                    _txt(dl, fx + 8, stats_y - 1, f_lbl,
+                         (*fcol, band_alpha), 12, "raj_sb_12")
+
+            # ROW 5 (optional): lane matchup OR synergy callout
+            extra_y = stats_y + 22
+            extra_drawn = False
+            if act and act.kind == "pick" and opp_champ and champ_n:
+                lm = _lane_matchup(champ_n, opp_champ)
+                if lm:
+                    sign = "+" if lm > 0 else ""
+                    lm_col = ((90, 200, 140) if lm > 0
+                              else (215, 110, 100) if lm < 0
+                              else (180, 180, 180))
+                    _txt(dl, text_x, extra_y,
+                         f"Lane vs {opp_champ[:12]}: {sign}{lm}",
+                         (*lm_col, band_alpha), 14, "raj_sb_14")
+                    extra_drawn = True
+            if not extra_drawn and act and act.kind == "pick":
+                ours = b.locked_picks(act.side) if hasattr(b, "locked_picks") else []
+                cos = _synergy_callouts(champ_n, ours)
+                if cos:
+                    other, kind, _str = cos[0]
+                    msg_col = (_SYNERGY_COL_OK if kind == "syn"
+                               else _SYNERGY_COL_BAD)
+                    pre = "Strong with" if kind == "syn" else "Conflict with"
+                    _txt(dl, text_x, extra_y,
+                         f"{pre} {other[:14]}",
+                         (*msg_col, band_alpha), 14, "raj_sb_14")
+
         if interactive:
             _board_hits.append((x + 14, ny, w - 28, pc_h, "pick",
                                 (s0.get("champion"), s0.get("role"))))
@@ -1690,7 +2140,8 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
              16, "raj_sb_16")
         ny += 28
         row_h = 52
-        for s in sug[1:6]:
+        # Cap to 4 alternative rows to give STRATEGIC + enriched TOP CALL room.
+        for s in sug[1:5]:
             if ny + row_h > y + h - pool_region_h:
                 break
             tag = s.get("tag", "")
@@ -1720,8 +2171,47 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
             cx_x = port_x + port_sz + 12
             _txt(dl, cx_x, ny + 4, s.get("champion", "?")[:12],
                  (*C["gold_lt"][:3], 240), 22, "raj_sb_22")
-            _txt(dl, cx_x, ny + 30, str(s.get("why", ""))[:42],
+            _txt(dl, cx_x, ny + 30, str(s.get("why", ""))[:36],
                  (*C["txt2"][:3], 195), 14, "raj_sb_14")
+            # Right-edge mini stats column (WR · g and comfort delta)
+            stats_x = x + w - 22
+            stats = (_player_champ_stats(s.get("player", ""),
+                                         s.get("champion", ""))
+                     if act and act.kind == "pick" else None)
+            if stats and stats["games"] > 0:
+                line1 = f"{stats['wr']}% · {stats['games']}g"
+                lw = len(line1) * 8
+                _txt(dl, stats_x - lw, ny + 6, line1,
+                     (*C["txt"][:3], 230), 14, "raj_sb_14")
+                # Comfort delta vs TOP CALL
+                try:
+                    delta = (float(s.get("comfort", 0))
+                             - float(s0.get("comfort", 0)))
+                except (TypeError, ValueError):
+                    delta = 0.0
+                if abs(delta) >= 0.05:
+                    sign = "+" if delta > 0 else ""
+                    dpct = int(round(delta * 100))
+                    dlbl = f"{sign}{dpct}c"
+                    dcol = ((90, 200, 140) if delta > 0
+                            else (215, 110, 100))
+                    dw = len(dlbl) * 8
+                    _txt(dl, stats_x - dw, ny + 28, dlbl,
+                         (*dcol, 220), 14, "raj_sb_14")
+            elif act and act.kind == "ban":
+                # Mirror the ban backing for alt bans
+                opp_side = "RED" if act.side == "BLUE" else "BLUE"
+                threat = _enemy_threat(s.get("champion", ""),
+                                       b.players.get(opp_side, []))
+                if threat:
+                    line1 = f"{threat['wr']}% · {threat['games']}g"
+                    lw = len(line1) * 8
+                    _txt(dl, stats_x - lw, ny + 6, line1,
+                         (*C["txt"][:3], 230), 14, "raj_sb_14")
+                    pname_short = threat['player'][:8]
+                    pw = len(pname_short) * 7
+                    _txt(dl, stats_x - pw, ny + 28, pname_short,
+                         (*C["txt2"][:3], 200), 12, "raj_sb_12")
             if interactive:
                 _board_hits.append((x + 14, ny, w - 28, row_h - 6, "pick",
                                     (s.get("champion"), s.get("role"))))
@@ -1810,8 +2300,19 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
     max_scroll = max(0, total_rows - visible_rows)
     draft.board_pool_scroll = max(0, min(draft.board_pool_scroll, max_scroll))
 
-    # Stash region for the wheel handler
+    # Stash region for the wheel-scroll consumer below.
     _pool_rect = (sb_x, gy0, sb_x + sb_w, grid_bottom)
+
+    # Consume mouse-wheel delta (registered globally by ui.tierlist) when the
+    # cursor is over the pool grid. wheel up = +delta = scroll toward top.
+    if _wheel_delta_shared[0] != 0:
+        mx, my = _mouse_xy
+        if (sb_x <= mx <= sb_x + sb_w and gy0 <= my <= grid_bottom):
+            draft.board_pool_scroll = max(0, min(
+                draft.board_pool_scroll - int(_wheel_delta_shared[0]),
+                max_scroll))
+        # Always clear so deltas don't accumulate while we're on this tab.
+        _wheel_delta_shared[0] = 0
 
     if not filtered:
         _txt(dl, sb_x + 14, gy0 + 12,
