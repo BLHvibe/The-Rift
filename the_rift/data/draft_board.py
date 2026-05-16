@@ -808,11 +808,26 @@ def recommend_action(
         tcomp = target_archetype(state, a.side, inhouse_champs, primary_roles,
                                   forced_arch=forced_arch)
         deficit = tcomp.get("deficit", {}) if tcomp else {}
-        # Both-side best-comfort maps → contested detection (built once/call).
-        blue_map = side_best_comfort(state.players["BLUE"], ROLES,
-                                     inhouse_champs, primary_roles)
-        red_map = side_best_comfort(state.players["RED"], ROLES,
-                                    inhouse_champs, primary_roles)
+        # Strict contested: a champ is only "contested" when a player on EACH
+        # side has actually played it in customs (≥3 games) — not ranked
+        # mastery or priors. min() of the two sides' real customs comfort.
+        def _cust_pool(side):
+            m: Dict[str, float] = {}
+            if _eng is None or not hasattr(_eng, "customs_champs"):
+                return m
+            for p in state.players.get(side, []):
+                for c, v in _eng.customs_champs(p, inhouse_champs).items():
+                    if v > m.get(c, 0.0):
+                        m[c] = v
+            return m
+        blue_cust = _cust_pool("BLUE")
+        red_cust = _cust_pool("RED")
+
+        def contested_strict(ch):
+            return round(min(blue_cust.get(ch, 0.0),
+                             red_cust.get(ch, 0.0)), 3)
+
+        lanes = getattr(_eng, "LANE_MATCHUPS", {}) if _eng else {}
         enemy_by_role = state.picks[enemy_side]
         enemy_info = len(enemy_locked)
         late = a.label in ("R3", "B5", "R5")
@@ -830,13 +845,30 @@ def recommend_action(
                 bs = blind_safety(ch)
                 fr = flex_score(ch, open_r)
                 cv, cv_why = counter_value(ch, enemy_locked, opp_champ)
-                con = contested(ch, blue_map, red_map)
+                con = contested_strict(ch)
                 steer = _steer_bonus(ch, deficit)
+                cmf = float(sc)
+                # Direct same-lane matchup (±8 → -1..+1; >0 = we win lane).
+                lane_known = bool(opp_champ)
+                lane_n = 0.0
+                if lane_known:
+                    lr = lanes.get((ch, opp_champ), 0.0)
+                    lane_n = max(-1.0, min(1.0, lr / 8.0))
 
                 # --- context-aware tag ---
-                if enemy_info == 0:
-                    if con >= 0.45:
-                        tag, why = "POWER", "Contested - both teams want it"
+                if lane_known:
+                    # Our lane opponent is locked → counter-pick this slot.
+                    # Never call a pick "blind-safe" when the lane is known.
+                    if cv >= 0.40 or lane_n >= 0.25:
+                        tag = "COUNTER"
+                        why = (cv_why or f"counters {opp_champ}").capitalize()
+                    elif lane_n <= -0.30:
+                        tag, why = "COMFORT", f"{pname}'s best into {opp_champ} (hard lane)"
+                    else:
+                        tag, why = "COMFORT", f"{pname} {role} vs {opp_champ}"
+                elif enemy_info == 0:
+                    if con >= 0.40:
+                        tag, why = "POWER", "Contested - both teams play it"
                     elif bs >= 0.62:
                         tag, why = "SAFE", f"Blind-safe - hard to counter ({int(bs*100)})"
                     elif fr >= 2:
@@ -846,7 +878,7 @@ def recommend_action(
                 else:
                     if cv >= 0.45:
                         tag, why = "COUNTER", (cv_why or "counters their pick").capitalize()
-                    elif con >= 0.50:
+                    elif con >= 0.45:
                         tag, why = "POWER", "Contested - lock before they grab it"
                     elif fr >= 2 and not late:
                         tag, why = "FLEX", f"Flex {fr} roles - hides your {role}"
@@ -855,22 +887,41 @@ def recommend_action(
                     else:
                         tag, why = "COMFORT", f"{pname} {role} comfort"
 
-                # --- ranking blend (our players' comfort weighted most) ---
-                score = 0.50 * float(sc)
-                if enemy_info == 0:
-                    score += 0.24 * bs + 0.18 * con
+                # --- ranking blend ---
+                if lane_known:
+                    # Counter-pick slot: comfort still matters but the matchup
+                    # dominates, and picking into a losing lane is punished.
+                    score = (0.34 * cmf + 0.40 * cv
+                             + 0.16 * max(0.0, lane_n) + 0.06 * steer
+                             + (0.04 if fr >= 2 else 0.0))
+                    score -= 0.24 * max(0.0, -lane_n)
+                elif enemy_info == 0:
+                    score = (0.50 * cmf + 0.22 * bs + 0.18 * con
+                             + 0.08 * steer + (0.04 if fr >= 2 else 0.0))
                 else:
-                    score += 0.30 * cv + 0.08 * bs
-                score += 0.10 * steer + (0.05 if fr >= 2 else 0.0)
+                    score = (0.44 * cmf + 0.34 * cv + 0.10 * con
+                             + 0.06 * bs + 0.06 * steer)
+
+                factors = {
+                    "comfort":    round(max(0.0, min(1.0, cmf)), 3),
+                    "counter":    round(cv, 3),
+                    "lane":       round((lane_n + 1.0) / 2.0, 3),
+                    "blind_safe": round(bs, 3),
+                    "flex":       round(min(1.0, fr / 3.0), 3),
+                    "contested":  round(con, 3),
+                    "steer":      round(max(0.0, min(1.0, steer)), 3),
+                    "final":      round(max(0.0, min(1.0, score)), 3),
+                }
 
                 pool.append({
                     "champion": ch,
                     "score": round(score, 3),
-                    "comfort": round(float(sc), 3),
+                    "comfort": round(cmf, 3),
                     "tag": tag,
                     "why": f"{why}  ({pname} {role})",
                     "role": role,
                     "player": pname,
+                    "factors": factors,
                 })
 
         best: Dict[str, Dict[str, Any]] = {}

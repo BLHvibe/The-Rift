@@ -219,6 +219,14 @@ def parse_session(session: Optional[Dict[str, Any]],
             if a.get("completed"):
                 completed += 1
 
+    # Phase countdown (seconds left in the current pick/ban window).
+    timer_left = 0.0
+    try:
+        ms = (session.get("timer") or {}).get("adjustedTimeLeftInPhase", 0)
+        timer_left = max(0.0, float(ms) / 1000.0)
+    except (TypeError, ValueError):
+        timer_left = 0.0
+
     return {
         "in_champ_select": True,
         "our_side": our_side,
@@ -226,6 +234,7 @@ def parse_session(session: Optional[Dict[str, Any]],
         "picks": picks,
         "bans": bans,
         "completed": completed,
+        "timer_left": timer_left,
     }
 
 

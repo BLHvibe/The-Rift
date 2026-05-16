@@ -11,23 +11,31 @@
 ┌──────────────────────────────────────────────────────────────────┐
 │                                                                  │
 │   [ DONE ]   CORE STAGES            E1–E4 · U0–U5 · L1–L2        │
+│   [ DONE ]   READABILITY PASS A     + POOL OVERHAUL + Visual S1  │
 │                                                                  │
-│   [ DONE ]   READABILITY PASS A     Draft Board mode resized     │
-│                                     (timeline · team cols ·      │
-│                                      TOP CALL hero · alternatives│
-│                                      · action banner · header)   │
+│   [ DONE ]   v2.7 CYBERPUNK         Phases 1·2·3 (see § 0/0.1)   │
+│              PHASES 1-3              P1 aesthetic skin · P2       │
+│                                     Layout A + analytics rail +  │
+│                                     narrative · P3 splash art +  │
+│                                     advanced widgets             │
 │                                                                  │
-│   [ DONE ]   POOL OVERHAUL          search box + scrollable grid │
-│                                     (type-to-filter · mousewheel │
-│                                      · arrow keys · clear-X)     │
+│   [ DONE ]   MOTION TUNED           full-screen bg now STATIC    │
+│                                     (user: "moving too much")    │
+│   [ DONE ]   CRASH FIXED            `t` var-shadow in TOP CALL   │
+│                                     identity chips → smoke-test  │
 │                                                                  │
-│   [ DONE ]   EXE REBUILT            the_rift/dist/TheRift.exe    │
-│                                     ~41.5 MB · 2026-05-15 00:57  │
-│                                     clean · Pass A + pool +      │
-│                                     Visual Stage 1 baked in      │
+│   [ DONE ]   ENGINE DEEP-DIVE       recency-weighted comfort ·  │
+│                                     per-lane counter mode ·     │
+│                                     strict contested · WHY +    │
+│                                     radar reworked (see § 0.2)  │
 │                                                                  │
-│   [ WAIT ]   USER HANDS-ON TEST     run TheRift.exe, eyeball     │
-│                                     Draft Board mode             │
+│   [ DONE ]   EXE REBUILT            dist/TheRift.exe ~39.9 MB   │
+│                                     2026-05-16 16:28 · clean ·  │
+│                                     P1-3 + deep-dive baked in   │
+│                                                                  │
+│   [ WAIT ]   USER HANDS-ON TEST     run TheRift.exe → Draft      │
+│                                     Board; check Layout A rail,  │
+│                                     splash, all 4 phases         │
 │                                                                  │
 │   [ HOLD ]   NOT YET PUSHED         verify-before-push rule      │
 │                                                                  │
@@ -35,6 +43,234 @@
 ```
 
 **Status legend** &nbsp; ☑ done &nbsp; · &nbsp; ◐ in progress &nbsp; · &nbsp; ☐ todo &nbsp; · &nbsp; ⊘ blocked
+
+---
+
+## § 0 &nbsp; v2.7 Cyberpunk Command Deck — Phase 1 &nbsp; · &nbsp; 2026-05-15
+
+Source of truth for this initiative: `the_rift/Draft board revamp.txt`
+(the deep-research spec). Built on `master` @ v2.6.0. Work done in the main
+directory; **not pushed** — awaiting user hands-on visual test.
+
+### User decisions locked (spec § 9 polls)
+
+| Question | Choice |
+|---|---|
+| Gold vs cyan | **Subordinate gold** to cyan/magenta (ceremonial only) |
+| Monospace font | **Add JetBrains Mono** for data/labels |
+| CALM MODE placement | **Settings tab** (not a header button) |
+| Reduce-motion default | **OFF** — full theatrical by default |
+
+### What shipped in Phase 1
+
+- **Palette** — 12 cyber keys added to `theme.C` (`cy/cy_lt/cy_dk`,
+  `mg/mg_lt/mg_dk`, `amb`, `term_g`, `alert_r`, `scan_gy`, `panel_dk`,
+  `grid_a`). Gold kept but demoted. Side-accent shim `_side_accent()` +
+  `BLUE/RED_ACCENT*` near `_ROLE_COLORS` (cyan=blue, magenta=red).
+- **`the_rift/ui/cyber.py`** (new) — `draw_cut_rect`, `draw_brackets`,
+  `draw_bracket_label`, `draw_dashed_rect`, `draw_marching_dash`,
+  `draw_scanlines`, `draw_grid_bg`, `draw_glitch_overlay`, plus motion
+  gate (`set_motion`/`motion_on`), `wave()`, `flicker_alpha()`.
+  Reuses `ui/effects.py` (breathing/drift) — no duplication.
+- **Fonts** — `JetBrainsMono-Medium.ttf` (+ Bold) installed in
+  `the_rift/fonts/` (OFL, v2.304). `mono_11..mono_36` registered in
+  `theme.setup_fonts()`.
+- **CALM MODE** — `calm_mode` flag in `data/config.py` (`_DEFAULTS`,
+  default `False`). Toggle lives in the **Settings tab** ("DRAFT BOARD"
+  section). Applied live on toggle and on `_board_begin()` via
+  `cyber.set_motion(not calm_mode)`. State-change anims are NOT gated
+  (typewriter/slide/pop still play in CALM).
+- **Every board surface re-skinned** (spec § 2.1–2.10): header
+  `[ DRAFT BOARD ]` mono + marching UNDO/EXIT; corner-cut timeline
+  cells w/ glow trail (§5.7) + marching current cell + cyan underline;
+  `[ BLUE/RED OPS ]` cut team panels w/ on-clock cursor blink (A8);
+  cy/mg action banner ("> YOUR PICK"); bracketed arch-picker chips;
+  "TACTICAL READOUT" w/ `[ OUR ]`/`[ ENEMY ]`; terminal context sigils
+  (`>`/`!`/`+`); TOP CALL heavy cut card + typewriter name (§5.4) +
+  portrait flicker (§5.8) + scanning bar + mono stat band + bracket
+  chips; cut alternative rows w/ cyan stripe; terminal pool search +
+  cut cells + cyan scrollbar.
+- **Ambient/state motion** — A1 full-screen scanlines, A6 grid drift,
+  A4 timeline/banner breathing via `wave()`, A8 cursor blink, §5.7 glow
+  trail, §5.8 flicker, §5.4 typewriter, S1 slide-in (pre-existing),
+  S3 lock-pop (kept). All ambient motion frozen by CALM MODE.
+
+### Deferred (not blocking; lower-impact polish)
+
+- A2 center-panel border glow, A5 per-chip staggered pulse, A7 team
+  accent breathing — extra ambient pulses; core set is in.
+- S2 glitch overlay on rec-swap and a literal S5 colour cross-fade —
+  `cyber.draw_glitch_overlay` exists/unused; banner already does
+  instant cy↔mg side identity + pulse.
+- Phase 2 / Phase 3 — now **DONE**, see § 0.1 below.
+
+---
+
+## § 0.1 &nbsp; v2.7 — Phase 2 + Phase 3 + motion tuning &nbsp; · &nbsp; 2026-05-15
+
+### Motion feedback fix
+
+User: *"the background moving is too much, keep the rest of the
+animation."* → all full-screen background drift is now **static**: grid
+pan speed 0, full-screen + phase-band + role-stripe scanlines speed 0.
+Focal motion kept: marching dashes, timeline glow trail, typewriter,
+portrait flicker, breathing pulses, cursor blink, lock pop, scanning bar.
+Saved as memory `feedback_ambient_motion.md`. Particle drift field
+(spec §5.3) **deliberately skipped** — it is exactly the kind of ambient
+background motion the user rejected.
+
+### Phase 2 — Layout A + analytics rail (DONE)
+
+- **Layout A** geometry in `_draw_board`: BLUE+RED stacked in one narrow
+  left column (200px, 178 ≤1300w), wide center, **300px right rail**
+  (220 ≤1300w), full-width bottom narrative strip. `_draw_board_team`
+  made height-adaptive (slot size/fonts scale; bans + ribbon guarded so
+  they never overflow the now-short stacked panels). Refuses < 1280×720
+  with a resize message (spec §7.5).
+- **`the_rift/ui/board_rail.py`** (new) — defensive, engine-memoized
+  (recompute only on picks-signature change). Widgets: #1 win-prob bar +
+  sparkline, #3 score-breakdown bars, #11 team-strength radar (overlaid
+  cyan/magenta octagons), #19 damage profile, #15 counter-coverage
+  donut, #2 counter-pick predictor, #18 synergy web, #9 contested
+  ladder. Each widget try/excepts to a blank frame — one bad datum can't
+  crash the board.
+- **#12 narrative log** — bottom terminal strip from `state._history`.
+- **#27 action-queue preview** — header chips (wide viewports ≥1500w).
+- **#29 identity chips** — 3 strongest SUBCLASSES tags by the hero name.
+
+### Phase 3 — splash art + advanced (DONE)
+
+- **`the_rift/data/splash_art.py`** (new) — mirrors `champion_icons.py`
+  with disk cache (`assets/splash_cache/`) + **LRU GPU-texture eviction**
+  (max 4 registered; spec §7.3). Reuses `champion_icons._ddragon_id`.
+- **#21 splash backdrop** on TOP CALL with stateless **ken-burns**
+  (uv pan/zoom, frozen by CALM) + readability scrim; degrades to the
+  portrait until the splash is fetched.
+- **#30 confidence meter** replaces the +N-vs-#2 chip (gap → 0-100 % bar).
+- **#7 pool-depth capsule** per role slot (viable comfort picks left).
+- **#8 LCU phase-countdown bar** on the banner — `parse_session` now
+  returns `timer_left`; live mode only (no idle ring in manual, by
+  design — avoids gratuitous motion).
+- **#5 opponent patterns** — folded into the existing LIKELY NEXT ribbon
+  (it is already per-player comfort-ranked = their favourites); no extra
+  UI added to the now-tight stacked panels.
+
+### Crash fixed
+
+TOP CALL identity-chip loop reused local `t`, clobbering the float TOP
+CALL anim progress → `str - float` at `_draw_board_center` (the screenshot
+crash). Renamed to `chip_txt`. Added a **headless render smoke-test**
+(stubs all `dpg.draw_*`, runs `_draw_board` across phases 0/1/6/7/13/18 ×
+normal/CALM) — all pass. Harness was removed after use.
+
+### Deferred (documented, non-blocking)
+
+- #6 what-if ban simulator (hover-driven; interaction-heavy, risky to add
+  blind — `cyber.draw_glitch_overlay` + engine speculation available when
+  picked up).
+- Spec §5.1 A2/A5/A7 minor ambient pulses; S2 glitch; literal S5
+  cross-fade. Particle drift (intentionally cut, see above).
+
+### Verification checklist (user)
+
+```
+1. dist/TheRift.exe → Draft → Draft Board (manual). It must NOT crash
+   when a recommendation appears (the screenshot bug).
+2. Layout A: narrow stacked BLUE/RED on the left, wide TOP CALL center,
+   analytics rail on the right (win-prob bar + sparkline, WHY bars,
+   radar, damage, coverage donut, predictor, synergy web, contested),
+   narrative strip along the bottom. Check nothing overlaps/clips at
+   your resolution; team panels are tight when stacked — report if a
+   role slot / bans row is cut off.
+3. Background must be STATIC now (no swimming). Confirm marching dashes,
+   typewriter, glow trail, flicker still move.
+4. TOP CALL splash art fades in behind the portrait after a moment
+   (needs internet first run; falls back to portrait if offline).
+5. Click all four phases (BAN1/PICK1/BAN2/PICK2); verify pool + suggestion
+   clicks still land (Layout A moved geometry).
+6. Settings → DRAFT BOARD → CALM MODE freezes ambient motion only.
+7. Batch analysis tab UNCHANGED.
+8. Report anything off; nothing pushed until you confirm.
+```
+
+---
+
+## § 0.2 &nbsp; v2.7 — Engine deep-dive + radar/why fixes &nbsp; · &nbsp; 2026-05-15
+
+User feedback: radar confusing/no axis labels; "WHY THIS CALL" blank;
+pick engine still blind-safe after the lane opponent is picked, under-
+weights counters, and flags "contested" when only one side actually
+plays the champ. Deep-dive done across the data → engine → board → UI
+stack.
+
+### Root causes (verified in code)
+
+- **WHY blank** — `recommend_action` suggestions carried no
+  `score_breakdown`; the widget read a key that never existed.
+- **False contested** — engine `contested()` fed off `_player_candidates`,
+  which injects ranked `top_champs` + `CHAMP_PRIORS`, so a champ counted
+  as "both teams want it" off soloQ mastery / priors, not customs play.
+- **Blind-safe after laner known** — `enemy_info` was the *team-wide*
+  pick count, not the same-lane opponent; SAFE was still allowed and
+  comfort (0.50) dwarfed counter (0.30).
+- **No recency** — per-champ inhouse dicts were all-time aggregates; the
+  reader emitted **no** per-champ recency data at all.
+
+### Changes
+
+- **`data/reader.py`** — `_read_inhouse` now emits per-champ `results`
+  (chronological 1/0, capped to the **last 100 customs games**),
+  `recent_results` (last 20) and `roles` (per-champ role-frequency the
+  engine already expected but never received). Additive — other consumers
+  unaffected.
+- **`data/draft_engine.py`** — new `recency_weighted_wr()` (exponential,
+  half-life 18 games). `champion_comfort()` blends recency-shrunk WR
+  (0.65) with all-time posterior (0.35) when `results` exist. Ranked
+  `top_champs` demoted ×0.75, priors ×0.50 — real customs play always
+  out-ranks them. New `customs_champs()` = strict {champ: comfort} for
+  champs actually played ≥3 customs games (no mastery/priors).
+- **`data/draft_board.py`** — pick recommender reworked: when the
+  **same-lane enemy is locked**, that role enters *counter-pick mode* —
+  never tagged blind-safe, scoring `0.34 comfort + 0.40 counter +
+  0.16 lane − 0.24·(losing-lane)`; counter weighting raised everywhere;
+  `contested` now strict (min of both sides' real `customs_champs`).
+  Each suggestion now carries a **`factors`** dict (comfort / counter /
+  lane / blind_safe / flex / contested / steer / final).
+- **`ui/draft.py`** — `_is_contested` aligned to the same ≥3-customs-
+  games-on-both-sides rule (glyph + ladder now agree with suggestions).
+- **`ui/board_rail.py`** — WHY panel reads the real per-suggestion
+  `factors` (labeled bars; LANE drawn as a centre-zero advantage bar,
+  green = we win lane, magenta = we lose it; shows the champ name; ban
+  phases say so instead of blanking). Radar reworked: spokes, two value
+  rings, **8 axis labels** (FRONT/ENGAGE/PEEL/AOE/BURST/RANGE/SCALE/
+  MOBIL), a BLUE/RED legend, per-axis normalisation so one big axis no
+  longer flattens the rest.
+
+Headless smoke-test (now with an inhouse-history fixture: per-champ
+`results`, shared champ across sides) — all phases × normal/CALM pass;
+`recency_weighted_wr` and `customs_champs` sanity-checked. Harness removed.
+
+### Verify (user)
+
+```
+1. WHY THIS CALL rail panel now shows labeled bars for the top
+   suggestion (comfort/counter/lane/contested/safe/flex/fit) + champ name.
+2. Radar: 8 labeled axes, BLUE/RED legend, both shapes readable.
+3. After an enemy laner is locked, that role's suggestion is a COUNTER
+   (or best-into-the-matchup COMFORT) — never "blind-safe"; counters
+   rank above merely-comfortable neutral picks.
+4. "Contested" only shows when BOTH teams have a player with ≥3 customs
+   games on that champ (no more one-sided false contested).
+5. Recency: a champ a player has been winning on lately should rank
+   above one they used to win on but lost recently (needs real customs
+   data loaded — verify against someone whose form changed).
+6. Still nothing pushed.
+```
+
+> **Tuning knobs** if you want it stronger/weaker after testing:
+> `recency_weighted_wr` half-life (engine), the `0.65/0.35` recency blend
+> in `champion_comfort`, and the counter-mode score weights in
+> `draft_board.py` pick branch.
 
 ---
 

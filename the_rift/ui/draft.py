@@ -20,9 +20,12 @@ from data.draft_board import (DraftBoardState, recommend_action,
                               _candidates_for_player)
 from data import draft_lcu
 from data import champion_icons
+from data import splash_art
 from ui.tierlist import _wheel_delta as _wheel_delta_shared
 from ui.effects import (draw_orbital_spinner, draw_drift_field,
                          draw_breathing_ring, breathing_alpha)
+from ui import cyber
+from ui import board_rail
 
 _ROLES = ["TOP", "JGL", "MID", "BOT", "SUP"]
 
@@ -33,6 +36,21 @@ _ROLE_COLORS = {
     "BOT": (180, 160,  60),
     "SUP": (100, 180, 180),
 }
+
+# v2.7 cyberpunk command-deck side accents. Cyan = blue side, magenta = red
+# side. These replace the old C["platinum"] / (215,95,95) literals scattered
+# through the Draft Board so a side swap is a one-liner everywhere.
+BLUE_ACCENT    = C["cy"][:3]
+BLUE_ACCENT_LT = C["cy_lt"][:3]
+RED_ACCENT     = C["mg"][:3]
+RED_ACCENT_LT  = C["mg_lt"][:3]
+
+
+def _side_accent(side, lt=False):
+    """Board side -> cyber accent RGB. lt=True for the brighter hi-light tone."""
+    if side == "BLUE":
+        return BLUE_ACCENT_LT if lt else BLUE_ACCENT
+    return RED_ACCENT_LT if lt else RED_ACCENT
 
 # ---------------------------------------------------------------------------
 # Player pool
@@ -496,7 +514,20 @@ def _role_dot(dl, cx, cy, role, alpha=255):
                   color=(*C["txt"][:3], alpha), size=18, parent=dl)
 
 
-def _panel_bg(dl, x1, y1, x2, y2, accent_color=None, alpha=255):
+def _panel_bg(dl, x1, y1, x2, y2, accent_color=None, alpha=255,
+              cut=False, cut_sz=14):
+    """Panel background. Batch screens keep the rounded look (cut=False);
+    the Draft Board passes cut=True for the machined corner-cut command-deck
+    style + a deeper recessed fill."""
+    if cut:
+        cyber.draw_cut_rect(dl, x1, y1, x2, y2, cut=cut_sz,
+                            fill=(*C["panel_dk"][:3], alpha),
+                            color=(*C["cy_dk"][:3], alpha), thickness=1)
+        if accent_color:
+            cyber.draw_cut_rect(dl, x1 + 3, y1 + 3, x2 - 3, y1 + 7,
+                                cut=3, fill=(*accent_color[:3], alpha),
+                                color=None)
+        return
     dpg.draw_rectangle((x1, y1),(x2, y2),
                         fill=(*C["panel"][:3], alpha),
                         color=(*C["rule_dark"][:3], alpha),
@@ -1011,7 +1042,7 @@ def _tb_begin_analysis():
 # ---------------------------------------------------------------------------
 
 _BOARD_TAG_COL = {
-    "POWER":  (230, 170, 60),
+    "POWER":  C["amb"][:3],
     "SAFE":   (90, 180, 120),
     "COUNTER": (212, 90, 80),
     "FLEX":   (155, 140, 222),
@@ -1127,30 +1158,31 @@ def _draw_portrait(dl, x, y, size, champ_name, fallback_color, alpha=255,
 
 
 def _draw_tag_chip(dl, x, y, tag, alpha=255, big=False):
-    """Filled pill with glyph + label. Returns the consumed width in px."""
+    """Corner-cut tactical chip: glyph + mono label. Same signature + returned
+    width contract as before (callsites position relative to the return)."""
     if not tag:
         return 0
     col = _BOARD_TAG_COL.get(tag, C["txt"][:3])
     h        = 28 if big else 22
     txt_sz   = 15 if big else 13
-    font_key = "raj_sb_16" if big else "raj_sb_14"
+    font_key = "mono_16" if big else "mono_14"
     glyph_d  = h - 10
-    label_w  = len(tag) * (8 if big else 7)
+    label_w  = len(tag) * (9 if big else 8)   # mono glyphs run wider
     pad_l    = 10 if big else 8
     pad_mid  = 6 if big else 5
-    pad_r    = 12 if big else 10
+    pad_r    = 14 if big else 12
     chip_w   = pad_l + glyph_d + pad_mid + label_w + pad_r
-    # Pill
-    dpg.draw_rectangle((x, y), (x + chip_w, y + h),
-                       fill=(*col, int(alpha * 0.88)),
-                       color=(*col, alpha),
-                       rounding=h // 2, parent=dl)
+    cut      = 7 if big else 5
+    # Machined corner-cut body (replaces the rounded pill)
+    cyber.draw_cut_rect(dl, x, y, x + chip_w, y + h, cut=cut,
+                        fill=(*col, int(alpha * 0.88)),
+                        color=(*col, alpha), thickness=1)
     # Glyph (left)
     glyph_cx = x + pad_l + glyph_d // 2
     glyph_cy = y + h // 2
     bg_col   = (*C["bg"][:3], alpha)
     _draw_glyph(dl, glyph_cx, glyph_cy, tag, glyph_d, bg_col)
-    # Label
+    # Label (mono)
     txt_x = glyph_cx + glyph_d // 2 + pad_mid
     txt_y = y + (h - txt_sz) // 2 - 2
     _txt(dl, txt_x, txt_y, tag, bg_col, txt_sz, font_key)
@@ -1305,19 +1337,25 @@ def _synergy_callouts(champ, our_locked):
 
 
 def _is_contested(champ_name, blue_players, red_players):
-    """True if `champ_name` is a top-5 inhouse champ for at least one player
-    on EACH side (i.e. both teams want it)."""
+    """True only if a player on EACH side has actually played `champ_name`
+    in customs ≥ 3 games (matches the engine's strict `customs_champs` rule
+    so the TOP CALL glyph / contested ladder agree with the suggestions)."""
     if not champ_name:
         return False
     icmp = getattr(live, "inhouse_champs", {}) or {}
-    def _top5(players):
-        s = set()
+
+    def _side_plays(players):
         for pl in players or []:
-            for ch in (icmp.get(pl.get("name", ""), []) or [])[:5]:
-                if ch.get("champ"):
-                    s.add(ch["champ"])
-        return s
-    return champ_name in _top5(blue_players) and champ_name in _top5(red_players)
+            for ch in (icmp.get(pl.get("name", ""), []) or []):
+                if ch.get("champ") == champ_name:
+                    try:
+                        if float(ch.get("games", 0)) >= 3:
+                            return True
+                    except (TypeError, ValueError):
+                        pass
+        return False
+
+    return _side_plays(blue_players) and _side_plays(red_players)
 
 
 # Archetype picker: 7 engine archetypes + AUTO. Each chip has a distinct color
@@ -1337,33 +1375,36 @@ _ARCH_PICKER = (
 def _draw_arch_picker(dl, x, y, w, current):
     """Horizontal chip row — lets the user lock a target archetype.
     Returns the consumed height in px."""
-    label = "TARGET COMP"
-    _txt(dl, x + 16, y + 8, label,
-         (*C["txt2"][:3], 215), 13, "raj_sb_14")
-    cx = x + 16 + len(label) * 8 + 12
+    lw = cyber.draw_bracket_label(dl, x + 16, y + 8, "TARGET COMP",
+                                  (*C["cy_lt"][:3], 220), 13, _txt,
+                                  font_key="mono_12",
+                                  bracket_color=(*C["cy"][:3], 200),
+                                  char_w=0.6)
+    cx = x + 16 + lw + 12
     chip_h = 26
     for arch_key, lbl, col in _ARCH_PICKER:
         is_active = (arch_key == current)
-        cw = len(lbl) * 7 + 18
+        disp = f"[* {lbl} *]" if is_active else f"[ {lbl} ]"
+        cw = len(disp) * 8 + 8
         hov = _hover(cx, y + 4, cw, chip_h)
         if is_active:
-            # Active: filled chip
-            dpg.draw_rectangle((cx, y + 4), (cx + cw, y + 4 + chip_h),
-                               fill=(*col, 230),
-                               color=(*col, 255),
-                               thickness=2, rounding=13, parent=dl)
+            # Active: filled corner-cut chip (flickers on hover)
+            fa = cyber.flicker_alpha(230, hz=10, ampl=0.10) if hov else 230
+            cyber.draw_cut_rect(dl, cx, y + 4, cx + cw, y + 4 + chip_h,
+                                cut=5, fill=(*col, fa),
+                                color=(*col, 255), thickness=2)
             txt_col = (*C["bg"][:3], 255)
         else:
-            # Inactive: outline-only, brighter on hover
-            fill_a   = 80 if hov else 28
+            # Inactive: outline-only, flicker-brighten on hover
+            fill_a   = (cyber.flicker_alpha(80, hz=10, ampl=0.12)
+                        if hov else 28)
             border_a = 235 if hov else 150
-            dpg.draw_rectangle((cx, y + 4), (cx + cw, y + 4 + chip_h),
-                               fill=(*col, fill_a),
-                               color=(*col, border_a),
-                               thickness=2 if hov else 1,
-                               rounding=13, parent=dl)
+            cyber.draw_cut_rect(dl, cx, y + 4, cx + cw, y + 4 + chip_h,
+                                cut=5, fill=(*col, fill_a),
+                                color=(*col, border_a),
+                                thickness=2 if hov else 1)
             txt_col = (*col, 245 if hov else 210)
-        _txt(dl, cx + 9, y + 7, lbl, txt_col, 13, "raj_sb_14")
+        _txt(dl, cx + 8, y + 8, disp, txt_col, 13, "mono_12")
         _board_hits.append((cx, y + 4, cw, chip_h, "set_arch", arch_key))
         cx += cw + 6
     return chip_h + 12
@@ -1430,6 +1471,7 @@ def _filter_pool(pool, query):
 
 def _board_begin():
     """Build a DraftBoardState from the team-builder rosters and enter BOARD."""
+    cyber.set_motion(not load_config().get("calm_mode", False))
     pool_by_name = {p["name"]: p for p in _tb.pool}
     blue_players, red_players = [], []
     for i, role in enumerate(_ROLES):
@@ -1562,6 +1604,7 @@ def _board_legal_pool(state, action):
 def _draw_board(dl, vw, vh):
     _board_hits.clear()
     champion_icons.flush_pending()          # register any downloaded icons
+    splash_art.flush_pending()              # register any downloaded splashes
     # Lock the parent content window's vertical scroll — the board is a fixed
     # full-viewport layout, and any wheel-scroll should hit only the manual
     # pool grid, never the outer window.
@@ -1578,6 +1621,19 @@ def _draw_board(dl, vw, vh):
     if b is None:
         draft.phase = DraftPhase.IDLE
         return
+    # §5.6 grid backdrop — STATIC sparse cool lines (no drift; user found
+    # full-screen background motion too distracting). Drawn behind all UI.
+    cyber.draw_grid_bg(dl, 0, 0, vw, vh, spacing=40, alpha=18,
+                       speed_x=0, speed_y=0)
+
+    # §7.5 — Layout A needs room for the right rail; refuse below 1280x720.
+    if vw < 1280 or vh < 720:
+        cyber.draw_bracket_label(
+            dl, vw // 2 - 230, vh // 2 - 16,
+            "RESIZE VIEWPORT TO AT LEAST 1280 x 720",
+            (*C["amb"][:3], 235), 18, _txt, font_key="mono_18",
+            bracket_color=(*C["cy"][:3], 200), char_w=0.62)
+        return
     if draft.board_live:
         _board_live_sync()                 # fold latest LCU snapshot in
     rec = draft.board_rec or {}
@@ -1588,19 +1644,22 @@ def _draw_board(dl, vw, vh):
 
     # ── Header ───────────────────────────────────────────────────────
     hdr_h = 54
-    dpg.draw_rectangle((0, 0), (vw, hdr_h), fill=(*C["panel"][:3], 235),
+    dpg.draw_rectangle((0, 0), (vw, hdr_h), fill=(*C["panel_dk"][:3], 240),
                        color=(0, 0, 0, 0), parent=dl)
     dpg.draw_line((0, hdr_h - 1), (vw, hdr_h - 1),
-                  color=C["rule_dark"], thickness=1, parent=dl)
-    _txt(dl, 24, 10, "DRAFT BOARD", (*C["gold"][:3], 240), 32, "cinzel_32")
+                  color=(*C["cy_dk"][:3], 220), thickness=1, parent=dl)
+    cyber.draw_bracket_label(dl, 24, 12, "DRAFT BOARD",
+                             (*C["cy_lt"][:3], 245), 28, _txt,
+                             font_key="mono_28",
+                             bracket_color=(*C["cy"][:3], 220), char_w=0.62)
     if draft.board_live:
         st = draft.board_live_status or "Connecting…"
-        st_col = (90, 195, 175) if live_connected else (210, 160, 70)
-        _txt(dl, 260, 18, st[:46], (*st_col, 220), 17, "raj_sb_18")
+        st_col = C["term_g"][:3] if live_connected else C["amb"][:3]
+        _txt(dl, 320, 18, st[:46], (*st_col, 225), 16, "mono_16")
     else:
-        _txt(dl, 260, 18, "MANUAL", (*C["txt2"][:3], 200), 17, "raj_sb_18")
-    side_col = C["platinum"][:3] if our == "BLUE" else (215, 95, 95)
-    _txt(dl, vw - 340, 18, f"YOU: {our}", (*side_col, 235), 17, "raj_sb_18")
+        _txt(dl, 320, 18, "MANUAL", (*C["cy"][:3], 200), 16, "mono_16")
+    side_col = _side_accent(our, lt=True)
+    _txt(dl, vw - 340, 18, f"YOU: {our}", (*side_col, 240), 16, "mono_16")
 
     # UNDO (manual only — in live the client is authoritative) + EXIT
     if not live_connected:
@@ -1608,21 +1667,24 @@ def _draw_board(dl, vw, vh):
         ub_x = vw - ub_w - 124
         ub_y = (hdr_h - ub_h) // 2
         can_undo = bool(b._history)
-        dpg.draw_rectangle((ub_x, ub_y), (ub_x+ub_w, ub_y+ub_h),
-                           fill=(*C["card"][:3], 175 if can_undo else 75),
-                           color=(*C["rule_dark"][:3], 170),
-                           rounding=5, parent=dl)
-        _txt(dl, ub_x + 22, ub_y + 8, "UNDO",
-             (*C["gold_lt"][:3], 230 if can_undo else 95), 20, "raj_sb_20")
+        cyber.draw_cut_rect(dl, ub_x, ub_y, ub_x + ub_w, ub_y + ub_h, cut=7,
+                            fill=(*C["panel"][:3], 185 if can_undo else 70),
+                            color=None)
+        cyber.draw_marching_dash(dl, ub_x, ub_y, ub_x + ub_w, ub_y + ub_h,
+                                 (*C["cy"][:3], 210 if can_undo else 80),
+                                 dash=8, gap=6, speed=14)
+        _txt(dl, ub_x + 22, ub_y + 9, "UNDO",
+             (*C["cy_lt"][:3], 235 if can_undo else 95), 18, "mono_18")
         if can_undo:
             _board_hits.append((ub_x, ub_y, ub_w, ub_h, "undo", None))
     cb_w, cb_h = 100, 38
     cb_x = vw - cb_w - 14
     cb_y = (hdr_h - cb_h) // 2
-    dpg.draw_rectangle((cb_x, cb_y), (cb_x+cb_w, cb_y+cb_h),
-                       fill=(*C["card"][:3], 165),
-                       color=(*C["rule_dark"][:3], 170), rounding=5, parent=dl)
-    _txt(dl, cb_x + 26, cb_y + 8, "EXIT", (*C["txt2"][:3], 210), 20, "raj_sb_20")
+    cyber.draw_cut_rect(dl, cb_x, cb_y, cb_x + cb_w, cb_y + cb_h, cut=7,
+                        fill=(*C["panel"][:3], 170), color=None)
+    cyber.draw_marching_dash(dl, cb_x, cb_y, cb_x + cb_w, cb_y + cb_h,
+                             (*C["mg"][:3], 205), dash=8, gap=6, speed=14)
+    _txt(dl, cb_x + 28, cb_y + 9, "EXIT", (*C["mg_lt"][:3], 225), 18, "mono_18")
     _board_hits.append((cb_x, cb_y, cb_w, cb_h, "exit", None))
 
     # ── Timeline strip (20 actions) ──────────────────────────────────
@@ -1634,21 +1696,20 @@ def _draw_board(dl, vw, vh):
     cell_w  = (vw - 32) / 20.0
 
     # Phase header band: BANS 1 · PICKS 1 · BANS 2 · PICKS 2
-    PHASE_LABEL_COLOR = (*C["gold_lt"][:3], 215)
-    PHASE_DIV_COLOR   = (*C["gold_dk"][:3], 230)
+    PHASE_LABEL_COLOR = (*C["cy_lt"][:3], 220)
+    PHASE_DIV_COLOR   = (*C["cy"][:3], 210)
     phase_spans = (("BANS 1", 0, 6), ("PICKS 1", 6, 12),
                    ("BANS 2", 12, 16), ("PICKS 2", 16, 20))
-    # Soft background under the phase labels
-    dpg.draw_rectangle((16, tl_y), (16 + 20 * cell_w, tl_y + phase_h),
-                       fill=(*C["panel"][:3], 200),
-                       color=(0, 0, 0, 0), rounding=3, parent=dl)
+    # Thin scanline strip behind the floating phase labels (no solid panel)
+    cyber.draw_scanlines(dl, 16, tl_y, int(20 * cell_w), phase_h,
+                         color=C["scan_gy"], alpha=18, spacing=5, speed=0)
     for label, start, end in phase_spans:
         cx_lo = 16 + start * cell_w
         cx_hi = 16 + end   * cell_w
-        lbl_w = len(label) * 8
+        lbl_w = len(label) * 9
         lx    = cx_lo + ((cx_hi - cx_lo) - lbl_w) // 2
-        _txt(dl, lx, tl_y + 5, label, PHASE_LABEL_COLOR, 14, "raj_sb_14")
-    # Vertical dividers between phases (after action 5, 11, 15)
+        _txt(dl, lx, tl_y + 4, label, PHASE_LABEL_COLOR, 14, "mono_14")
+    # Cyan vertical dividers between phases (after action 6, 12, 16)
     for boundary in (6, 12, 16):
         bx = int(16 + boundary * cell_w)
         dpg.draw_line((bx, tl_y), (bx, cells_y + cells_h),
@@ -1656,7 +1717,7 @@ def _draw_board(dl, vw, vh):
     # Outer baseline under the whole timeline
     dpg.draw_line((16, cells_y + cells_h),
                   (int(16 + 20 * cell_w), cells_y + cells_h),
-                  color=(*C["rule_dark"][:3], 200),
+                  color=(*C["cy_dk"][:3], 210),
                   thickness=1, parent=dl)
 
     # Detect a fresh lock and start the cell-pop animation.
@@ -1675,9 +1736,10 @@ def _draw_board(dl, vw, vh):
         cx0 = 16 + a.idx * cell_w
         is_cur = (act is not None and a.idx == act.idx)
         done = a.idx < b.pointer
-        side_c = C["platinum"][:3] if a.side == "BLUE" else (210, 90, 90)
+        side_c  = _side_accent(a.side)
+        side_lt = _side_accent(a.side, lt=True)
         if is_cur:
-            pulse = (math.sin(time.monotonic() * 4) + 1) / 2
+            pulse = cyber.wave(1.6, 0.0, 1.0)
             fill_a = int(70 + pulse * 90)
         elif done:
             fill_a = 60
@@ -1695,17 +1757,34 @@ def _draw_board(dl, vw, vh):
         else:
             border_alpha = 210 if is_cur else 80
             border_thick = 2 if is_cur else 1
-        dpg.draw_rectangle((cx0 + 1, cells_y),
-                           (cx0 + cell_w - 1, cells_y + cells_h),
-                           fill=(*side_c, fill_a),
-                           color=(*side_c, border_alpha),
-                           thickness=border_thick,
-                           rounding=4, parent=dl)
-        kind_c = (C["gold_lt"][:3] if a.kind == "pick" else (210, 120, 100))
+        # §5.7 glow trail — multi-layer halo behind the on-the-clock cell
+        if is_cur:
+            gp = cyber.wave(1.6, 0.35, 1.0)
+            for gi in range(6):
+                ga = int(110 * (1 - gi / 6) * gp)
+                if ga <= 0:
+                    continue
+                dpg.draw_rectangle((cx0 + 1 - gi, cells_y - gi),
+                                   (cx0 + cell_w - 1 + gi,
+                                    cells_y + cells_h + gi),
+                                   fill=(0, 0, 0, 0),
+                                   color=(*side_lt, ga),
+                                   thickness=1, rounding=4, parent=dl)
+        cyber.draw_cut_rect(dl, cx0 + 1, cells_y,
+                            cx0 + cell_w - 1, cells_y + cells_h, cut=6,
+                            fill=(*side_c, fill_a),
+                            color=(*side_c, border_alpha),
+                            thickness=border_thick)
+        if is_cur:
+            cyber.draw_marching_dash(dl, cx0 + 1, cells_y,
+                                     cx0 + cell_w - 1, cells_y + cells_h,
+                                     (*side_lt, 235), dash=7, gap=5,
+                                     speed=18, thickness=2)
+        kind_c = side_lt if a.kind == "pick" else C["mg_lt"][:3]
         side_letter = "B" if a.side == "BLUE" else "R"
         label_str = f"{side_letter} {a.kind.upper()}"
         _txt(dl, cx0 + 6, cells_y + 6, label_str,
-             (*kind_c, 230 if (is_cur or done) else 140), 16, "raj_sb_16")
+             (*kind_c, 230 if (is_cur or done) else 140), 14, "mono_14")
         locked = b.locked_at(a.idx)         # exact (from history)
         if locked:
             # Pop scale on the locked text — bigger size early in the anim
@@ -1717,49 +1796,107 @@ def _draw_board(dl, vw, vh):
                 lock_sz = 18
             _txt(dl, cx0 + 6, cells_y + 34, locked[:8],
                  (*C["txt"][:3], 230), lock_sz, "raj_sb_18")
+            # 1px cyan underline beneath the locked champion name
+            ul_w = min(int(cell_w) - 12, len(locked[:8]) * (lock_sz // 2 + 2))
+            dpg.draw_line((cx0 + 6, cells_y + 34 + lock_sz + 2),
+                          (cx0 + 6 + ul_w, cells_y + 34 + lock_sz + 2),
+                          color=(*side_lt, 170), thickness=1, parent=dl)
 
-    # ── Team columns + center recommendation panel ───────────────────
+    # §3 #27 — action-queue preview in the header (wide viewports only)
+    if vw >= 1500:
+        try:
+            board_rail.draw_action_queue(dl, 470, 18, vw - 820, b, _txt,
+                                         DRAFT_SEQUENCE)
+        except Exception:
+            pass
+
+    # ── Layout A: stacked team column · center · right analytics rail ─
     body_y = tl_y + tl_h + 14
-    col_w = 250
-    cen_x = 16 + col_w + 16
-    cen_w = vw - 32 - (col_w + 16) * 2
-    body_h = vh - body_y - 14
+    narr_h = 26
+    narr_y = vh - narr_h - 8
+    if vw <= 1300:
+        col_w, rail_w = 178, 220
+    else:
+        col_w, rail_w = 200, 300
+    gap    = 14
+    left_x = 16
+    rail_x = vw - 16 - rail_w
+    cen_x  = left_x + col_w + gap
+    cen_w  = rail_x - gap - cen_x
+    body_h = (narr_y - 10) - body_y
+    team_h = (body_h - 10) // 2
 
-    _draw_board_team(dl, 16, body_y, col_w, body_h, b, "BLUE", act)
-    _draw_board_team(dl, vw - 16 - col_w, body_y, col_w, body_h, b, "RED", act)
+    _draw_board_team(dl, left_x, body_y, col_w, team_h, b, "BLUE", act)
+    _draw_board_team(dl, left_x, body_y + team_h + 10, col_w, team_h,
+                     b, "RED", act)
     _draw_board_center(dl, cen_x, body_y, cen_w, body_h, b, rec,
                        interactive=not live_connected)
+    try:
+        board_rail.draw_rail(dl, rail_x, body_y, rail_w, body_h, b, rec,
+                             _txt, getattr(live, "inhouse_champs", {}) or {},
+                             getattr(live, "primary_roles", {}) or {})
+    except Exception:
+        pass
+    try:
+        board_rail.draw_narrative(dl, left_x, narr_y, vw - 32, narr_h,
+                                  b, _txt)
+    except Exception:
+        pass
+
+    # §6 / A1 — full-screen scanline overlay, STATIC (speed=0) faint CRT
+    # grain. No scroll: user found the moving background too distracting.
+    # Still suppressed entirely by CALM MODE.
+    cyber.draw_scanlines(dl, 0, hdr_h, vw, vh - hdr_h,
+                         color=C["scan_gy"], alpha=8, spacing=6, speed=0)
 
 
 def _draw_board_team(dl, x, y, w, h, b, side, act):
-    accent = C["platinum"][:3] if side == "BLUE" else (215, 95, 95)
-    _panel_bg(dl, x, y, x + w, y + h, accent, 255)
+    accent    = _side_accent(side)
+    accent_lt = _side_accent(side, lt=True)
+    _panel_bg(dl, x, y, x + w, y + h, accent, 255, cut=True, cut_sz=14)
     on_clock = (act is not None and act.side == side)
-    label = f"{side} TEAM" + ("   * ON THE CLOCK" if on_clock else "")
-    _txt(dl, x + 14, y + 12, label, (*accent, 235), 24, "raj_sb_24")
-    ry = y + 56
-    slot_h = 56
+    callsign = "BLUE OPS" if side == "BLUE" else "RED OPS"
+    cyber.draw_bracket_label(dl, x + 12, y + 12, callsign,
+                             (*accent_lt, 240), 22, _txt,
+                             font_key="mono_22",
+                             bracket_color=(*accent, 215), char_w=0.62)
+    if on_clock:
+        # A8 — terminal cursor blink beside the on-the-clock callsign
+        blink = (not cyber.motion_on()) or (int(time.monotonic() * 2) % 2 == 0)
+        _txt(dl, x + 12, y + 36, ("> ON THE CLOCK" + (" _" if blink else "")),
+             (*C["term_g"][:3], 225), 12, "mono_12")
+    ry = y + 54
+    # Adaptive slot height — two team panels are stacked in one narrow
+    # column under Layout A, so size slots to the available height.
+    avail  = h - 54 - 70                 # header above · bans block below
+    slot_h = max(30, min(56, avail // 5 - 6))
+    port_sz = max(24, min(40, slot_h - 12))
+    name_sz = 18 if slot_h >= 46 else (16 if slot_h >= 38 else 14)
+    lock_sz = 20 if slot_h >= 46 else (18 if slot_h >= 38 else 16)
+    name_key = ("raj_sb_18" if name_sz >= 18 else
+                "raj_sb_16" if name_sz >= 16 else "raj_sb_14")
+    lock_key = ("raj_sb_20" if lock_sz >= 20 else
+                "raj_sb_18" if lock_sz >= 18 else "raj_sb_16")
     for i, role in enumerate(_ROLES):
         pl = b.players[side][i]
         champ = b.picks[side].get(role)
-        dpg.draw_rectangle((x + 10, ry), (x + w - 10, ry + slot_h),
-                           fill=(*C["card"][:3], 165),
-                           color=(*C["rule_dark"][:3], 135),
-                           rounding=5, parent=dl)
-        # Role accent stripe (left edge)
+        cyber.draw_cut_rect(dl, x + 10, ry, x + w - 10, ry + slot_h, cut=6,
+                            fill=(*C["card"][:3], 165),
+                            color=(*C["cy_dk"][:3], 150), thickness=1)
+        # Role accent stripe (left edge, widened to 6px) + scanline tint
         rc = _ROLE_COLORS.get(role, (120, 120, 120))
-        dpg.draw_rectangle((x + 10, ry), (x + 14, ry + slot_h),
+        dpg.draw_rectangle((x + 10, ry), (x + 16, ry + slot_h),
                            fill=(*rc, 220), color=(0, 0, 0, 0),
-                           rounding=2, parent=dl)
-        # Champion portrait (40×40, only when locked — otherwise blank)
-        port_sz = 40
+                           rounding=0, parent=dl)
+        cyber.draw_scanlines(dl, x + 10, ry, 6, slot_h,
+                             color=C["scan_gy"], alpha=26, spacing=4, speed=0)
+        # Champion portrait (only when locked — otherwise blank)
         port_x  = x + 20
         port_y  = ry + (slot_h - port_sz) // 2
         if champ:
             _draw_portrait(dl, port_x, port_y, port_sz, champ, rc,
                            alpha=240, rounding=5, border_w=2)
         else:
-            # Subtle empty placeholder
             dpg.draw_rectangle((port_x, port_y),
                                (port_x + port_sz, port_y + port_sz),
                                fill=(*C["bg"][:3], 110),
@@ -1767,35 +1904,66 @@ def _draw_board_team(dl, x, y, w, h, b, side, act):
                                thickness=1, rounding=5, parent=dl)
         # Role + player text (shifted right of portrait)
         txt_x = port_x + port_sz + 8
-        _txt(dl, txt_x, ry + 5, role, (*C["txt2"][:3], 190), 16, "raj_sb_16")
-        _txt(dl, txt_x, ry + 26, (pl.get("name", "?")[:8]),
-             (*C["txt"][:3], 225), 18, "raj_sb_18")
-        # Locked-champion name (right side, smaller now since portrait conveys identity)
-        cc = (*C["gold_lt"][:3], 240) if champ else (*C["txt2"][:3], 125)
+        _txt(dl, txt_x, ry + 4, role, (*accent, 200), 12, "mono_12")
+        _txt(dl, txt_x, ry + slot_h - name_sz - 5,
+             (pl.get("name", "?")[:8]),
+             (*C["txt"][:3], 225), name_sz, name_key)
+        # Locked-champion name (right side; cyan/magenta-tinted, gold demoted)
+        cc = (*accent_lt, 245) if champ else (*C["txt2"][:3], 125)
         cstr = (champ or "—")[:8]
-        ctw  = len(cstr) * 11
-        _txt(dl, x + w - 16 - ctw, ry + 20, cstr, cc, 19, "raj_sb_20")
+        ctw  = len(cstr) * (lock_sz // 2 + 1)
+        _txt(dl, x + w - 14 - ctw, ry + (slot_h - lock_sz) // 2,
+             cstr, cc, lock_sz, lock_key)
+        # §3 #7 — pool-depth capsule: viable comfort picks left (pre-pick)
+        if not champ:
+            try:
+                depth = len(_candidates_for_player(
+                    pl, role, getattr(live, "inhouse_champs", {}) or {},
+                    getattr(live, "primary_roles", {}) or {},
+                    b.used_champs(), k=10))
+            except Exception:
+                depth = 0
+            cap_x = x + w - 13
+            cap_h = slot_h - 14
+            cap_y = ry + 7
+            dpg.draw_rectangle((cap_x, cap_y), (cap_x + 4, cap_y + cap_h),
+                               fill=(*C["bg"][:3], 140), color=(0, 0, 0, 0),
+                               parent=dl)
+            f = max(0.0, min(1.0, depth / 8.0))
+            fh = int(cap_h * f)
+            dcol = (C["term_g"][:3] if depth >= 5 else
+                    C["amb"][:3] if depth >= 2 else C["alert_r"][:3])
+            if fh > 0:
+                dpg.draw_rectangle((cap_x, cap_y + cap_h - fh),
+                                   (cap_x + 4, cap_y + cap_h),
+                                   fill=(*dcol, 220), color=(0, 0, 0, 0),
+                                   parent=dl)
         ry += slot_h + 6
-    # bans row
-    _txt(dl, x + 14, ry + 6, "BANS", (*C["txt2"][:3], 185), 14, "raj_sb_14")
-    by = ry + 30
-    bw_each = (w - 28) // 5
-    for j in range(5):
-        bx = x + 14 + j * bw_each
-        ch = b.bans[side][j] if j < len(b.bans[side]) else None
-        dpg.draw_rectangle((bx, by), (bx + bw_each - 4, by + 32),
-                           fill=(*C["bg"][:3], 185),
-                           color=(170, 90, 90, 130), rounding=4, parent=dl)
-        # Banned champion text in a cool gray — signals "removed from game",
-        # not "active threat" (which the side accent already conveys).
-        _txt(dl, bx + 5, by + 7, (ch or "—")[:6],
-             (165, 165, 165, 230 if ch else 95), 14, "raj_sb_14")
+    # bans row — only if it still fits inside this (possibly short) panel
+    if ry + 44 <= y + h:
+        cyber.draw_bracket_label(dl, x + 14, ry + 4, "BANS",
+                                 (*C["mg"][:3], 205), 14, _txt,
+                                 font_key="mono_14",
+                                 bracket_color=(*C["mg_dk"][:3], 215),
+                                 char_w=0.6)
+        by = ry + 26
+        bh = min(30, (y + h) - by - 4)
+        bw_each = (w - 28) // 5
+        for j in range(5):
+            bx = x + 14 + j * bw_each
+            ch = b.bans[side][j] if j < len(b.bans[side]) else None
+            cyber.draw_cut_rect(dl, bx, by, bx + bw_each - 4, by + bh,
+                                cut=4, fill=(*C["bg"][:3], 190),
+                                color=(*C["mg_dk"][:3], 175), thickness=1)
+            _txt(dl, bx + 5, by + max(2, (bh - 13) // 2), (ch or "—")[:6],
+                 (165, 165, 165, 230 if ch else 95), 13, "mono_12")
+        ry = by + bh
 
     # ── Enemy "LIKELY NEXT" preview ribbon ──────────────────────────
     # Only on the OPPOSING side (the user's intel about the enemy team).
     # Slides in / fades on each actor change for a polished feel.
     if hasattr(b, "our_side") and side != b.our_side:
-        ribbon_top = by + 32 + 16
+        ribbon_top = ry + 16
         if ribbon_top + 40 < y + h - 4:
             preview = _enemy_pick_preview(b, side, n=3)
             if preview:
@@ -1814,58 +1982,71 @@ def _draw_board_team(dl, x, y, w, h, b, side, act):
 
                 rib_x = x + 12 + slide_dx
                 rib_w = w - 24 - slide_dx
-                # Container background
-                dpg.draw_rectangle((rib_x, ribbon_top),
-                                   (rib_x + rib_w, ribbon_top + 22),
-                                   fill=(*C["panel"][:3], int(fade * 0.78)),
-                                   color=(0, 0, 0, 0),
-                                   rounding=4, parent=dl)
-                _txt(dl, rib_x + 8, ribbon_top + 3, "LIKELY NEXT",
-                     (*C["gold_lt"][:3], int(fade * 0.85)), 12, "raj_sb_12")
+                # Container — corner-cut side-accent panel
+                cyber.draw_cut_rect(dl, rib_x, ribbon_top,
+                                    rib_x + rib_w, ribbon_top + 22, cut=5,
+                                    fill=(*C["panel_dk"][:3], int(fade * 0.82)),
+                                    color=(*accent, int(fade * 0.55)),
+                                    thickness=1)
+                cyber.draw_bracket_label(dl, rib_x + 6, ribbon_top + 3,
+                                         "LIKELY NEXT",
+                                         (*accent_lt, int(fade * 0.90)), 12,
+                                         _txt, font_key="mono_12",
+                                         bracket_color=(*accent,
+                                                        int(fade * 0.7)),
+                                         char_w=0.6)
                 row_y = ribbon_top + 28
                 for role, pname, names in preview[:3]:
                     if row_y + 22 > y + h - 4:
                         break
                     rc = _ROLE_COLORS.get(role, (140, 140, 140))
                     # Role badge
-                    dpg.draw_rectangle((rib_x + 4, row_y),
-                                       (rib_x + 38, row_y + 18),
-                                       fill=(*rc, int(fade * 0.20)),
-                                       color=(*rc, int(fade * 0.85)),
-                                       rounding=3, parent=dl)
+                    cyber.draw_cut_rect(dl, rib_x + 4, row_y,
+                                        rib_x + 38, row_y + 18, cut=3,
+                                        fill=(*rc, int(fade * 0.20)),
+                                        color=(*rc, int(fade * 0.85)),
+                                        thickness=1)
                     _txt(dl, rib_x + 8, row_y + 1, role[:4],
-                         (*rc, fade), 12, "raj_sb_12")
+                         (*rc, fade), 12, "mono_12")
                     # Likely champ list — top 2 with shorter separator so
                     # full champion names survive at narrow column widths.
                     line = " & ".join(names[:2]) if names else "—"
-                    max_chars = max(10, (rib_w - 52) // 7)
+                    max_chars = max(9, (rib_w - 52) // 8)
                     if len(line) > max_chars:
                         line = line[:max_chars - 1] + "…"
-                    _txt(dl, rib_x + 44, row_y + 1, line,
+                    _txt(dl, rib_x + 44, row_y + 2, line,
                          (*C["txt"][:3], int(fade * 0.92)),
-                         13, "raj_sb_14")
+                         13, "mono_12")
                     row_y += 22
 
 
 def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
     _gradient_frame(dl, x, y, x + w, y + h,
-                    C["gold"][:3], C["gold_dk"][:3], alpha=150, layers=3)
-    _panel_bg(dl, x, y, x + w, y + h, C["gold"], 255)
+                    C["cy_lt"][:3], C["cy_dk"][:3], alpha=160, layers=4)
+    _panel_bg(dl, x, y, x + w, y + h, C["cy"], 255, cut=True, cut_sz=18)
 
     if rec.get("done") or b.is_complete():
-        _txt(dl, x + w//2 - 120, y + h//2 - 60, "DRAFT COMPLETE",
-             (*C["gold"][:3], 235), 30, "cinzel_28")
-        _txt(dl, x + w//2 - 150, y + h//2 - 18,
+        cyber.draw_bracket_label(dl, x + w//2 - 130, y + h//2 - 60,
+                                 "DRAFT COMPLETE",
+                                 (*C["cy_lt"][:3], 240), 28, _txt,
+                                 font_key="mono_28",
+                                 bracket_color=(*C["cy"][:3], 220),
+                                 char_w=0.62)
+        _txt(dl, x + w//2 - 150, y + h//2 - 14,
              "Full team comps locked - review the board",
-             (*C["txt2"][:3], 180), 16, "raj_sb_14")
+             (*C["txt2"][:3], 185), 15, "mono_14")
         nb_w, nb_h = 220, 46
         nbx = x + w//2 - nb_w//2
         nby = y + h//2 + 24
-        dpg.draw_rectangle((nbx, nby), (nbx+nb_w, nby+nb_h),
-                           fill=(*C["gold_dk"][:3], 220),
-                           color=(*C["gold"][:3], 220), rounding=6, parent=dl)
-        _txt(dl, nbx + 46, nby + 11, "NEW DRAFT",
-             (*C["gold_lt"][:3], 235), 22, "raj_sb_22")
+        nb_hov = interactive and _hover(nbx, nby, nb_w, nb_h)
+        cyber.draw_cut_rect(dl, nbx, nby, nbx + nb_w, nby + nb_h, cut=10,
+                            fill=(*C["cy_dk"][:3], 230 if nb_hov else 200),
+                            color=None)
+        cyber.draw_marching_dash(dl, nbx, nby, nbx + nb_w, nby + nb_h,
+                                 (*C["cy_lt"][:3], 235), dash=9, gap=6,
+                                 speed=16, thickness=2)
+        _txt(dl, nbx + 52, nby + 12, "NEW DRAFT",
+             (*C["cy_lt"][:3], 240), 22, "mono_22")
         _board_hits.append((nbx, nby, nb_w, nb_h, "new", None))
         return
 
@@ -1874,40 +2055,61 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
 
     # ── Side-tinted top edge stripe (subtle side identity wash) ──────
     if act:
-        side_tint = (90, 160, 240) if act.side == "BLUE" else (220, 110, 110)
+        side_tint = _side_accent(act.side, lt=True)
         for i in range(10):
-            ta = int(38 * (1 - i / 10))
+            ta = int(40 * (1 - i / 10))
             dpg.draw_line((x + 6, y + 2 + i),
                           (x + w - 6, y + 2 + i),
                           color=(*side_tint, ta),
                           thickness=1, parent=dl)
 
-    # ── Action banner: side-tinted, phase + step counter ─────────────
-    banner = (220, 170, 60) if our_turn else (120, 130, 150)
+    # ── Action banner: cyan = our turn, magenta = opponent turn ──────
+    banner = C["cy"][:3] if our_turn else C["mg"][:3]
     # Subtle shimmer when it's our turn — pulses the border alpha gently
     if our_turn:
-        bpulse = (math.sin(time.monotonic() * 1.9) + 1) / 2
+        bpulse = cyber.wave(3.3, 0.0, 1.0)
         banner_border_a = int(190 + bpulse * 60)
         banner_fill_a   = int(50 + bpulse * 16)
     else:
         banner_border_a = 215
         banner_fill_a   = 55
-    dpg.draw_rectangle((x + 10, y + 10), (x + w - 10, y + 68),
-                       fill=(*banner, banner_fill_a),
-                       color=(*banner, banner_border_a),
-                       thickness=2, rounding=5, parent=dl)
+    cyber.draw_cut_rect(dl, x + 10, y + 10, x + w - 10, y + 68, cut=16,
+                        fill=(*banner, banner_fill_a),
+                        color=(*banner, banner_border_a), thickness=2)
     # Top-edge inner highlight (rich-card feel)
     for hi in range(5):
         ha = int(60 * (1 - hi / 5))
-        dpg.draw_line((x + 14, y + 12 + hi), (x + w - 14, y + 12 + hi),
+        dpg.draw_line((x + 16, y + 12 + hi), (x + w - 16, y + 12 + hi),
                       color=(*banner, ha), thickness=1, parent=dl)
     if act:
-        head = f"{'YOUR' if our_turn else 'OPPONENT'} {act.kind.upper()}"
+        head = f"> {'YOUR' if our_turn else 'OPPONENT'} {act.kind.upper()}"
         sub = f"{act.label}  ·  phase {act.phase}  ·  step {act.idx+1}/20"
     else:
-        head, sub = "—", ""
-    _txt(dl, x + 22, y + 18, head, (*C["gold_lt"][:3], 240), 26, "raj_sb_26")
-    _txt(dl, x + 22, y + 48, sub, (*C["txt2"][:3], 215), 15, "raj_sb_16")
+        head, sub = "> —", ""
+    _txt(dl, x + 22, y + 18, head,
+         (*(C["cy_lt"][:3] if our_turn else C["mg_lt"][:3]), 245),
+         22, "mono_22")
+    _txt(dl, x + 22, y + 48, sub, (*C["txt2"][:3], 220), 14, "mono_14")
+
+    # §3 #8 — LCU phase-countdown bar on the banner (live mode only; manual
+    # has no clock so nothing is drawn — no gratuitous idle motion).
+    if not interactive:
+        snap = getattr(draft, "board_live_session", None) or {}
+        tleft = float(snap.get("timer_left", 0) or 0)
+        if tleft > 0:
+            frac = max(0.0, min(1.0, tleft / 30.0))
+            tcol_ = (C["alert_r"][:3] if tleft <= 5 else
+                     C["amb"][:3] if tleft <= 10 else C["cy_lt"][:3])
+            bx0, bx1 = x + 14, x + w - 14
+            bw_ = int((bx1 - bx0) * frac)
+            dpg.draw_line((bx0, y + 65), (bx1, y + 65),
+                          color=(*C["cy_dk"][:3], 150), thickness=2,
+                          parent=dl)
+            if bw_ > 1:
+                dpg.draw_line((bx0, y + 65), (bx0 + bw_, y + 65),
+                              color=(*tcol_, 240), thickness=3, parent=dl)
+            _txt(dl, bx1 - 52, y + 46, f"{int(tleft):>2}s",
+                 (*tcol_, 240), 14, "mono_14")
 
     ny = y + 80
 
@@ -1921,49 +2123,60 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
     tc_enemy = _enemy_target_comp(b, act)
     if tc.get("label") or tc_enemy.get("label"):
         sp_h     = 50
-        OUR_COL  = C["platinum"][:3] if (act and act.side == "BLUE") else (220, 110, 110)
-        ENEMY_COL = (220, 110, 110) if (act and act.side == "BLUE") else C["platinum"][:3]
-        dpg.draw_rectangle((x + 14, ny), (x + w - 14, ny + sp_h),
-                           fill=(*C["panel"][:3], 205),
-                           color=(*C["gold_dk"][:3], 190),
-                           thickness=1, rounding=5, parent=dl)
-        _txt(dl, x + 22, ny + 5, "STRATEGIC",
-             (*C["gold_lt"][:3], 235), 13, "raj_sb_14")
-        # Our line — left-edge color stripe (side-tinted) + label
+        OUR_COL   = _side_accent(act.side) if act else C["cy"][:3]
+        OUR_LT    = _side_accent(act.side, lt=True) if act else C["cy_lt"][:3]
+        ENEMY_COL = (_side_accent("RED" if act.side == "BLUE" else "BLUE")
+                     if act else C["mg"][:3])
+        cyber.draw_cut_rect(dl, x + 14, ny, x + w - 14, ny + sp_h, cut=8,
+                            fill=(*C["panel_dk"][:3], 210),
+                            color=(*C["cy_dk"][:3], 200), thickness=1)
+        cyber.draw_bracket_label(dl, x + 20, ny + 4, "TACTICAL READOUT",
+                                 (*C["cy_lt"][:3], 235), 13, _txt,
+                                 font_key="mono_12",
+                                 bracket_color=(*C["cy"][:3], 210),
+                                 char_w=0.6)
+        # Middle divider between the two readouts
+        mid_x = x + w // 2 + 4
+        dpg.draw_line((mid_x - 6, ny + 22), (mid_x - 6, ny + sp_h - 4),
+                      color=(*C["cy_dk"][:3], 170), thickness=1, parent=dl)
+        # Our readout — [ OUR ] callsign + side-tinted stripe
         if tc.get("label"):
             dpg.draw_rectangle((x + 18, ny + 24), (x + 22, ny + 44),
                                fill=(*OUR_COL, 220), color=(0, 0, 0, 0),
-                               rounding=2, parent=dl)
-            our_label = tc.get("label", "")[:30]
-            our_spike = (tc.get("spike", "") or tc.get("win_condition", ""))[:34]
-            our_line  = f"You:  {our_label}" + (f"  ·  {our_spike}" if our_spike else "")
-            _txt(dl, x + 28, ny + 25, our_line[:62],
-                 (*C["gold"][:3], 240), 14, "raj_sb_14")
-        # Enemy line — right-edge color stripe + label
+                               parent=dl)
+            our_label = tc.get("label", "")[:24]
+            our_spike = (tc.get("spike", "") or tc.get("win_condition", ""))[:26]
+            our_line  = our_label + (f"  ·  {our_spike}" if our_spike else "")
+            _txt(dl, x + 28, ny + 25, "[ OUR ]",
+                 (*OUR_LT, 235), 12, "mono_12")
+            _txt(dl, x + 86, ny + 25, our_line[:40],
+                 (*C["txt"][:3], 240), 13, "mono_12")
+        # Enemy readout — [ ENEMY ] callsign + right-edge stripe
         if tc_enemy.get("label"):
-            mid_x = x + w // 2 + 4
             dpg.draw_rectangle((mid_x, ny + 24), (mid_x + 4, ny + 44),
                                fill=(*ENEMY_COL, 220), color=(0, 0, 0, 0),
-                               rounding=2, parent=dl)
-            ene_label = tc_enemy.get("label", "")[:30]
-            ene_spike = (tc_enemy.get("spike", "") or tc_enemy.get("win_condition", ""))[:34]
-            ene_line  = f"Enemy:  {ene_label}" + (f"  ·  {ene_spike}" if ene_spike else "")
-            _txt(dl, mid_x + 10, ny + 25, ene_line[:62],
-                 (*ENEMY_COL, 240), 14, "raj_sb_14")
+                               parent=dl)
+            ene_label = tc_enemy.get("label", "")[:24]
+            ene_spike = (tc_enemy.get("spike", "") or tc_enemy.get("win_condition", ""))[:26]
+            ene_line  = ene_label + (f"  ·  {ene_spike}" if ene_spike else "")
+            _txt(dl, mid_x + 10, ny + 25, "[ ENEMY ]",
+                 (*C["mg_lt"][:3], 235), 12, "mono_12")
+            _txt(dl, mid_x + 84, ny + 25, ene_line[:36],
+                 (*C["txt"][:3], 240), 13, "mono_12")
         ny += sp_h + 8
 
-    # Phase reason (the meaningful note, not the redundant header echo)
+    # Context lines — terminal-style sigils, color coding preserved
     for note in (rec.get("notes") or [])[1:2]:
-        _txt(dl, x + 16, ny, note[:62], (*C["txt2"][:3], 205),
-             14, "raj_sb_14")
+        _txt(dl, x + 16, ny, f">  {note[:58]}", (*C["txt2"][:3], 210),
+             14, "mono_14")
         ny += 21
     for cw_ in (rec.get("cohesion") or [])[:2]:
-        _txt(dl, x + 16, ny, f"!  {cw_[:56]}", (220, 140, 90, 230),
-             15, "raj_sb_16")
+        _txt(dl, x + 16, ny, f"!  {cw_[:56]}", (*C["amb"][:3], 235),
+             14, "mono_14")
         ny += 21
     for exp in (rec.get("exploit") or [])[:2]:
-        _txt(dl, x + 16, ny, f"EXPLOIT  {exp[:52]}", (90, 195, 175, 230),
-             15, "raj_sb_16")
+        _txt(dl, x + 16, ny, f"+  {exp[:54]}", (*C["term_g"][:3], 235),
+             14, "mono_14")
         ny += 21
 
     # ── PRIMARY CALL — the #1 recommendation, emphasised ─────────────
@@ -1972,7 +2185,7 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
     if sug:
         s0 = sug[0]
         tag = s0.get("tag", "")
-        tcol = _BOARD_TAG_COL.get(tag, C["platinum"][:3])
+        tcol = _BOARD_TAG_COL.get(tag, C["cy"][:3])
         pc_h = 150
         ny += 8
 
@@ -1992,60 +2205,105 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
         hovered = (interactive
                    and _hover(x + 14, card_y, w - 28, pc_h))
 
-        # Pulsing accent line ABOVE the card — a subtle "loading" effect
-        # that visually anchors TOP CALL to the strategic context above.
-        div_pulse = (math.sin(time.monotonic() * 1.4) + 1) / 2
-        div_alpha = int(110 + div_pulse * 70)
+        # Pulsing accent line ABOVE the card — anchors TOP CALL to context.
+        div_alpha = int(110 + cyber.wave(4.5, 0.0, 1.0) * 70)
         dpg.draw_line((x + 24, ny - 6), (x + w - 24, ny - 6),
                       color=(*tcol, div_alpha), thickness=1, parent=dl)
 
-        # Halo glow — tag-colored radiating outlines around the card (subtle)
+        # Halo glow — intensified bloom (6 layers, brighter inner color)
         halo_dk = (max(0, tcol[0] - 90),
                    max(0, tcol[1] - 90),
                    max(0, tcol[2] - 90))
-        halo_alpha = 130 if hovered else 90
+        halo_alpha = 150 if hovered else 110
         _gradient_frame(dl, x + 14, card_y, x + w - 14, card_y + pc_h,
                         c_top=tcol, c_bot=halo_dk,
-                        alpha=halo_alpha, layers=4 if hovered else 3)
-        # Backdrop
-        dpg.draw_rectangle((x + 14, card_y), (x + w - 14, card_y + pc_h),
-                           fill=(*tcol, 50 if hovered else 42),
-                           color=(*tcol, 245 if hovered else 225),
-                           thickness=3 if hovered else 2,
-                           rounding=6, parent=dl)
-        # Inner top-edge gradient highlight — gives the card a "lit from above"
-        # feeling instead of looking like a flat colored rectangle.
+                        alpha=halo_alpha, layers=6)
+        # §3 #21 — splash-art backdrop with §5.5 ken-burns (degrades to
+        # portrait-only until the splash is fetched/registered).
+        try:
+            _sp = splash_art.get_texture(s0.get("champion", ""))
+        except Exception:
+            _sp = None
+        if _sp:
+            _seed = hash(s0.get("champion", "")) % 100
+            _t = ((time.monotonic() / 12.0) % 1.0) if cyber.motion_on() else 0.25
+            _ph = 0.5 + 0.5 * math.sin(_t * 2 * math.pi + _seed)
+            _jx = (_seed % 7 - 3) / 120.0 * _ph
+            _jy = ((_seed // 7) % 5 - 2) / 120.0 * _ph
+            _u0 = min(0.30, max(0.0, 0.05 + 0.03 * _ph + _jx))
+            _v0 = min(0.40, max(0.0, 0.14 + 0.04 * _ph + _jy))
+            _u1 = max(0.70, min(1.0, 0.95 + 0.03 * _ph + _jx))
+            _v1 = max(0.55, min(1.0, 0.62 + 0.04 * _ph + _jy))
+            try:
+                dpg.draw_image(_sp, (x + 15, card_y + 1),
+                               (x + w - 15, card_y + pc_h - 1),
+                               uv_min=(_u0, _v0), uv_max=(_u1, _v1),
+                               parent=dl)
+                # Readability scrim over the splash
+                dpg.draw_rectangle((x + 15, card_y + 1),
+                                   (x + w - 15, card_y + pc_h - 1),
+                                   fill=(*C["panel_dk"][:3], 158),
+                                   color=(0, 0, 0, 0), parent=dl)
+            except Exception:
+                pass
+        # Backdrop — heavy corner-cut hero panel
+        cyber.draw_cut_rect(dl, x + 14, card_y, x + w - 14, card_y + pc_h,
+                            cut=16,
+                            fill=(*tcol, 50 if hovered else 42),
+                            color=(*tcol, 245 if hovered else 225),
+                            thickness=3 if hovered else 2)
+        # Inner top-edge gradient highlight — "lit from above" feel.
         for hi in range(8):
             ha = int(80 * (1 - hi / 8))
-            dpg.draw_line((x + 18, card_y + 3 + hi),
-                          (x + w - 18, card_y + 3 + hi),
+            dpg.draw_line((x + 22, card_y + 3 + hi),
+                          (x + w - 22, card_y + 3 + hi),
                           color=(*tcol, ha), thickness=1, parent=dl)
+        # §2.8 scanning bar — single line sweeping top→bottom every 3s
+        if cyber.motion_on():
+            scan_f = (time.monotonic() / 3.0) % 1.0
+            scan_y = int(card_y + 6 + (pc_h - 12) * scan_f)
+            dpg.draw_line((x + 18, scan_y), (x + w - 18, scan_y),
+                          color=(*tcol, 70), thickness=1, parent=dl)
 
-        # Champion portrait (left, 96×96 vertically centered)
+        # Champion portrait (left, 96×96) — holographic flicker (§5.8)
         portrait_sz = 96
         port_x = x + 20
         port_y = card_y + (pc_h - portrait_sz) // 2
+        port_a = cyber.flicker_alpha(245, hz=6, ampl=0.08)
         _draw_portrait(dl, port_x, port_y, portrait_sz,
                        s0.get("champion", ""), tcol,
-                       alpha=245, rounding=8, border_w=3)
-        # Inner glow rim around the portrait — 1px inset bright outline,
-        # adds depth and makes the portrait feel "embedded" not "pasted on".
+                       alpha=port_a, rounding=8, border_w=3)
+        # Inner glow rim around the portrait.
         dpg.draw_rectangle((port_x + 2, port_y + 2),
                            (port_x + portrait_sz - 2,
                             port_y + portrait_sz - 2),
                            fill=(0, 0, 0, 0),
                            color=(*tcol, 130),
                            thickness=1, rounding=6, parent=dl)
+        # §5.8 scanline scrub — bright line sweeps the portrait every 4s
+        if cyber.motion_on():
+            sc_t = (time.monotonic() / 4.0) % 1.0
+            sc_y = int(port_y + portrait_sz * sc_t)
+            dpg.draw_line((port_x, sc_y), (port_x + portrait_sz, sc_y),
+                          color=(*C["cy_lt"][:3], 170), thickness=1,
+                          parent=dl)
 
         # ─ Right-column text content ─────────────────────────────────
         text_x  = port_x + portrait_sz + 18
         right_x = x + w - 22                       # right edge for chips
 
-        # ROW 1 (header): caption + tag pill on left;
+        # ROW 1 (header): [ TOP CALL ] caption + tag chip on left;
         #                 score-gap chip + viability chip on right
-        _txt(dl, text_x, card_y + 14, "TOP CALL",
-             (*tcol, 230), 13, "raj_sb_14")
-        chip_w_used = _draw_tag_chip(dl, text_x + 96, card_y + 9,
+        cap_w = cyber.draw_bracket_label(dl, text_x, card_y + 12, "TOP CALL",
+                                         (*tcol, 235), 13, _txt,
+                                         font_key="mono_12",
+                                         bracket_color=(*tcol, 200),
+                                         char_w=0.62)
+        # Marching-dash underline under the caption
+        cyber.draw_marching_dash(dl, text_x, card_y + 28,
+                                 text_x + cap_w, card_y + 29,
+                                 (*tcol, 180), dash=6, gap=4, speed=12)
+        chip_w_used = _draw_tag_chip(dl, text_x + 110, card_y + 9,
                                       tag, alpha=245, big=True)
 
         # Score gap to next-best (only show if meaningful)
@@ -2056,39 +2314,48 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
             except (TypeError, ValueError):
                 gap = 0.0
             if gap >= 0.05:
-                # Pulse alpha when gap is dominant (>= 0.15)
+                # §3 #30 — confidence meter (replaces the +N-vs-#2 chip):
+                # score gap mapped to a 0-100% conviction bar.
                 if gap >= 0.15:
-                    pulse = (math.sin(time.monotonic() * 2.4) + 1) / 2
-                    g_alpha = int(190 + pulse * 60)
+                    g_alpha = int(190 + cyber.wave(2.6, 0.0, 1.0) * 60)
                 else:
                     g_alpha = 215
-                gap_pts = int(round(gap * 100))
-                gap_lbl = f"+{gap_pts} vs #2"
-                gap_chip_w = len(gap_lbl) * 7 + 18
-                gx = text_x + 96 + chip_w_used + 14
-                dpg.draw_rectangle((gx, card_y + 11),
-                                   (gx + gap_chip_w, card_y + 31),
-                                   fill=(*C["gold"][:3], int(g_alpha * 0.22)),
-                                   color=(*C["gold"][:3], g_alpha),
-                                   rounding=10, parent=dl)
-                _txt(dl, gx + 8, card_y + 12, gap_lbl,
-                     (*C["gold_lt"][:3], 240), 13, "raj_sb_14")
+                conf = max(0.0, min(1.0, gap / 0.30))
+                gap_chip_w = 150
+                gx = text_x + 110 + chip_w_used + 14
+                lbl = f"CONF {int(round(conf*100))}%"
+                _txt(dl, gx, card_y + 13, lbl,
+                     (*C["cy_lt"][:3], 240), 12, "mono_12")
+                bar_x = gx + 78
+                bar_w = gap_chip_w - 78
+                cyber.draw_cut_rect(dl, bar_x, card_y + 14,
+                                    bar_x + bar_w, card_y + 28, cut=3,
+                                    fill=(*C["bg"][:3], 150), color=None)
+                cyber.draw_cut_rect(dl, bar_x, card_y + 14,
+                                    bar_x + max(3, int(bar_w * conf)),
+                                    card_y + 28, cut=3,
+                                    fill=(*C["cy_lt"][:3], g_alpha),
+                                    color=None)
+                cyber.draw_cut_rect(dl, bar_x, card_y + 14,
+                                    bar_x + bar_w, card_y + 28, cut=3,
+                                    fill=None,
+                                    color=(*C["cy_dk"][:3], 200),
+                                    thickness=1)
 
         # Viability chip — right-aligned (uses target_comp data when available)
         viab = (tc.get("viability") or "").upper()
         if viab:
             vcol = _VIAB_COLORS.get(viab, C["txt"][:3])
             v_short = "NOT REC." if viab == "NOT RECOMMENDED" else viab
-            v_lbl   = v_short
-            v_chip_w = len(v_lbl) * 7 + 16
+            v_lbl   = f"[ {v_short} ]"
+            v_chip_w = len(v_lbl) * 8 + 14
             vx = right_x - v_chip_w
-            dpg.draw_rectangle((vx, card_y + 11),
-                               (vx + v_chip_w, card_y + 31),
-                               fill=(*vcol, 80),
-                               color=(*vcol, 240),
-                               thickness=2, rounding=10, parent=dl)
+            cyber.draw_cut_rect(dl, vx, card_y + 11,
+                                vx + v_chip_w, card_y + 31, cut=5,
+                                fill=(*vcol, 80), color=(*vcol, 240),
+                                thickness=2)
             _txt(dl, vx + 8, card_y + 12, v_lbl,
-                 (*vcol, 250), 13, "raj_sb_14")
+                 (*vcol, 250), 13, "mono_12")
 
         # Contested mini-glyph (between header and champion name) when applicable
         contested_here = _is_contested(s0.get("champion", ""),
@@ -2107,14 +2374,53 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
                              fill=(*tcol, 235),
                              color=(0, 0, 0, 0), parent=dl)
             _txt(dl, cx_dot + 16, cy_dot - 4, "CONTESTED",
-                 (*tcol, 230), 12, "raj_sb_12")
+                 (*tcol, 230), 12, "mono_12")
             champ_name_y = card_y + 58
         else:
             champ_name_y = card_y + 44
 
-        # ROW 2: champion name (the hero)
-        _txt(dl, text_x, champ_name_y, s0.get("champion", "?")[:16],
-             (*C["gold_lt"][:3], 248), 36, "raj_36")
+        # ROW 2: champion name (the hero) — §5.4 typewriter reveal on change
+        name = s0.get("champion", "?")[:16]
+        reveal_t = draft._board_top_call_anim          # 0..1
+        if cyber.motion_on():
+            chars = int(len(name) * min(1.0, reveal_t * 1.6))
+        else:
+            chars = len(name)
+        visible = name[:chars]
+        cursor = "|" if (cyber.motion_on()
+                         and int(time.monotonic() * 3) % 2 == 0
+                         and chars < len(name)) else ""
+        _txt(dl, text_x, champ_name_y, visible + cursor,
+             (*C["cy_lt"][:3], 248), 36, "raj_36")
+
+        # §3 #29 — champion identity vector: 3 strongest subclass tags as
+        # bracketed chips, to the right of the hero name.
+        try:
+            sc = getattr(_eng, "SUBCLASSES", {}) or {}
+            _ID_PRI = (("frontline", "FRONT"), ("engage", "ENGAGE"),
+                       ("assassin_or_burst", "BURST"), ("aoe_damage", "AOE"),
+                       ("peel", "PEEL"), ("long_range", "RANGE"),
+                       ("hypercarry", "CARRY"), ("scaling", "SCALE"),
+                       ("cc", "CC"), ("mobile", "MOBILE"),
+                       ("waveclear", "WAVE"), ("duelist", "DUEL"),
+                       ("global_pressure", "GLOBAL"),
+                       ("tank_buster", "TANKBST"), ("anti_carry", "ANTICRY"))
+            cn = s0.get("champion", "")
+            id_tags = [lbl for key, lbl in _ID_PRI
+                       if cn in sc.get(key, ())][:3]
+            ix = text_x + len(visible) * 21 + 18
+            for lbl in id_tags:
+                chip_txt = f"[ {lbl} ]"
+                cw = len(chip_txt) * 8 + 4
+                cyber.draw_cut_rect(dl, ix, champ_name_y + 8,
+                                    ix + cw, champ_name_y + 30, cut=4,
+                                    fill=(*C["cy_dk"][:3], 90),
+                                    color=(*C["cy"][:3], 190), thickness=1)
+                _txt(dl, ix + 6, champ_name_y + 10, chip_txt,
+                     (*C["cy_lt"][:3], 230), 12, "mono_12")
+                ix += cw + 6
+        except Exception:
+            pass
 
         # ROW 3: why text
         why_y = champ_name_y + 44
@@ -2151,22 +2457,23 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
                         f"{threat['games']}g  ·  {threat['kda']:.1f} KDA",
                         56)
                     _txt(dl, text_x, stats_y, band,
-                         (*C["txt"][:3], band_alpha), 14, "raj_sb_14")
+                         (*C["txt"][:3], band_alpha), 14, "mono_14")
                 else:
                     _txt(dl, text_x, stats_y,
                          "No inhouse data on this enemy threat",
-                         (*C["txt_dim"][:3], band_alpha), 14, "raj_sb_14")
+                         (*C["txt_dim"][:3], band_alpha), 14, "mono_14")
                 if covered:
-                    cov_lbl = "COVERED  ·  save the ban"
-                    cov_w = len(cov_lbl) * 7 + 16
+                    cov_lbl = "[ COVERED · save the ban ]"
+                    cov_w = len(cov_lbl) * 8 + 14
                     cov_x = right_x - cov_w
-                    dpg.draw_rectangle((cov_x, stats_y - 3),
-                                       (cov_x + cov_w, stats_y + 19),
-                                       fill=(90, 180, 120, int(band_alpha * 0.22)),
-                                       color=(90, 180, 120, band_alpha),
-                                       rounding=10, parent=dl)
+                    cyber.draw_cut_rect(dl, cov_x, stats_y - 3,
+                                        cov_x + cov_w, stats_y + 19, cut=4,
+                                        fill=(*C["term_g"][:3],
+                                              int(band_alpha * 0.22)),
+                                        color=(*C["term_g"][:3], band_alpha),
+                                        thickness=1)
                     _txt(dl, cov_x + 8, stats_y - 1, cov_lbl,
-                         (90, 200, 130, band_alpha), 12, "raj_sb_12")
+                         (*C["term_g"][:3], band_alpha), 12, "mono_12")
             else:
                 # PICKS: per-player WR / games / KDA / form
                 stats = _player_champ_stats(player, champ_n) if player else None
@@ -2182,20 +2489,20 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
                     pass   # rendered as a chip below
                 band_text = _truncate_band("  ·  ".join(bits), 56)
                 _txt(dl, text_x, stats_y, band_text,
-                     (*C["txt"][:3], band_alpha), 14, "raj_sb_14")
-                # Form chip on the right end of stats line
+                     (*C["txt"][:3], band_alpha), 14, "mono_14")
+                # Form chip on the right end of stats line — [ HOT ] bracketed
                 if form in _FORM_COLORS:
                     fcol = _FORM_COLORS[form]
-                    f_lbl = form
-                    f_w = len(f_lbl) * 7 + 16
+                    f_lbl = f"[ {form} ]"
+                    f_w = len(f_lbl) * 8 + 12
                     fx = right_x - f_w
-                    dpg.draw_rectangle((fx, stats_y - 3),
-                                       (fx + f_w, stats_y + 19),
-                                       fill=(*fcol, int(band_alpha * 0.22)),
-                                       color=(*fcol, band_alpha),
-                                       rounding=10, parent=dl)
+                    cyber.draw_cut_rect(dl, fx, stats_y - 3,
+                                        fx + f_w, stats_y + 19, cut=4,
+                                        fill=(*fcol, int(band_alpha * 0.22)),
+                                        color=(*fcol, band_alpha),
+                                        thickness=1)
                     _txt(dl, fx + 8, stats_y - 1, f_lbl,
-                         (*fcol, band_alpha), 12, "raj_sb_12")
+                         (*fcol, band_alpha), 12, "mono_12")
 
             # ROW 5 (optional): lane matchup OR synergy callout
             extra_y = stats_y + 22
@@ -2209,7 +2516,7 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
                               else (180, 180, 180))
                     _txt(dl, text_x, extra_y,
                          f"Lane vs {opp_champ[:12]}: {sign}{lm}",
-                         (*lm_col, band_alpha), 14, "raj_sb_14")
+                         (*lm_col, band_alpha), 14, "mono_14")
                     extra_drawn = True
             if not extra_drawn and act and act.kind == "pick":
                 ours = b.locked_picks(act.side) if hasattr(b, "locked_picks") else []
@@ -2221,7 +2528,7 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
                     pre = "Strong with" if kind == "syn" else "Conflict with"
                     _txt(dl, text_x, extra_y,
                          f"{pre} {other[:14]}",
-                         (*msg_col, band_alpha), 14, "raj_sb_14")
+                         (*msg_col, band_alpha), 14, "mono_14")
 
         if interactive:
             _board_hits.append((x + 14, ny, w - 28, pc_h, "pick",
@@ -2230,8 +2537,11 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
 
     # ── Alternatives ────────────────────────────────────────────────
     if len(sug) > 1:
-        _txt(dl, x + 16, ny, "ALTERNATIVES", (*C["gold_lt"][:3], 215),
-             16, "raj_sb_16")
+        cyber.draw_bracket_label(dl, x + 16, ny, "ALTERNATIVES",
+                                 (*C["cy_lt"][:3], 220), 16, _txt,
+                                 font_key="mono_16",
+                                 bracket_color=(*C["cy"][:3], 200),
+                                 char_w=0.62)
         ny += 28
         row_h = 52
         # Cap to 4 alternative rows to give STRATEGIC + enriched TOP CALL room.
@@ -2239,21 +2549,27 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
             if ny + row_h > y + h - pool_region_h:
                 break
             tag = s.get("tag", "")
-            tcol = _BOARD_TAG_COL.get(tag, C["platinum"][:3])
+            tcol = _BOARD_TAG_COL.get(tag, C["cy"][:3])
             # Hover lift — brighten border + fill on mouseover
             alt_hover = (interactive
                          and _hover(x + 14, ny, w - 28, row_h - 6))
-            # Backdrop card
-            dpg.draw_rectangle((x + 14, ny), (x + w - 14, ny + row_h - 6),
-                               fill=(*C["card"][:3], 210 if alt_hover else 175),
-                               color=(*tcol, 220 if alt_hover else 170),
-                               thickness=2 if alt_hover else 1,
-                               rounding=5, parent=dl)
-            # Subtle top-edge tint stripe — consistency with TOP CALL highlight
+            # Backdrop card — slim corner-cut row
+            cyber.draw_cut_rect(dl, x + 14, ny, x + w - 14, ny + row_h - 6,
+                                cut=6,
+                                fill=(*C["card"][:3],
+                                      210 if alt_hover else 165),
+                                color=(*tcol, 220 if alt_hover else 160),
+                                thickness=2 if alt_hover else 1)
+            # 4px cyan vertical stripe on the left edge
+            dpg.draw_rectangle((x + 14, ny + 3),
+                               (x + 18, ny + row_h - 9),
+                               fill=(*C["cy"][:3], 220 if alt_hover else 170),
+                               color=(0, 0, 0, 0), parent=dl)
+            # Subtle top-edge tint stripe — consistency with TOP CALL
             for hi in range(4):
                 ha = int(40 * (1 - hi / 4))
-                dpg.draw_line((x + 17, ny + 2 + hi),
-                              (x + w - 17, ny + 2 + hi),
+                dpg.draw_line((x + 20, ny + 2 + hi),
+                              (x + w - 18, ny + 2 + hi),
                               color=(*tcol, ha), thickness=1, parent=dl)
             # Mini tag pill (vertically centered with the row)
             chip_h = 22
@@ -2282,7 +2598,7 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
                 line1 = f"{stats['wr']}% · {stats['games']}g"
                 lw = len(line1) * 8
                 _txt(dl, stats_x - lw, ny + 6, line1,
-                     (*C["txt"][:3], 230), 14, "raj_sb_14")
+                     (*C["txt"][:3], 230), 14, "mono_14")
                 # Comfort delta vs TOP CALL
                 try:
                     delta = (float(s.get("comfort", 0))
@@ -2297,7 +2613,7 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
                             else (215, 110, 100))
                     dw = len(dlbl) * 8
                     _txt(dl, stats_x - dw, ny + 28, dlbl,
-                         (*dcol, 220), 14, "raj_sb_14")
+                         (*dcol, 220), 14, "mono_14")
             elif act and act.kind == "ban":
                 # Mirror the ban backing for alt bans
                 opp_side = "RED" if act.side == "BLUE" else "BLUE"
@@ -2307,11 +2623,11 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
                     line1 = f"{threat['wr']}% · {threat['games']}g"
                     lw = len(line1) * 8
                     _txt(dl, stats_x - lw, ny + 6, line1,
-                         (*C["txt"][:3], 230), 14, "raj_sb_14")
+                         (*C["txt"][:3], 230), 14, "mono_14")
                     pname_short = threat['player'][:8]
                     pw = len(pname_short) * 7
                     _txt(dl, stats_x - pw, ny + 28, pname_short,
-                         (*C["txt2"][:3], 200), 12, "raj_sb_12")
+                         (*C["txt2"][:3], 200), 12, "mono_12")
             if interactive:
                 _board_hits.append((x + 14, ny, w - 28, row_h - 6, "pick",
                                     (s.get("champion"), s.get("role"))))
@@ -2326,67 +2642,67 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
         _pool_rect = None
         py = y + h - 40
         dpg.draw_line((x + 14, py), (x + w - 14, py),
-                      color=(*C["rule_dark"][:3], 150), thickness=1,
+                      color=(*C["cy_dk"][:3], 160), thickness=1,
                       parent=dl)
         _txt(dl, x + 16, py + 10,
-             "Mirroring live champ select - picks/bans follow the client",
-             (90, 195, 175, 210), 15, "raj_sb_16")
+             "> mirroring live champ select - picks/bans follow the client",
+             (*C["term_g"][:3], 215), 14, "mono_14")
         return
 
     py = y + h - pool_region_h
     dpg.draw_line((x + 14, py), (x + w - 14, py),
-                  color=(*C["rule_dark"][:3], 150), thickness=1, parent=dl)
+                  color=(*C["cy_dk"][:3], 160), thickness=1, parent=dl)
 
     full_pool = _board_legal_pool(b, act)
     filtered = _filter_pool(full_pool, draft.board_pool_search)
 
     # Header: title (left) + result count (right)
-    _txt(dl, x + 16, py + 8, "OR LOCK ANY CHAMPION",
-         (*C["txt2"][:3], 215), 16, "raj_sb_16")
+    cyber.draw_bracket_label(dl, x + 16, py + 8, "LOCK ANY CHAMPION",
+                             (*C["cy_lt"][:3], 220), 14, _txt,
+                             font_key="mono_14",
+                             bracket_color=(*C["cy"][:3], 200), char_w=0.6)
     if draft.board_pool_search:
         cnt_str = f"{len(filtered)} of {len(full_pool)}"
     else:
         cnt_str = f"{len(full_pool)} champions"
     cnt_w = len(cnt_str) * 8
     _txt(dl, x + w - 16 - cnt_w, py + 10, cnt_str,
-         (*C["txt_dim"][:3], 195), 14, "raj_sb_14")
+         (*C["txt_dim"][:3], 200), 12, "mono_12")
 
-    # Search box
+    # Search box — terminal input
     sb_y = py + 36
     sb_h = 38
     sb_x = x + 16
     sb_w = w - 32
-    dpg.draw_rectangle((sb_x, sb_y), (sb_x + sb_w, sb_y + sb_h),
-                       fill=(*C["bg"][:3], 205),
-                       color=(*C["gold_dk"][:3], 210),
-                       thickness=2, rounding=6, parent=dl)
-    _txt(dl, sb_x + 14, sb_y + 10, "SEARCH",
-         (*C["txt2"][:3], 180), 14, "raj_sb_14")
-    # Vertical divider after the SEARCH label
-    dpg.draw_line((sb_x + 84, sb_y + 8), (sb_x + 84, sb_y + sb_h - 8),
-                  color=(*C["rule_dark"][:3], 170),
+    cyber.draw_cut_rect(dl, sb_x, sb_y, sb_x + sb_w, sb_y + sb_h, cut=7,
+                        fill=(*C["bg"][:3], 210),
+                        color=(*C["cy_dk"][:3], 220), thickness=2)
+    _txt(dl, sb_x + 14, sb_y + 8, ">",
+         (*C["cy_lt"][:3], 220), 22, "mono_22")
+    # Vertical divider after the prompt
+    dpg.draw_line((sb_x + 40, sb_y + 8), (sb_x + 40, sb_y + sb_h - 8),
+                  color=(*C["cy_dk"][:3], 180),
                   thickness=1, parent=dl)
     # Query text with blinking caret
-    cursor = "|" if int(time.monotonic() * 2) % 2 == 0 else " "
+    cursor = "_" if int(time.monotonic() * 2) % 2 == 0 else " "
     if draft.board_pool_search:
-        _txt(dl, sb_x + 96, sb_y + 6,
+        _txt(dl, sb_x + 52, sb_y + 7,
              draft.board_pool_search + cursor,
-             (*C["gold_lt"][:3], 240), 22, "raj_sb_22")
+             (*C["cy_lt"][:3], 245), 22, "mono_22")
     else:
-        _txt(dl, sb_x + 96, sb_y + 8, cursor,
-             (*C["gold_lt"][:3], 200), 22, "raj_sb_22")
-        _txt(dl, sb_x + 108, sb_y + 10, "type to filter…",
-             (*C["txt_dim"][:3], 150), 17, "raj_sb_18")
+        _txt(dl, sb_x + 52, sb_y + 7, cursor,
+             (*C["cy_lt"][:3], 200), 22, "mono_22")
+        _txt(dl, sb_x + 68, sb_y + 11, "type to filter…",
+             (*C["txt_dim"][:3], 155), 16, "mono_16")
     # Clear "X" button (only when there's text)
     if draft.board_pool_search:
         cx_x = sb_x + sb_w - 36
         cx_y = sb_y + 7
-        dpg.draw_rectangle((cx_x, cx_y), (cx_x + 24, cx_y + 24),
-                           fill=(*C["card"][:3], 180),
-                           color=(*C["rule_dark"][:3], 170),
-                           rounding=4, parent=dl)
-        _txt(dl, cx_x + 7, cx_y + 3, "X",
-             (*C["gold_lt"][:3], 225), 18, "raj_sb_18")
+        cyber.draw_cut_rect(dl, cx_x, cx_y, cx_x + 24, cx_y + 24, cut=4,
+                            fill=(*C["card"][:3], 185),
+                            color=(*C["mg"][:3], 200), thickness=1)
+        _txt(dl, cx_x + 7, cx_y + 4, "X",
+             (*C["mg_lt"][:3], 230), 16, "mono_16")
         _board_hits.append((cx_x, cx_y, 24, 24, "clear_search", None))
 
     # Grid: scrollable, bigger cells
@@ -2417,7 +2733,7 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
     if not filtered:
         _txt(dl, sb_x + 14, gy0 + 12,
              f"No champions match  '{draft.board_pool_search}'",
-             (*C["txt_dim"][:3], 200), 16, "raj_sb_16")
+             (*C["txt_dim"][:3], 200), 14, "mono_14")
         return
 
     start = draft.board_pool_scroll * gx_n
@@ -2426,14 +2742,17 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
         gx = sb_x + (k_rel % gx_n) * gw
         gy = gy0 + (k_rel // gx_n) * gh
         cell_hover = _hover(gx + 2, gy + 2, gw - 4, gh - 4)
-        dpg.draw_rectangle((gx + 2, gy + 2), (gx + gw - 4, gy + gh - 4),
-                           fill=(*C["bg"][:3], 220 if cell_hover else 170),
-                           color=(*C["gold_lt"][:3], 220) if cell_hover
-                                 else (*C["rule_dark"][:3], 140),
-                           thickness=2 if cell_hover else 1,
-                           rounding=4, parent=dl)
+        # Hover fill flickers; idle is a calm recessed cell
+        cell_fill_a = (cyber.flicker_alpha(225, hz=9, ampl=0.10)
+                       if cell_hover else 165)
+        cyber.draw_cut_rect(dl, gx + 2, gy + 2, gx + gw - 4, gy + gh - 4,
+                            cut=4,
+                            fill=(*C["bg"][:3], cell_fill_a),
+                            color=(*C["cy_lt"][:3], 225) if cell_hover
+                                  else (*C["cy_dk"][:3], 150),
+                            thickness=2 if cell_hover else 1)
         _txt(dl, gx + 9, gy + 8, cmp_[:12],
-             (*C["gold_lt"][:3], 245) if cell_hover
+             (*C["cy_lt"][:3], 248) if cell_hover
              else (*C["txt"][:3], 230),
              16, "raj_sb_16")
         _board_hits.append((gx + 2, gy + 2, gw - 4, gh - 4, "pick",
@@ -2447,7 +2766,7 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
         track_h = sb_track_y1 - sb_track_y0
         dpg.draw_rectangle((sb_track_x, sb_track_y0),
                            (sb_track_x + 4, sb_track_y1),
-                           fill=(*C["rule_dark"][:3], 110),
+                           fill=(*C["cy_dk"][:3], 120),
                            color=(0, 0, 0, 0), rounding=2, parent=dl)
         thumb_frac = max(0.08, visible_rows / max(total_rows, 1))
         thumb_h = max(22, int(track_h * thumb_frac))
@@ -2457,7 +2776,7 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
                             sb_track_y0 + thumb_pos),
                            (sb_track_x + 4,
                             sb_track_y0 + thumb_pos + thumb_h),
-                           fill=(*C["gold_lt"][:3], 210),
+                           fill=(*C["cy_lt"][:3], 215),
                            color=(0, 0, 0, 0), rounding=2, parent=dl)
 
 

@@ -536,6 +536,29 @@ def shrink_wr_from_pct(wr_pct: float, games: float, prior_wr: float = 0.50) -> f
     return shrink_wr(wins, games, prior_wr)
 
 
+def recency_weighted_wr(results, half_life: float = 18.0):
+    """Exponentially recency-weighted winrate from a chronological list of
+    1=win/0=loss (oldest→newest, e.g. the per-champ customs `results` the
+    reader now emits, capped to the last 100 games). The most recent game
+    has weight 1.0; weight halves every `half_life` games back.
+
+    Returns (wr_0to1, effective_n) or (None, 0.0) when there is no data.
+    `effective_n` is the sum of weights — used to shrink small/stale samples.
+    """
+    if not results:
+        return None, 0.0
+    n = len(results)
+    num = den = 0.0
+    for i, r in enumerate(results):
+        age = (n - 1) - i                       # 0 = most recent
+        w = 0.5 ** (age / max(half_life, 1.0))
+        den += w
+        num += w * (1.0 if r else 0.0)
+    if den <= 0:
+        return None, 0.0
+    return num / den, den
+
+
 # ============================================================================
 # Form modifier
 # ============================================================================
@@ -580,6 +603,7 @@ def champion_comfort(
     role_match: bool = True,
     form: Optional[str] = None,
     inhouse: bool = False,
+    results=None,
 ) -> float:
     """
     Composite 0..1 comfort score for a player on a champion.
@@ -595,10 +619,19 @@ def champion_comfort(
     if games <= 0:
         return 0.0
     wr_post = shrink_wr_from_pct(wr_pct, games)
+    # Recency: when per-game customs results are available, let recent form
+    # dominate (shrunk by its own recency-weighted effective N) while the
+    # all-time posterior stays as an anchor.
+    rec_wr, eff_n = recency_weighted_wr(results) if results else (None, 0.0)
+    if rec_wr is not None and eff_n > 0:
+        rec_post = shrink_wr(rec_wr * eff_n, eff_n)
+        wr_eff = 0.65 * rec_post + 0.35 * wr_post
+    else:
+        wr_eff = wr_post
     sample  = math.log(1.0 + games) / math.log(1.0 + 30.0)  # 0..~1 over 30 games
     sample  = min(sample, 1.0)
     kda_mod = max(0.6, min(1.4, (kda or 1.5) / 2.5))
-    base    = wr_post * (0.55 + 0.45 * sample) * kda_mod
+    base    = wr_eff * (0.55 + 0.45 * sample) * kda_mod
     if role_match:
         base *= 1.20
     base *= form_multiplier(form)
@@ -709,6 +742,26 @@ def synergy_normalize(s: float) -> float:
 # Beam search comp recommender
 # ============================================================================
 
+def customs_champs(p: Dict[str, Any],
+                   inhouse_champs: Dict[str, List[Dict]],
+                   min_games: int = 3) -> Dict[str, float]:
+    """{champ: recency-weighted comfort} for champs this player has actually
+    played in customs ≥ `min_games` times. Excludes ranked mastery / priors —
+    this is the strict "they really play it" signal that `contested` needs."""
+    out: Dict[str, float] = {}
+    for ch in (inhouse_champs.get(p.get("name", ""), []) or []):
+        cname = ch.get("champ")
+        if not cname:
+            continue
+        if parse_float(ch.get("games", 0)) < min_games:
+            continue
+        out[cname] = champion_comfort(
+            parse_float(ch.get("games", 0)), parse_wr(ch.get("wr", "50%")),
+            parse_float(ch.get("kda"), 1.5), role_match=True,
+            form=p.get("form"), inhouse=True, results=ch.get("results"))
+    return out
+
+
 def _player_candidates(
     p: Dict[str, Any],
     inhouse_champs: Dict[str, List[Dict]],
@@ -752,7 +805,8 @@ def _player_candidates(
                 elif this_role_pct < 0.10 and ch_total >= 5:
                     ch_role_match = False
         seen[cname] = champion_comfort(g, wr, kda,
-                                       role_match=ch_role_match, form=form, inhouse=True)
+                                       role_match=ch_role_match, form=form,
+                                       inhouse=True, results=ch.get("results"))
 
     # Top champs (ranked-tier; no per-champ stats — use Bayesian-shrunk player WR)
     pwr  = parse_wr(p.get("winrate", p.get("wr", 50.0)))
@@ -760,17 +814,21 @@ def _player_candidates(
     for cname in (p.get("top_champs") or [])[:8]:
         if not cname or cname in seen or cname not in valid:
             continue
-        # Assume ~half the player's ranked games on this champ proportionally
+        # Assume ~half the player's ranked games on this champ proportionally.
+        # Ranked mastery is a weaker signal than demonstrated customs play, so
+        # it is demoted — it can never out-rank a real inhouse comfort score.
         c_games = max(5.0, pg / 4.0)
-        seen[cname] = champion_comfort(c_games, pwr, 2.0,
-                                       role_match=role_match, form=form, inhouse=False)
+        seen[cname] = 0.75 * champion_comfort(c_games, pwr, 2.0,
+                                              role_match=role_match,
+                                              form=form, inhouse=False)
 
-    # Champion priors fallback (only if seen is empty)
+    # Champion priors fallback (only if seen is empty) — weakest signal.
     if not seen:
         for cname, prior_wr in CHAMP_PRIORS.items():
             if cname in valid:
-                seen[cname] = champion_comfort(8.0, prior_wr * 100, 2.0,
-                                               role_match=role_match, form=form)
+                seen[cname] = 0.50 * champion_comfort(8.0, prior_wr * 100, 2.0,
+                                                      role_match=role_match,
+                                                      form=form)
         # Plus a couple of safe meta picks for the role
         for cname in sorted(valid):
             if cname not in seen and len(seen) < 6:

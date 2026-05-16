@@ -20,6 +20,10 @@ _DEFAULTS = {
     "routing":   "americas",
     "players":   [],
     "last_run":  {},
+    # Draft Board v2.7 — when True, CALM MODE freezes ambient cyberpunk motion
+    # (scanlines, grid drift, breathing pulses, flicker, marching dashes).
+    # State-change animations (typewriter, slide-in, ripple) are unaffected.
+    "calm_mode": False,
 }
 
 def _load_bundled_config():

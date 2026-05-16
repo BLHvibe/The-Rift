@@ -1,0 +1,529 @@
+Draft Board v2.7 — Cyberpunk Command Deck Revamp · Deep Research
+This report informs the next implementation sprint. File:line refs use the snapshot at C:\Users\blhei\Desktop\all code\the_rift\ (branch claude/pedantic-liskov-571489, parity with master/v2.6.0). The board renderer is one ~3200-LOC file; everything proposed below extends it without a rewrite.
+
+1. AESTHETIC LANGUAGE — CYBERPUNK COMMAND DECK FOR THIS CODEBASE
+1.1 Color palette additions
+The current theme.C palette (the_rift/theme.py:10-29) is warm-dark: gold + platinum + parchment txt. Cyberpunk wants cold-electric. Keep gold, but demote it to "ceremonial" use (e.g. DRAFT BOARD header text, scrollbar grab, ranked-tier swatches in non-board screens). The board's new dominant accents are cyan and magenta; gold becomes a "won/legacy" accent only.
+
+Add to C (matches existing 4-tuple (r, g, b, a) convention):
+
+New key	RGB	Use
+cy_lt	(120, 230, 255)	electric cyan, primary hi-light edges, blue-side accent
+cy	(60, 195, 235)	cyan body — chip fills, dividers, gridlines
+cy_dk	(20, 90, 130)	cyan shadow / dim borders
+mg_lt	(255, 110, 220)	hot magenta, "DANGER / opponent" callouts
+mg	(220, 70, 175)	magenta body — red-side accent (replaces dim red)
+mg_dk	(110, 30, 90)	magenta shadow / dim borders
+amb	(255, 175, 60)	hot amber, "warning / decision required" — replaces existing orange cohesion warnings
+term_g	(80, 255, 160)	terminal green, "OK / SAFE / SYSTEMS NOMINAL" success cues
+alert_r	(255, 65, 80)	alert red, hard error / contested ban
+scan_gy	(180, 200, 220)	scanline tint, very-low-alpha overlays
+panel_dk	(8, 12, 22)	deeper panel background — pushes the existing panel "into" the screen
+grid_a	(40, 80, 110)	grid-cell line color (cool dim)
+Interaction with existing gold:
+
+Keep C["gold"] for the DRAFT BOARD masthead, the YOU side toggle (it should feel like a "selected channel" indicator), and existing batch screens (no changes there).
+Replace C["platinum"] references on the board's BLUE side with cy_lt / cy.
+Replace the bare RGB tuple (215, 95, 95) (the side-tinted RED accent, used at draft.py:1602, 1735, 1798, 1877) with mg_lt / mg. Add a RED_ACCENT = C["mg"][:3] shim near _ROLE_COLORS to make the swap a one-liner.
+Existing tag-chip colors (_BOARD_TAG_COL at draft.py:1013-1021) are mostly fine — but POWER's amber-yellow (230, 170, 60) should shift to the new amb to feel less "gold trim" and more "voltage warning."
+1.2 Motifs / visual language
+YES — bake into the new helper library. Each becomes a _draw_* helper in a new module the_rift/ui/cyber.py so the existing draft.py callsites stay readable:
+
+Motif	Concrete shape	Where it lives
+Corner-cut polygons	45° triangle clipped off top-left and bottom-right of any rectangle	cyber.draw_cut_rect(dl, x1,y1,x2,y2, cut=10, fill, color) — replaces most dpg.draw_rectangle calls on panels, cards, chips
+Bracket frames [ ... ]	Two L-shapes (top-left + bottom-right) drawn as 4 draw_line segments, no fill	cyber.draw_brackets(dl, rect, length=14, color, alpha) — wraps labels like the TOP CALL caption, STRATEGIC label
+Scanline overlay	Horizontal lines every 4–6 px, animated to scroll vertically	full-screen helper, see §6
+Holographic flicker	Random alpha jitter (3% chance per frame, 70-100% multiplier) applied to specific elements	property-style helper cyber.flicker_alpha(base, hz=8, ampl=0.18)
+Dashed borders	Replace solid card borders with 6px-on, 4px-off dash pattern around active selections	cyber.draw_dashed_rect(dl, rect, dash=6, gap=4, color)
+Glow halos	Already exists as _gradient_frame at draft.py:510-526 — extend with cyan/magenta palette and a stronger "bloom" effect (more layers, brighter inner color)	
+Animated dashed border (running)	Dashes that march clockwise around the active TOP CALL — phase = time.monotonic() * speed	cyber.draw_marching_dash(dl, rect, color, speed=20)
+Hexagonal portrait frame	Replace square portraits with regular hexagons	extend _draw_portrait at draft.py:1079 — add shape="hex" kwarg
+Terminal cursor blink	Already present in pool search box (draft.py:2370) — replicate everywhere a value updates	
+Tactical chips [ ITEM ]	Tag chips already exist (_draw_tag_chip at draft.py:1129) but rounded — switch to corner-cut + brackets	extend _draw_tag_chip with style="cyber"
+NO — actively avoid:
+
+Filigree, parchment textures, rune flourishes
+Drop shadows (cyberpunk is flat-but-glowing, not paper-on-paper)
+Rounded radii > 4px on any new elements (corners should feel "machined")
+Skeuomorphic gloss (gradient mid-tone highlights on buttons)
+1.3 Type treatment
+Current: Cinzel Decorative (ceremonial) + Rajdhani Bold/SemiBold/Regular (theme.py:128-172). Rajdhani is already a tech-leaning sans — keep it as the body font.
+
+Add a monospace family for data and labels. Recommend JetBrains Mono (open-source, ships well, similar weight to Rajdhani):
+
+# Add to setup_fonts() in theme.py
+for size, key in [(28, "mono_28"), (22, "mono_22"), (18, "mono_18"),
+                  (16, "mono_16"), (14, "mono_14"), (12, "mono_12"),
+                  (11, "mono_11")]:
+    path = os.path.join(font_dir, "JetBrainsMono-Medium.ttf")
+    if os.path.exists(path):
+        fonts[key] = dpg.add_font(path, size)
+Mono-vs-Rajdhani usage rules:
+
+Mono	Rajdhani (keep)
+Win-probability [ 56.3% ]	TOP CALL / champion names
+KDA 4.2 / 2.1 / 6.8	"EXPLOIT" / "STRATEGIC" headers
+Game time 00:14:32	Player names
+Stat bands WR 68% · 11g	"Enemy backline is squishy…" advice lines
+Action labels B1 R5 BAN-P2	Phase headers (BANS 1, PICKS 2)
+Score chips +12 vs #2	EXIT / UNDO / NEW DRAFT button text
+Coordinates / IDs / hex codes	Champion "why" sentences
+Drop Cinzel from the draft board entirely (it carries fantasy-RPG connotation). The header at draft.py:1595 ("DRAFT BOARD" ... "cinzel_32") should swap to "raj_36" and add bracket framing around it.
+
+1.4 Card / panel treatment
+Current helpers:
+
+_panel_bg at draft.py:499-507 — solid rounded rect + optional top accent stripe
+_gradient_frame at draft.py:510-526 — stacked outer outlines for halo
+Extend, don't replace. Add three new helpers to a new file the_rift/ui/cyber.py:
+
+def draw_cut_rect(dl, x1, y1, x2, y2, cut=10, fill=None, color=None, thickness=1):
+    """Rectangle with 45-deg cuts at top-right and bottom-left corners.
+    Hand-built via draw_polygon to support hardware AA."""
+    pts = [(x1, y1), (x2 - cut, y1), (x2, y1 + cut),
+           (x2, y2), (x1 + cut, y2), (x1, y2 - cut)]
+    if fill:
+        dpg.draw_polygon(pts, fill=fill, color=(0,0,0,0), parent=dl)
+    if color:
+        # Close polygon outline manually so we don't double-trace
+        for i in range(len(pts)):
+            a, b = pts[i], pts[(i+1) % len(pts)]
+            dpg.draw_line(a, b, color=color, thickness=thickness, parent=dl)
+
+def draw_marching_dash(dl, x1, y1, x2, y2, color, dash=8, gap=6, speed=14):
+    """Border drawn as dashes that march clockwise (phase = time-based)."""
+    # Walk the rect perimeter, draw segments offset by phase
+    ...
+
+def draw_bracket_label(dl, x, y, label, font_key, font_sz, color, bracket_color=None):
+    """ [  LABEL  ]  — bracket on each side, label centered."""
+    ...
+Then _panel_bg becomes a thin wrapper that chooses between the old rounded look (still used by batch screens) and the new cut look for board panels.
+
+2. EXISTING SURFACE REFACTORS (LIGHT COSMETIC PASS — 20%)
+For each: 1-2 sentence concrete instruction. Information stays identical.
+
+2.1 Header (DRAFT BOARD title + status + YOU + UNDO/EXIT) — _draw_board:1589-1626
+Replace Cinzel "DRAFT BOARD" with a mono_28 rendition wrapped in brackets: [ DRAFT BOARD ] in cy_lt. Status text and YOU label move to monospace; UNDO and EXIT buttons swap from rounded rects to draw_cut_rect with a thin marching-dash border (cyan when interactive, magenta when destructive — EXIT).
+
+2.2 Timeline strip with phase headers + cells — _draw_board:1628-1719
+Each cell becomes a corner-cut polygon. The "on-the-clock" cell gets a draw_marching_dash border in tag color + a multi-layer cyan glow trail below it (see §5). Phase header band switches to mono_14 and drops the soft panel backdrop — let phase labels float over a thin scanline strip with cyan vertical dividers. Locked-champion text under each cell stays Rajdhani (it's a name) but gets a 1px cyan underline.
+
+2.3 Team columns (left + right) — _draw_board_team:1734-1847
+Outer panel switches to draw_cut_rect with cy border on BLUE, mg border on RED. The team-label "BLUE TEAM" / "RED TEAM" becomes [ BLUE OPS ] / [ RED OPS ] in monospace. Role slots get a corner-cut treatment too, with the existing role-accent left stripe widened to 6px and given a subtle vertical scanline. "LIKELY NEXT" preview ribbon at :1798-1847 is great structurally — re-skin its container as a cyan/magenta corner-cut panel and tag champion names with mono_14.
+
+2.4 Action banner — _draw_board_center:1885-1910
+Switch from rounded rect to a heavy corner-cut polygon. Replace banner color logic at :1886 (gold = our_turn, gray = their_turn) with cy for our turn, mg for opponent turn — instantly readable side identity. Header head = "YOUR PICK" becomes > YOUR PICK (terminal-prompt feel); subline goes mono. Pulsing border alpha stays.
+
+2.5 Archetype picker chips — _draw_arch_picker:1337-1369
+Pills become bracketed labels: active chip looks like [★ DIVE ★] (filled) and inactive like [ DIVE ] (outline only). Active fill uses the per-archetype color from _ARCH_PICKER at :1325-1334. On hover, draw a 1-frame flicker.
+
+2.6 STRATEGIC sub-panel — _draw_board_center:1919-1953
+Re-skin as a "DUAL-TEAM TACTICAL READOUT" with two corner-cut sub-panels side by side (one cyan, one magenta) joined by a thin middle divider. Replace the "You:" / "Enemy:" labels with bracketed callsigns [ OUR ] and [ ENEMY ] in monospace.
+
+2.7 Context lines (BUILD / notes / cohesion / exploit) — _draw_board_center:1955-1967
+These currently use varied colors (txt2 for notes, amber for cohesion, teal for exploit). Keep the color coding but switch all three to monospace and prefix each with a terminal-style sigil: > note..., ! warning..., + exploit.... Adds command-deck rhythm without changing information.
+
+2.8 TOP CALL hero card — _draw_board_center:1969-2229
+Single biggest surface, deserves the most attention:
+
+Card body becomes draw_cut_rect, larger cuts (16px) on top-left and bottom-right.
+The pulsing accent line at :1997-2000 becomes a scanning bar (single horizontal line that animates top-to-bottom within the card region every 3 seconds — see §5).
+Portrait switches to hexagonal frame (_draw_portrait shape="hex").
+Champion name (:2116) stays Rajdhani but typewriter-reveals on lock (see §5).
+"TOP CALL" caption (:2046) becomes [ TOP CALL ] in mono with marching-dash underline.
+Halo (:2007-2009) intensifies — more layers (6 instead of 3), brighter inner color, animates outward radius slowly.
+Score-gap chip (:2052-2075) and viability chip (:2078-2091) become bracket-framed [+12 vs #2] and [CORE] in mono.
+Stats data band (:2132-2225) keeps the current logic but every number renders in mono. Form chip (:2186-2198) becomes [ HOT ] bracketed.
+2.9 Alternatives rows — _draw_board_center:2231-2318
+Each row gets a slim corner-cut treatment with a 4px cyan vertical stripe on the left (replacing the rounded card). Mini tag chip becomes bracketed. Champion names stay Rajdhani; WR%/games/comfort delta go mono.
+
+2.10 Pool grid (search + scrollable cells) — _draw_board_center:2320-2461
+Search box becomes a terminal input: replace SEARCH label with > prompt, frame the whole box with brackets, blinking caret stays. Each pool cell becomes draw_cut_rect; hover fill switches to a flicker effect. Scrollbar thumb tints cyan. Right-edge "X of Y" count moves to mono.
+
+3. NEW FEATURE DISPLAYS — THE 80%
+25 candidates, audited. Verdicts at the right.
+
+#	Feature	What it shows	Data source	Lives at	Useful	Aesthetic	Cplx	Visual idea	Verdict
+1	Live win-probability gauge + sparkline	Probability after each locked action, recomputed by re-running recommend_comps for both sides as the board fills	Engine (_eng.recommend_comps, score blend)	Right-side analytics rail, top	5	5	M	Horizontal bar split cyan/magenta with a tiny mono sparkline of last 6 values underneath	SHIP IT
+2	Counter-pick predictor	"If they pick X, your best counter is Y" — speculatively runs recommend_action after a hypothetical enemy lock	Engine	Right-rail, mid	4	4	M	Two stacked rows with a → between mini-portraits	SHIP IT
+3	Recommendation explanation panel	Visual breakdown of WHY the top call scored: bars per axis (identity / comfort / synergy / counter / coherence / damage / ap_ratio)	Engine score_team returns score_breakdown (reader.py:2628 adds it post-hoc)	Below TOP CALL or in right-rail	5	5	S	6 horizontal bars in mono_12, each a corner-cut sliver	SHIP IT
+4	Draft history scrub bar	Replay the draft action-by-action with a slider that scrubs the timeline + recomputes recs at any point	state._history already records every action with _HistEntry (draft_board.py:115-120)	Under the timeline	3	4	M	A mono frame counter [ 14 / 20 ] + tick bar	maybe — high-value for post-game review, low for in-draft
+5	Opponent pattern recognition	"Player X picks Yasuo 65% of the time" — top-3 most-picked champs per opposing player	live.inhouse_champs already keyed by player; pre-existing	Enemy team column → expand existing LIKELY NEXT	5	4	S	Add a "FAVORITES" sub-line below the LIKELY NEXT ribbon	SHIP IT
+6	What-if ban simulator	Hover a ban suggestion → preview what your TOP CALL becomes after that ban	Engine — call recommend_action on a clone of state with the hypothetical ban applied	Tooltip when hovering ban alternatives	4	5	M	Floating mini-card next to the alt row	SHIP IT
+7	Champion pool depth meter per player	Vertical bar per player showing # of viable comfort-picks remaining after bans	_candidates_for_player (draft_board.py:312)	Team column, embedded in role slots	3	5	S	Thin vertical capsule next to each player's role	SHIP IT — low cost, very flavorful
+8	Live LCU timer ring	Animated countdown around the action banner	LCU champ_select timer.adjustedTimeLeftInPhase (already accessible — draft_lcu.parse_session could expose)	Wrapping the action banner	4	5	S	Hexagonal arc that shrinks in 30s, turns red < 5s	SHIP IT (live mode only; manual draws an idle ring)
+9	Contested champion ladder	Vertical strip of top-N champs both teams want, with ban/pick/free status	_is_contested (draft.py:1307) already classifies; just rank	Right-rail	4	5	S	6 portraits in a vertical column, status badge per row	SHIP IT
+10	Lane phase forecast	EARLY / MID / LATE indicator + WR delta per lane	Engine — pull from LANE_MATCHUPS + comp archetype spike	Below team columns	3	4	M	5 horizontal "tape" rows, each a mini gradient EARLY→LATE with a marker pin	maybe — pretty but redundant once #1+#3 ship
+11	Team strength radar	Both teams overlaid on a 6-axis radar (frontline, damage, peel, range, mobility, scaling)	Engine _team_vector (draft_engine.py)	Right-rail	4	5	M	Two overlaid hexagonal radars (cyan + magenta) — pure cyberpunk	SHIP IT
+12	Draft narrative log	Terminal-style scrolling log: > R3 BAN Yasuo (counters your Vayne)	state._history + engine why strings	Bottom-of-screen ticker OR right-rail	5	5	S	Monospace lines that fade older, top-down scroll	SHIP IT — defining cyberpunk surface
+13	Player highlight strip	5 mini cards per side: form / KDA / recent champs	live.scout, live.inhouse_champs	Team column header band	2	3	M	—	defer — would compete with role slots; already implied
+14	Win-condition timeline	When each comp spikes plotted on a time axis	Engine spike strings in ARCHETYPES	Below STRATEGIC sub-panel	3	5	M	Two horizontal "level bars" 0→40min showing power curves	maybe — gorgeous, but takes vertical room
+15	Counter-coverage donut	Pie showing % of enemy threats your locked picks counter	Engine COUNTERS lookups	Right-rail	4	5	S	Donut chart with mono % in center	SHIP IT
+16	Patch tier overlay	Small S/A/B tier letters on suggestions	External feed required (out-of-scope per handoff §3.3)	TOP CALL + alts	2	3	L	—	defer — needs a feed
+17	Comfort-score heatmap	5×N grid of your 5 players × viable champs colored by comfort	_candidates_for_player	New right-rail panel	3	4	M	Hex-grid colored from term_g (high) to panel_dk (low)	maybe — works on a 5-row strip per player
+18	Synergy network graph	Node graph of your locked picks with synergy edges	Engine SYNERGIES + ANTI_SYNERGIES	Below TOP CALL or right-rail	3	5	M	5 hex nodes connected by lines; edge thickness = synergy strength	SHIP IT — the "Mass Effect squad screen" energy
+19	AP/AD/True damage profile	3-segment horizontal stacked bar	Engine score_breakdown["ap_ratio"] + per-champ damage tags	Below team columns	4	4	S	Tri-color horizontal bar with mono labels	SHIP IT
+20	Risk indicator	Flag when a rec relies on the enemy NOT banning a specific champ	Engine — compute "if this champ gets banned, my new top rec drops by N points"	TOP CALL header	3	4	M	Yellow triangle icon + mono "RISK: needs X unbanned"	maybe — gimmicky unless tuned
+21	Splash art backdrop	TOP CALL hero gets full splash faded behind portrait	New fetcher — see §7 trade-offs	TOP CALL card	5	5	L	60% alpha splash behind everything, ken-burns pan	SHIP IT (Phase 2; needs splash fetcher build)
+22	Audio cue indicator	Visual flag when the rec changes significantly	Engine — score delta threshold	Header / action banner	2	3	S	—	defer — defer until paired with actual audio
+23	Pickrate/banrate context	Meta stats per champ	External feed	TOP CALL header	3	4	L	—	defer — out-of-scope per handoff
+24	Voice-line preview	Quote from the champion below TOP CALL	Riot ddragon champion/<name>.json includes lore + quotes	TOP CALL bottom	1	3	M	Italic mono one-liner	defer — pure flare, low usefulness
+25	3D rotating champion model	—	Riot doesn't expose models publicly	—	1	5	L	—	out-of-scope — DPG can't render 3D anyway
+Extras worth raising (beyond the seed list):
+
+#	Feature	Why	Verdict
+26	Side-objective ledger — small "DRAGON / VOID / BARON / HERALD" pulses per minute based on comp lane-phase strength	Engine has lane-phase awareness via subclasses; cheap to derive	maybe
+27	Action queue preview — "Next 3 actions: B-Pick, R-Pick, R-Pick" with side colors	DRAFT_SEQUENCE slice; trivial	SHIP IT — low cost, anchors orientation
+28	Per-player "spike role" indicator — small EARLY/MID/LATE pip next to each role slot	Engine archetype spike field	SHIP IT with #19
+29	Champion identity vector readout — for TOP CALL, render 3 strongest subclass tags as bracketed chips: [ FRONTLINE ] [ ENGAGE ] [ AOE ]	SUBCLASSES table	SHIP IT — almost free, very flavorful
+30	Confidence meter on top rec — visualize score-gap-vs-#2 as a 0-100% confidence bar	Score gap math already at draft.py:2052-2057	SHIP IT — replaces the gap chip with a sexier widget
+4. LAYOUT — USING THE BLANK SPACE
+Audit of current dead space (at typical 1920×1080 viewport)
+Mapping current draft.py:1721-1731 geometry:
+
+Header (54px), timeline (88px), body region ≈ 924px.
+Team columns: 250px wide. The user's smallest verified viewport is 1280×720, so anything in the center must fit in 1280 - 2*250 - 2*16 - 16 = 732px.
+Center: ~1280px on a 1920 viewport, ~732px on 1280. Currently uses: action banner (58), arch picker (~40), STRATEGIC (50), context lines (~63), TOP CALL (150), alternatives (4 × 56), pool region (220). Sum ≈ 740–800px.
+The actual dead space: below the team columns, where after the bans row + LIKELY NEXT ribbon (~80px tall), the rest is empty until the viewport bottom — typically 300–400px of unused per-side height.
+Secondary dead space: between context lines and TOP CALL (often empty when no exploit/cohesion fires), and around the alternatives when fewer than 4 alts come back.
+Three full-screen layouts
+Layout A — narrow team columns + right analytics rail (RECOMMENDED)
+
+Drop team columns to 200px, push center to ~880px wide, add a 300px right rail. Sum on 1920: 200+300+880+pad ≈ 1380, leaves ~540 for left buffer. On 1280: 180+220+860+pad → tight but viable.
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ [ DRAFT BOARD ]            [ MANUAL ]  [ YOU: BLUE ]      [ UNDO ] [ EXIT ]  │
+├──────────────────────────────────────────────────────────────────────────────┤
+│  BANS 1 │   PICKS 1   │ BANS 2 │  PICKS 2                                    │
+│ ▓▓▓▓▓▓ │  □□□□□□□   │ ▓▓▓▓   │   □□□□      ← timeline with marching-dash    │
+├──────────┬───────────────────────────────────────────┬───────────────────────┤
+│ BLUE OPS │ > YOUR PICK         · B3 · step 5/20      │  [ WIN PROB ]         │
+│          │ ┌─────────────────────────────────────┐   │   ██████░░░░  56.3%   │
+│ TOP      │ │  TOP CALL [POWER]  [+12 vs #2]      │   │   ▁▂▁▃▅▇▆ ← sparkline│
+│ JGL      │ │  ◆◆◆ JAYCE ◆◆◆                       │   │                       │
+│ MID      │ │  Long-range poke counters Yasuo     │   │  [ TEAM STRENGTH ]    │
+│ BOT      │ └─────────────────────────────────────┘   │   ⬡ radar overlay     │
+│ SUP      │                                            │                       │
+│          │ ALTERNATIVES                               │  [ CONTESTED ]        │
+│ BANS     │ ▸ Lucian   [COUNTER]                       │   ⬡ Yasuo   FREE      │
+│          │ ▸ Jhin     [POKE]                          │   ⬡ Vayne   BANNED    │
+│          │ ▸ Tristana [FLEX]                          │                       │
+├──────────┤                                            │  [ COUNTER COVERAGE ] │
+│ RED OPS  │ STRATEGIC                                  │   donut: 64%          │
+│          │ [ OUR ]    Pick / Catch & Burst            │                       │
+│ TOP      │ [ ENEMY ]  Teamfight                       │  [ DAMAGE PROFILE ]   │
+│ JGL      │                                            │   AP ██░░  AD ████░░  │
+│ MID      │ [ POOL SEARCH ]  >  yas|                   │   TRUE █░             │
+│ BOT      │  ⬡ Yasuo  ⬡ Yone  ⬡ Yasuo (BOT)            │                       │
+│ SUP      │                                            │                       │
+├──────────┴────────────────────────────────────────────┴───────────────────────┤
+│ > NARRATIVE  R3 BAN Yasuo (counters your Vayne) · B2 PICK Lucian · ...        │
+└──────────────────────────────────────────────────────────────────────────────┘
+This is the recommended target. It uses every pixel and reads as a command deck.
+
+Layout B — minimal team cols + giant TOP CALL + narrative below timeline
+
+Team columns drop to 160px (just role + portrait + locked champ, no player name). Massive 800-1000px TOP CALL with full splash backdrop. Narrative log scrolls in a horizontal strip below the timeline.
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ HEADER                                                                       │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ TIMELINE                                                                     │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ > NARRATIVE LOG (horizontal scroll, monospace)                               │
+├────────┬────────────────────────────────────────────────────────────┬────────┤
+│ BLUE   │                                                              │ RED   │
+│ ⬡TOP   │       ╔═══════════════════════════════════════════╗          │ TOP⬡  │
+│ ⬡JGL   │       ║                                            ║          │ JGL⬡  │
+│ ⬡MID   │       ║       SPLASH ART BACKDROP                  ║          │ MID⬡  │
+│ ⬡BOT   │       ║       ◆◆◆ TOP CALL: JAYCE ◆◆◆              ║          │ BOT⬡  │
+│ ⬡SUP   │       ║       Score breakdown bars below           ║          │ SUP⬡  │
+│        │       ╚═══════════════════════════════════════════╝          │       │
+│        │                                                              │       │
+│        │  ALTERNATIVES (compact strip)                                │       │
+│        │  POOL                                                        │       │
+└────────┴────────────────────────────────────────────────────────────┴────────┘
+Pro: maximum theatrical impact on TOP CALL. Con: drops the per-pick stats data band that's a v2.6 win, and STRATEGIC has to live somewhere awkward.
+
+Layout C — symmetrical mirrored analytics
+
+Both teams get an analytics column on their side, with the center stripe holding only the action banner + TOP CALL.
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ HEADER                                                                       │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ TIMELINE                                                                     │
+├─────┬─────────┬────────────────────────────────────────────┬─────────┬───────┤
+│ TEAM│ ANALYT  │  ACTION BANNER                              │ ANALYT  │ TEAM  │
+│ BLU │ -strgth │  TOP CALL                                   │ -strgth │ RED   │
+│     │ -damage │  Alternatives                               │ -damage │       │
+│     │ -coverg │  STRATEGIC                                  │ -coverg │       │
+│     │ -depth  │  POOL                                       │ -depth  │       │
+│     │  bars   │                                              │  bars   │       │
+└─────┴─────────┴────────────────────────────────────────────┴─────────┴───────┘
+Pro: at-a-glance comparison. Con: doubles the analytics surfaces (more cost, more clutter), and the center stripe gets squeezed at 1280px width (each side rail takes 220px = 440px stolen).
+
+Verdict: Build Layout A. It's the most extensible (analytics rail is a single new container that can accommodate features 1, 3, 9, 11, 15, 19, 28, 29, 30 over time) and stays readable at 1280×720.
+
+5. ANIMATION SYSTEM — "THEATRICAL"
+The existing tween system (core/animations.py) is great for one-shots (state changes) but the cyberpunk goal requires ambient motion. Almost all of this should be render-time sine/triangle waves keyed on time.monotonic(), not Tween-driven — they're stateless and free.
+
+5.1 Constant ambient motion
+#	Element	Pattern	Freq	Amplitude	Callsite
+A1	Scanline overlay scrolling vertically	translate Y by (t * 30) % cell_h	n/a	30 px/s	top-level, see §6
+A2	Center panel border glow alpha	sin wave on _gradient_frame alpha	0.3 Hz	±25%	_draw_board_center:1851
+A3	TOP CALL portrait holographic flicker	random 3%-per-frame alpha jitter to 80%	8 Hz	±18%	_draw_portrait call at :2028
+A4	Timeline current-action border breathing	already exists (:1680 pulse) — extend with cyan glow rays	0.6 Hz	±40%	_draw_board:1680-1700
+A5	All tag chips: subtle "powered" pulse on background fill	sin	0.4 Hz, phase staggered by hash(tag)	±10% alpha	_draw_tag_chip:1144
+A6	Background grid panning	translate X by (t * 8) % grid_cell_w	n/a	8 px/s slow drift	full-screen, see §6
+A7	Cyan/magenta side accents on team columns	breathing alpha	0.5 Hz	±15%	_draw_board_team:1736
+A8	"On the clock" team header — terminal cursor blink after label	binary blink	2 Hz	on/off	_draw_board_team:1739 (next to "* ON THE CLOCK")
+These are all time.monotonic()-based — no Tween bookkeeping. CPU cost: negligible since they collapse to a few extra math.sin calls per frame.
+
+5.2 State-change animations
+#	Trigger	Animation	Duration	Easing	Implementation
+S1	New recommendation appears	TOP CALL: slide up + fade + typewriter on champion name	600ms	out_cubic	extend existing _board_top_call_anim at :1982-1986; add typewriter substring counter
+S2	Recommendation changes (champion swap)	quick glitch effect: 3 frames of horizontal-line displacement	100ms	linear	new helper cyber.draw_glitch_overlay(rect, intensity)
+S3	Champion lock (any cell)	timeline cell pulses + cyan ripple expanding outward	280ms	already in _board_lock_pop_anim at :1666-1671	already animated; add ripple via anim.ripple(cell_cx, cell_cy, cy_lt, 30)
+S4	Lock changes recommendation	confidence-meter bar refills from 0 to new %	500ms	out_cubic	new — tween a fraction value
+S5	Action banner side-color change (B-turn → R-turn)	cross-fade cyan ↔ magenta	220ms	out_cubic	tween fill color RGB
+S6	Archetype picker chip activation	chip "powers on" — fill alpha 0→230 + brief scanline pass	240ms	out_back	extend _draw_arch_picker with per-chip anim state map
+S7	Pool filter type-event	rows stagger-fade in with 20ms-per-row offset	200ms total	out_cubic	sequential Tween with delay
+S8	Champion picked → portrait flies to its team-column slot	linear interpolation of (start_xy, end_xy)	380ms	out_cubic	new helper using portrait-redraw at intermediate coords
+5.3 Particle system
+core.animations.ParticleSystem (animations.py:108-143) already exists with gravity and burst behavior. It's currently used only for medal celebrations elsewhere. For cyberpunk:
+
+Existing class works for the "champion lock" celebration: emit 20 cyan/magenta particles from the locked cell, spread=60, lifetime_ms=400, size=3 — feels like a small power surge.
+Need to build: ambient drifting "data motes" — long-lived, no gravity, very low alpha, drift slowly across the screen. Add a Drifter companion class:
+class Drifter:
+    def __init__(self, bounds, color, alpha=80, speed=(5, 15)):
+        ...
+    def tick(self, dt_ms):
+        self.x += self.vx * dt_ms / 1000
+        if self.x > self.bounds[2]: self.x = self.bounds[0]
+Spawn ~20-30 of these for the center panel. Cost: 30 draw_circle calls/frame — negligible.
+5.4 Typewriter reveal on champion lock
+The current TOP CALL champion name draw is at draft.py:2116-2117:
+
+_txt(dl, text_x, champ_name_y, s0.get("champion", "?")[:16],
+     (*C["gold_lt"][:3], 248), 36, "raj_36")
+Replace with a substring slice driven by _board_top_call_anim (already exists for the slide-in):
+
+name = s0.get("champion", "?")[:16]
+# Typewriter: reveal one character per 60ms during anim
+reveal_t = draft._board_top_call_anim  # 0..1
+chars = int(len(name) * min(1.0, reveal_t * 1.6))  # finish at t=0.625
+visible = name[:chars]
+cursor = "|" if (int(time.monotonic() * 3) % 2 == 0 and chars < len(name)) else ""
+_txt(dl, text_x, champ_name_y, visible + cursor,
+     (*C["gold_lt"][:3], 248), 36, "raj_36")
+That's the entire implementation. The animation already runs on rec change.
+
+5.5 Splash art ken-burns
+Once splash art is fetchable (a new splash_art.py modeled on champion_icons.py):
+
+Render at 60-70% alpha, fitted to TOP CALL card width with dpg.draw_image_quad so we can scale/translate.
+Maintain a per-champion (scale, offset_x, offset_y) state in a dict; advance over 12 seconds: scale: 1.0 → 1.08, offset_x: 0 → ±20px, offset_y: 0 → ±10px using ease_in_out. Direction randomized per champion to keep variety.
+Implementation: register one tween per axis at champion change, OR keep it stateless via time.monotonic() * cycle_seconds and let the math do the work (preferred — no Tween lifecycle).
+def _ken_burns_xform(champ_name, base_w, base_h):
+    """Return (sx, sy, dx, dy) for a splash-image at this moment."""
+    seed = hash(champ_name)
+    t = (time.monotonic() / 12.0) % 1.0
+    phase = math.sin(t * math.pi * 2 + (seed % 100))
+    scale = 1.04 + 0.04 * (0.5 + 0.5 * phase)
+    dx = (seed % 21 - 10) * phase
+    dy = ((seed // 7) % 11 - 5) * phase
+    return scale, dx, dy
+5.6 Animated grid background
+The simplest cyberpunk grid: parallel cyan lines every 40px, drifting slowly. Cheap and effective.
+
+Implementation at top of _draw_board:1562 (after the bg fill):
+
+# Animated background grid — sparse cyan lines, slow horizontal drift
+grid_cell = 40
+drift_x = int((time.monotonic() * 8) % grid_cell)
+drift_y = int((time.monotonic() * 4) % grid_cell)
+grid_a = 28  # very subtle
+for gx in range(-grid_cell, vw + grid_cell, grid_cell):
+    dpg.draw_line((gx + drift_x, 0), (gx + drift_x, vh),
+                  color=(*C["grid_a"][:3], grid_a), thickness=1, parent=dl)
+for gy in range(-grid_cell, vh + grid_cell, grid_cell):
+    dpg.draw_line((0, gy + drift_y), (vw, gy + drift_y),
+                  color=(*C["grid_a"][:3], grid_a), thickness=1, parent=dl)
+At 1920×1080 with 40px cells: 48 vertical + 27 horizontal = 75 draw_line calls. Trivial.
+
+5.7 Glow trail on the timeline current-action cell
+Build it via multi-layer rectangles with increasing size and decreasing alpha — same approach as _gradient_frame:
+
+# Inside the `is_cur` branch around draft.py:1680
+glow_color = C["cy_lt"][:3] if a.side == "BLUE" else C["mg_lt"][:3]
+for i in range(6):
+    a_out = int(110 * (1 - i / 6) * pulse)
+    dpg.draw_rectangle((cx0 + 1 - i, cells_y - i),
+                       (cx0 + cell_w - 1 + i, cells_y + cells_h + i),
+                       fill=(0,0,0,0), color=(*glow_color, a_out),
+                       thickness=1, rounding=4, parent=dl)
+5.8 Holographic flicker on TOP CALL portrait
+In _draw_portrait (draft.py:1079-1126), add an optional flicker=True kwarg. When set:
+
+if flicker:
+    base_a = alpha
+    # 8% per-frame chance of a brief dim; otherwise sine-modulated breathing
+    if random.random() < 0.04:
+        alpha = int(base_a * 0.6)
+    else:
+        # Subtle sine breathing at 6 Hz
+        alpha = int(base_a * (0.92 + 0.08 * math.sin(time.monotonic() * 6 * math.pi)))
+Optionally add 1-2 horizontal "scanline scrubs" — single bright horizontal lines that sweep top-to-bottom across the portrait every 4 seconds:
+
+scan_t = (time.monotonic() / 4.0) % 1.0
+scan_y = int(y + size * scan_t)
+dpg.draw_line((x, scan_y), (x + size, scan_y),
+              color=(*C["cy_lt"][:3], 180), thickness=1, parent=dl)
+6. SCANLINE / GRID BACKGROUND TREATMENT
+Full-screen scanline overlay
+Cheapest viable: every 4 pixels, a faint horizontal line, animated to scroll downward at ~30 px/s.
+
+def draw_scanlines(dl, x, y, w, h, color=(140, 200, 240), alpha=14, spacing=4, speed=30):
+    drift = int((time.monotonic() * speed) % spacing)
+    col = (*color[:3], alpha)
+    for line_y in range(y - spacing, y + h + spacing, spacing):
+        ly = line_y + drift
+        if ly < y or ly > y + h: continue
+        dpg.draw_line((x, ly), (x + w, ly), color=col, thickness=1, parent=dl)
+At 1080px viewport height with spacing=4, that's ~270 lines per frame. At 16ms budget, this is fine — DPG can comfortably push thousands of draw_line calls per frame on modest GPUs. (Reference: the current board renders 146 dpg.draw_* calls outside the scanline overlay — adding 270 more is a 3× bump, still well below saturation.)
+
+Center-panel grid background
+Already specced in §5.6. Use spacing 40px, alpha ~28. Only on the center panel region (clip to (cen_x, body_y, cen_w, body_h) from draft.py:1724-1726). Cost: 30-40 lines.
+
+Implementation pattern
+Both draw_scanlines and the grid go in the new ui/cyber.py. Called once each in _draw_board:1562 right after the background fill at draft.py:2671-equivalent for the BOARD phase. Order: bg fill → grid → scanlines (over everything but UI), then UI elements.
+
+Optionally make a single texture for the static grid (load once at startup) and draw_image it — but the per-frame loop is already cheap enough that this is premature optimization.
+
+7. RISKS & TRADE-OFFS
+7.1 Cognitive load
+Feature-heavy + theatrical motion is dense. Empirical max before it's noise:
+
+5-7 simultaneous moving elements on screen feels alive.
+>10 feels like a slot machine.
+The recommended Layout A has: pulsing border (1), scanlines (1), grid drift (1), TOP CALL flicker (1), TOP CALL halo (1), action banner cyan pulse (1), 5-6 right-rail widgets — most static unless data changes. That's ~6 ambient + 5-6 conditional = at the upper edge.
+Mitigation: "CALM MODE" toggle in the header. A small [ CALM ] button next to UNDO that flips a draft.calm_mode = True flag and disables: scanlines, grid drift, ambient pulses, TOP CALL flicker, marching dashes. State-change animations stay (they're informative). Persist in the_rift/data/config.py.
+
+7.2 DPG performance audit
+Rough draw-call count per frame in BOARD mode today (grep -c "dpg.draw_" draft.py → 146 total in the file, but not all execute every frame). Estimated per-frame draws in board mode at typical state:
+
+Header + timeline: ~80 (20 cells × 3 + labels + dividers + status + buttons)
+Team columns × 2: ~100 (5 slots × 4 + bans × 5 + likely-next ribbon)
+Center panel: ~120 (TOP CALL halo 4 layers + portrait + chips + stats + alternatives 4 × 6)
+Pool grid: ~60 (12-20 cells × 3)
+Total today: ~360 draw calls/frame
+Adding Layout A + all proposed motion:
+
+Scanlines: +270
+Grid: +40
+Right rail (5-6 widgets, each ~20-30 draws): +150
+Glow trails on current action: +12
+TOP CALL splash backdrop (1 image quad): +1
+Marching dashes (3 instances at ~12 segments each): +36
+Particle drift field (30 dots): +30
+Narrative log strip (10 lines × 2-3 elements): +25
+Total proposed: ~924 draw calls/frame
+DPG handles this comfortably — empirically the tierlist tab renders 500+ calls per frame and stays at 60fps. The watch points:
+
+draw_polygon is the most expensive primitive. Corner-cut rects are polygons, so multiply: ~80 cut rects × 1 = fine. ~250 cut rects × 1 = starts to matter. Stay under ~200 polygons per frame.
+Splash images with draw_image_quad are very cheap (one texture per frame regardless of size).
+Breaking point estimate: ~2500 draws/frame before noticeable lag. We have ~3× margin.
+
+7.3 Splash art
+Ddragon splash URL pattern: https://ddragon.leagueoflegends.com/cdn/img/champion/splash/{id}_0.jpg — 1215×717, JPEG, typical size 80-180 KB. Loading splash:
+
+Per-champion cost: 80-180 KB downloaded once + ~3.5 MB RAM after decode (1215×717×4 bytes for RGBA).
+All 170 champions cached on disk: ~25 MB (acceptable; same order as existing champion_cache/ icons).
+All 170 in DPG texture memory: 170 × 3.5 MB = ~600 MB GPU memory. Not acceptable.
+Solution: cache to disk eagerly, register textures lazily and evict. Maintain a small DPG-registered set (only the currently displayed splash + ~3 recent ones). When TOP CALL changes:
+
+Check if splash texture for new champ is registered → if yes, use it.
+If not, check disk cache → if present, decode + register, evict oldest if registered count > 4.
+If not on disk, kick off requests.get in a daemon thread; show fallback (current portrait, full-card, no splash) until ready.
+Build a new the_rift/data/splash_art.py mirroring the structure of champion_icons.py but with this eviction logic. ~200 LOC.
+
+7.4 Accessibility
+Reduce-motion setting. A reduce_motion: bool flag in config disables: scanlines, ambient pulses, particle drift, holographic flicker, ken-burns, marching dashes. Keep: typewriter (informative), confidence bar tweens, TOP CALL slide-in. The CALM MODE toggle and the setting can share this flag.
+High-contrast option. Some users find low-alpha gridlines visually noisy. Add a cyber_intensity: float config knob (0.0 = no scanline/grid, 0.5 = current proposal, 1.0 = double alpha). Default 0.5.
+Color-blind palette consideration. Cyan + magenta is already a deuteranopia-safe pair. The amber/term_green/alert_red trio is the concern — make sure cohesion warnings (amb) and exploits (term_g) are not the only differentiating cue (the sigils ! and + carry the signal too — keep them).
+7.5 Mobile / smaller viewports
+Layout A on 1280×720: tight but viable with team columns at 200px + right rail at 220px + center at 596px. Confidence-meter and donut may need to be hidden, with a single "TACTICAL READOUT" panel toggled by clicking a [ + ] chevron.
+Below 1280×720: refuse to enter board mode and show a "Resize viewport to at least 1280×720" message in the IDLE landing.
+8. RECOMMENDED PHASING
+Three phases, each ~2-4 days, shippable independently. User-verifiable at the end of each.
+
+Phase 1 — Foundation + Aesthetic Pass (≈3 days)
+Goal: every existing surface looks cyberpunk. No new feature panels yet. Maximum visual impact, minimum data plumbing.
+
+Add palette entries to theme.C (§1.1).
+Build the_rift/ui/cyber.py: draw_cut_rect, draw_brackets, draw_bracket_label, draw_dashed_rect, draw_marching_dash, draw_scanlines, draw_grid_bg, draw_glitch_overlay.
+Add JetBrains Mono font registrations (§1.3).
+Add calm_mode + reduce_motion flags to data/config.py; wire a [ CALM ] toggle into header.
+Refactor all surfaces in §2.1-2.10 to use the new helpers + palette.
+Add ambient motions A1-A8 from §5.1.
+Add state-change animations S1, S3, S5 from §5.2.
+Add typewriter reveal on TOP CALL champion name (§5.4).
+Add glow trail on timeline current action (§5.7).
+Add holographic flicker on TOP CALL portrait (§5.8).
+Verification: screenshot all four phases (BAN1, PICK1, BAN2, PICK2) in both manual + live. Compare to a Cyberpunk 2077 menu reference shot — should feel of-a-piece.
+
+Phase 2 — Right Analytics Rail + Narrative Log (≈3 days)
+Goal: fill the dead space with the 5-6 highest-value new widgets.
+
+Implement Layout A (§4) — re-do the body geometry in _draw_board:1721-1731.
+Build the right-rail container helper.
+Widgets to ship in this phase (all from §3):
+#1 Live win-probability gauge + sparkline — recompute every N frames in the background, not every frame.
+#3 Recommendation explanation panel — bars wired to score_breakdown.
+#9 Contested champion ladder.
+#11 Team strength radar — overlaid hexagons.
+#15 Counter-coverage donut.
+#19 AP/AD/True damage profile — horizontal stacked bar.
+#12 Draft narrative log as bottom-of-screen strip.
+#27 Action queue preview in the header next to the action banner.
+#29 Champion identity vector chips below the champion name in TOP CALL.
+Verification: scrub through a sample draft, confirm every widget updates correctly on each lock + every chip stays readable.
+
+Phase 3 — Splash Art + Advanced Features (≈4 days)
+Goal: theatrical polish + the high-complexity features.
+
+Build the_rift/data/splash_art.py with disk cache + LRU texture eviction (§7.3).
+#21 Splash art backdrop on TOP CALL.
+Ken-burns animation (§5.5).
+#2 Counter-pick predictor widget (right-rail).
+#5 Opponent pattern recognition — extend the LIKELY NEXT ribbon.
+#6 What-if ban simulator tooltip.
+#7 Champion pool depth meter embedded in role slots.
+#8 Live LCU timer ring around the action banner (live mode only).
+#18 Synergy network graph (right-rail, expandable on demand).
+#30 Confidence meter replacing the gap chip.
+Particle drift field (§5.3).
+Polish pass: marching dashes everywhere they belong, full reduce-motion audit.
+Verification: record a 60-second clip walking through one full draft. Should look like a Mass Effect 3 squad screen in motion.
+
+9. OPEN QUESTIONS FOR THE USER
+Frame these as 1-question polls — each one cleanly bisects the implementation direction.
+
+Subordinate gold to cyan, or keep gold equal weight? (Recommendation: subordinate. Cyberpunk and gold-on-blue tend to read as Mass Effect homage; gold-equal-weight reads as "fantasy hub with neon trim.")
+Splash art YES on TOP CALL, or stay portrait-dominant? (Trade-off: splash adds ~25MB disk + texture-eviction layer + memorable visual identity per champ. Portrait-dominant keeps it crisper and lower-risk.)
+Add JetBrains Mono, or stick with Rajdhani-only for everything? (Mono is the defining cyberpunk type cue but doubles the font registration line count in theme.py. ~12 KB extra disk.)
+Layout A (recommended) vs Layout B (giant TOP CALL with splash)? (A is more flexible. B is more theatrical but bumps out STRATEGIC and stats data band.)
+Build right-rail features incrementally (Phase 2 single sprint) or pick the user's top 4 first? (If incremental, ship is faster. If user-driven, may want #1, #11, #15, #19 first and skip #9 if it feels redundant.)
+Live LCU timer ring — high priority, or is manual mode the focus? (If manual is 80% of usage, the timer ring is flavor only. If live mode is the default for tournament prep, the ring becomes critical UX.)
+Narrative log: bottom-of-screen ticker, or fold into the right-rail? (Ticker is more cyberpunk. Right-rail is more compact and lets the bottom be unused at 1280×720.)
+Counter-pick predictor (#2) — auto-run for every possible enemy pick, or hover-triggered only? (Auto = always-on info but spends ~80ms per recompute × 5 hypothetical enemies = 400ms hit. Hover-triggered is cheaper and feels intentional.)
+CALM MODE as a header button, or buried in a settings tab? (Header = discoverable but takes pixel real estate. Settings = clean but users won't find it.)
+Reduce-motion default off (for theatrical wow) or on (for accessibility-first)? (Default-off is cleaner for the v2.7 announcement. Default-on if any user has motion sensitivity.)
+TL;DR FOR FUTURE CLAUDE
+You're implementing v2.7 of The Rift's Draft Board: a cyberpunk command-deck revamp on top of v2.6.0. The codebase is Python + DearPyGUI, draw-list rendering, single big file the_rift/ui/draft.py (~3200 LOC) with all the board geometry. Ship in 3 phases. Phase 1: build the_rift/ui/cyber.py with corner-cut rects, bracket frames, scanlines, grid background, marching dashes; add JetBrains Mono font + new cyan/magenta palette entries to theme.C; refactor every existing surface in _draw_board, _draw_board_team, _draw_board_center to use those helpers; add ambient motion (scanlines drift, grid pan, TOP CALL flicker, glow trails, breathing pulses) and a CALM MODE toggle. Phase 2: re-do center body geometry as Layout A (narrow team cols + right analytics rail + bottom narrative log), then ship win-probability gauge with sparkline, score-breakdown bars, contested ladder, team-strength radar, counter-coverage donut, damage profile, draft narrative log, action queue preview, champion identity chips. Phase 3: build splash_art.py with LRU texture eviction, splash backdrops on TOP CALL with ken-burns, counter-pick predictor, what-if ban simulator, pool-depth meters in role slots, LCU timer ring (live mode), synergy network graph, confidence meter, drifting particles. Engine work is ~zero — all data already exists in draft_engine.py + draft_board.py + live.*. Performance budget is generous (current ~360 draws/frame, target ~900 — DPG handles 2500+). Honor the verify-before-push rule; work in main directory.
+agentId: ae21ddb23e4a18fa7 (use SendMessage with to: 'ae21ddb23e4a18fa7' to continue this agent)
+<usage>total_tokens: 164568
+tool_uses: 30
+duration_ms: 405991</usage>

@@ -26,6 +26,24 @@ C = {
     "rift_purple": (107,  47, 160, 255),
     # Splash flash
     "flash":       (13,  27,  42, 255),
+
+    # -----------------------------------------------------------------------
+    # Cyberpunk command-deck accents (v2.7 Draft Board revamp).
+    # Gold above is demoted to "ceremonial" use (mastheads / non-board tabs).
+    # Cyan = blue side, magenta = red side, on the Draft Board.
+    # -----------------------------------------------------------------------
+    "cy_lt":       (120, 230, 255, 255),   # electric cyan — hi-light edges, blue-side accent
+    "cy":          (60,  195, 235, 255),   # cyan body — chip fills, dividers, gridlines
+    "cy_dk":       (20,   90, 130, 255),   # cyan shadow / dim borders
+    "mg_lt":       (255, 110, 220, 255),   # hot magenta — DANGER / opponent callouts
+    "mg":          (220,  70, 175, 255),   # magenta body — red-side accent
+    "mg_dk":       (110,  30,  90, 255),   # magenta shadow / dim borders
+    "amb":         (255, 175,  60, 255),   # hot amber — warning / decision required
+    "term_g":      (80,  255, 160, 255),   # terminal green — OK / SAFE / NOMINAL
+    "alert_r":     (255,  65,  80, 255),   # alert red — hard error / contested ban
+    "scan_gy":     (180, 200, 220, 255),   # scanline tint (drawn at very low alpha)
+    "panel_dk":    (8,    12,  22, 255),   # deeper panel background
+    "grid_a":      (40,   80, 110, 255),   # grid-cell line color (cool dim)
 }
 
 # Direction C — rank badge backgrounds
@@ -141,6 +159,15 @@ def setup_fonts():
                           (22, "cinzel_22"), (20, "cinzel_20"), (18, "cinzel_18"),
                           (16, "cinzel_16"), (14, "cinzel_14")]:
             path = os.path.join(font_dir, "CinzelDecorative-Bold.ttf")
+            if os.path.exists(path):
+                fonts[key] = dpg.add_font(path, size)
+
+        # JetBrains Mono Medium — data, codes, action labels, stat bands
+        # (the cyberpunk command-deck type cue; Rajdhani stays the body font)
+        for size, key in [(36, "mono_36"), (28, "mono_28"), (22, "mono_22"),
+                          (18, "mono_18"), (16, "mono_16"), (14, "mono_14"),
+                          (12, "mono_12"), (11, "mono_11")]:
+            path = os.path.join(font_dir, "JetBrainsMono-Medium.ttf")
             if os.path.exists(path):
                 fonts[key] = dpg.add_font(path, size)
 

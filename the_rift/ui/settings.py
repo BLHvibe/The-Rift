@@ -68,6 +68,7 @@ class SettingsState:
         self.region     = cfg.get("region",     "na1")
         self.routing    = cfg.get("routing",    "americas")
         self.creds_path = cfg.get("creds_path", "credentials.json")
+        self.calm_mode  = bool(cfg.get("calm_mode", False))
 
     def save(self):
         cfg = load_config()
@@ -76,6 +77,7 @@ class SettingsState:
         cfg["region"]     = self.region
         cfg["routing"]    = self.routing
         cfg["creds_path"] = self.creds_path
+        cfg["calm_mode"]  = self.calm_mode
         save_config(cfg)
 
 settings = SettingsState()
@@ -245,6 +247,26 @@ def _build_settings_window(sb_w, vw, vh):
         dpg.add_separator()
         dpg.add_spacer(height=20)
 
+        # ── Draft Board ───────────────────────────────────────────────────
+        _section_label("DRAFT BOARD")
+        with dpg.group():
+            dpg.add_text(
+                "CALM MODE — freeze the cyberpunk ambient motion on the Draft "
+                "Board (scanlines, grid drift, breathing glow, flicker, "
+                "marching borders). Pick/lock animations still play.",
+                color=C["txt_dim"][:3], wrap=560)
+            dpg.add_spacer(height=8)
+            cm = dpg.add_checkbox(tag="set_calm_mode",
+                                  label="  Enable CALM MODE",
+                                  default_value=settings.calm_mode,
+                                  callback=_apply_calm_mode)
+            if "raj_sb_14" in _F:
+                dpg.bind_item_font(cm, _F["raj_sb_14"])
+
+        dpg.add_spacer(height=28)
+        dpg.add_separator()
+        dpg.add_spacer(height=20)
+
         # ── Save row ──────────────────────────────────────────────────────
         with dpg.group(horizontal=True):
             save_btn = dpg.add_button(label="  SAVE SETTINGS  ",
@@ -296,12 +318,26 @@ def _test_connection():
     test_sheets_connection(on_done=_done, on_error=_err)
 
 
+def _apply_calm_mode():
+    """CALM MODE toggled — persist and apply to the live Draft Board now."""
+    calm = bool(dpg.get_value("set_calm_mode")) if dpg.does_item_exist("set_calm_mode") else False
+    settings.calm_mode = calm
+    settings.save()
+    try:
+        from ui import cyber
+        cyber.set_motion(not calm)
+    except Exception:
+        pass
+
+
 def _save_settings():
     settings.api_key    = dpg.get_value("set_api_key")
     settings.sheet_url  = dpg.get_value("set_sheet_url")
     settings.region     = dpg.get_value("set_region")
     settings.routing    = dpg.get_value("set_routing")
     settings.creds_path = dpg.get_value("set_creds_path")
+    if dpg.does_item_exist("set_calm_mode"):
+        settings.calm_mode = bool(dpg.get_value("set_calm_mode"))
     try:
         settings.save()
         dpg.configure_item("set_save_status", default_value="✓  Settings saved.")

@@ -568,6 +568,8 @@ def _read_inhouse(sh, known_names=None, summoner_map=None):
     champ_agg = defaultdict(lambda: defaultdict(lambda: {
         "games": 0, "wins": 0, "kills": 0, "deaths": 0,
         "assists": 0, "damage": 0,
+        "results": [],   # chronological 1=win/0=loss for this champ (recency)
+        "roles": {},     # role -> count this champ was played in
     }))
     role_freq = defaultdict(lambda: defaultdict(int))
 
@@ -591,6 +593,9 @@ def _read_inhouse(sh, known_names=None, summoner_map=None):
         ca["deaths"]  += r["deaths"]
         ca["assists"] += r["assists"]
         ca["damage"]  += r["damage"]
+        ca["results"].append(1 if r["win"] else 0)
+        if r.get("role"):
+            ca["roles"][r["role"]] = ca["roles"].get(r["role"], 0) + 1
 
         if r.get("role"):
             role_freq[name][r["role"]] += 1
@@ -639,6 +644,12 @@ def _read_inhouse(sh, known_names=None, summoner_map=None):
                 "deaths":  round(ca["deaths"]/cg, 1),
                 "assists": round(ca["assists"]/cg, 1),
                 "damage":  f"{round(ca['damage']/cg):,}",
+                # v2.7 — per-champ recency: chronological win/loss (capped to
+                # the last 100 customs games) so the engine can weight recent
+                # form heavier than stale all-time WR.
+                "results":        ca["results"][-100:],
+                "recent_results": ca["results"][-20:],
+                "roles":          dict(ca["roles"]),
             })
         champs.sort(key=lambda x: x["games"], reverse=True)
         inhouse_champs[name] = champs
