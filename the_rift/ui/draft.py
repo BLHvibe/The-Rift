@@ -21,6 +21,7 @@ from data.draft_board import (DraftBoardState, recommend_action,
 from data import draft_lcu
 from data import champion_icons
 from data import splash_art
+from ui import draft_sync_ui as _sync_ui
 from ui.tierlist import _wheel_delta as _wheel_delta_shared
 from ui.effects import (draw_orbital_spinner, draw_drift_field,
                          draw_breathing_ring, breathing_alpha)
@@ -1469,6 +1470,40 @@ def _filter_pool(pool, query):
     return [(c, r) for c, r in pool if q in c.upper()]
 
 
+def _board_begin_synced():
+    """After draft_sync.connect() succeeds, drop straight into a fresh BOARD
+    seeded with placeholder players. Real players arrive via sync_tick().
+    Called by ui.draft_sync_ui after a successful join."""
+    cyber.set_motion(not load_config().get("calm_mode", False))
+    placeholder = lambda side, i: {
+        "name": f"{side[0]}{i+1}",
+        "tier": "Unranked",
+        "final_score": 50.0,
+        "score": 50.0,
+        "role": _ROLES[i],
+    }
+    blue_players = [placeholder("BLUE", i) for i in range(5)]
+    red_players  = [placeholder("RED",  i) for i in range(5)]
+    # our_side will be overwritten by the first server snapshot, but we need a
+    # legal initial value.
+    draft.board = DraftBoardState(blue_players, red_players, our_side="BLUE")
+    draft.board_live = False
+    draft.board_pool_search = ""
+    draft.board_pool_scroll = 0
+    draft.board_target_arch = None
+    draft.board_live_session = None
+    draft.board_live_status = ""
+    draft.board_live_stop = False
+    draft._board_live_sig = None
+    draft.phase = DraftPhase.BOARD
+    _board_recompute()
+
+
+# Hand the bridge to the sync UI module so it can call us back without a
+# circular import.
+_sync_ui.set_join_callback(_board_begin_synced)
+
+
 def _board_begin():
     """Build a DraftBoardState from the team-builder rosters and enter BOARD."""
     cyber.set_motion(not load_config().get("calm_mode", False))
@@ -1525,6 +1560,12 @@ def _board_recompute():
 
 def _board_apply(champ, role=None):
     if draft.board is None or not champ:
+        return
+    # In a synced session the server is the source of truth — route the action,
+    # then let _draw_board's sync_tick fold the broadcast back into draft.board.
+    if _sync_ui.route_apply(draft, champ, role):
+        draft.board_pool_search = ""
+        draft.board_pool_scroll = 0
         return
     if draft.board.apply(champ, role):
         draft.board_pool_search = ""        # fresh action → reset search/scroll
@@ -1602,6 +1643,14 @@ def _board_legal_pool(state, action):
 
 
 def _draw_board(dl, vw, vh):
+    # Sync mirror first: if a session is active, fold the latest server
+    # snapshot into draft.board before we render. Recompute the recommender
+    # whenever a new revision lands so the suggestions follow remote actions.
+    _prev_pointer = draft.board.pointer if draft.board is not None else -1
+    _sync_ui.sync_tick(draft)
+    if draft.board is not None and draft.board.pointer != _prev_pointer:
+        _board_recompute()
+
     _board_hits.clear()
     champion_icons.flush_pending()          # register any downloaded icons
     splash_art.flush_pending()              # register any downloaded splashes
@@ -1652,7 +1701,10 @@ def _draw_board(dl, vw, vh):
                              (*C["cy_lt"][:3], 245), 28, _txt,
                              font_key="mono_28",
                              bracket_color=(*C["cy"][:3], 220), char_w=0.62)
-    if draft.board_live:
+    if _sync_ui.is_active():
+        ptxt = _sync_ui.presence_text() or "SYNCED"
+        _txt(dl, 320, 18, ptxt[:80], (*C["term_g"][:3], 230), 16, "mono_16")
+    elif draft.board_live:
         st = draft.board_live_status or "Connecting…"
         st_col = C["term_g"][:3] if live_connected else C["amb"][:3]
         _txt(dl, 320, 18, st[:46], (*st_col, 225), 16, "mono_16")
@@ -2821,14 +2873,21 @@ def _board_handle_input(vw, vh):
         if hx <= mx <= hx + hw and hy <= my <= hy + hh:
             if kind == "exit":
                 draft.board_live_stop = True
+                _sync_ui.disconnect_if_active()
                 draft.phase = DraftPhase.IDLE
             elif kind == "undo":
-                if draft.board and draft.board.undo():
+                # Synced: host-only on the server side; route and let mirror
+                # update the board on broadcast.
+                if _sync_ui.route_undo(draft):
+                    draft.board_pool_scroll = 0
+                    draft.board_pool_search = ""
+                elif draft.board and draft.board.undo():
                     draft.board_pool_scroll = 0
                     draft.board_pool_search = ""
                     _board_recompute()
             elif kind == "new":
                 draft.board_live_stop = True
+                _sync_ui.disconnect_if_active()
                 draft.board = None
                 draft.board_rec = None
                 draft.board_pool_scroll = 0
@@ -2846,6 +2905,11 @@ def _board_handle_input(vw, vh):
                     draft.board_target_arch = new_arch
                 _board_recompute()
             elif kind == "pick" and payload:
+                # In sync mode the server enforces side-authorization, but
+                # short-circuit here so spectators / off-turn players don't
+                # see flashing rejections.
+                if not _sync_ui.can_act(draft):
+                    return
                 _board_apply(payload[0], payload[1])
             return
 
@@ -3104,7 +3168,24 @@ def _draw_idle(dl, vw, vh):
         _txt(dl, abx + 22, aby + 9, "RE-ANALYSE PREVIOUS DRAFT",
              (*C["platinum"][:3], 220), 18, "raj_sb_18")
 
+    # "JOIN SYNCED DRAFT" button — sits below the three mode cards. Opens the
+    # multiplayer Join Room dialog; on connect we drop into BOARD with a
+    # placeholder roster that the server fills in via sync_tick().
+    jbw, jbh = 280, 36
+    jbx = cx - jbw // 2
+    jby = aby + (abh + 14 if has_prev else 0)
+    hot_join = jbx <= rx <= jbx + jbw and jby <= ry <= jby + jbh
+    dpg.draw_rectangle((jbx, jby), (jbx + jbw, jby + jbh),
+                       fill=(*C["card"][:3], 210 if hot_join else 160),
+                       color=(*C["gold"][:3], 220 if hot_join else 140),
+                       rounding=6, parent=dl)
+    _txt(dl, jbx + 22, jby + 7, "JOIN / HOST SYNCED DRAFT  →",
+         (*C["gold"][:3], 230 if hot_join else 180), 17, "raj_sb_18")
+
     if dpg.is_mouse_button_clicked(0):
+        if hot_join:
+            _sync_ui.show_join_dialog()
+            return
         for key, x, y, w, h, _t, _s in _mode_cards(vw, vh):
             if x <= rx <= x + w and y <= ry <= y + h:
                 if key == "batch":

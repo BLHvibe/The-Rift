@@ -1,0 +1,31 @@
+# fly.toml — deploy with `fly launch --no-deploy` first (to register the app),
+# then `fly deploy`. Replace the app name below with whatever you registered.
+#
+# Free-tier-friendly settings: 1 shared-cpu VM, 256 MB RAM, auto-stop when
+# idle. Fly will spin it back up on the next WebSocket connection.
+#
+# Once deployed, your WebSocket URL will be:
+#   wss://<app-name>.fly.dev/ws/<room-code>?password=...&name=...&slot=blue1
+
+app = "the-rift-draft-sync"
+primary_region = "iad"   # change to a region near you/your friends
+
+[build]
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "connections"
+    hard_limit = 200
+    soft_limit = 150
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 256

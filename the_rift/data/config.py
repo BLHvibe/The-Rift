@@ -24,6 +24,19 @@ _DEFAULTS = {
     # (scanlines, grid drift, breathing pulses, flicker, marching dashes).
     # State-change animations (typewriter, slide-in, ripple) are unaffected.
     "calm_mode": False,
+    # Draft Board v2.8 — Synced multiplayer draft session config. The URL is the
+    # FastAPI websocket server (see ../../server/). The other fields are the last
+    # values the user submitted in the Join Room dialog, kept so a re-join is
+    # one click.
+    "sync": {
+        # ngrok-tunneled draft-sync server. The tunnel forwards to the local
+        # FastAPI server (`server/main.py`) running on the host PC. ngrok
+        # transparently upgrades the HTTPS path to WebSocket for /ws/<room>.
+        "url": "wss://wife-reason-unseeing.ngrok-free.dev",
+        "last_room": "",
+        "last_name": "",
+        "last_slot": "spectator",
+    },
 }
 
 def _load_bundled_config():
