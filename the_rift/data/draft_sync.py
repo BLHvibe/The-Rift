@@ -142,6 +142,16 @@ class DraftSyncClient:
         self._slot = slot
         self._send({"type": "set_slot", "slot": slot})
 
+    def start_draft(self) -> None:
+        self._send({"type": "start_draft"})
+
+    def set_slot_player(self, side: str, idx: int,
+                        player: Dict[str, Any]) -> None:
+        self._send({"type": "set_slot_player",
+                    "side": side.upper(),
+                    "idx": int(idx),
+                    "player": player})
+
     def chat(self, text: str) -> None:
         self._send({"type": "chat", "text": text})
 

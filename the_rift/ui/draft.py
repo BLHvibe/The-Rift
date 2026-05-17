@@ -1642,6 +1642,123 @@ def _board_legal_pool(state, action):
     return [(c, None) for c in sorted(allc) if c not in used]
 
 
+def _draw_sync_lobby(dl, vw, vh):
+    """Pre-draft lobby shown when a sync session is open but
+    `start_draft` hasn't fired yet. Surfaces connection state, who's
+    connected per slot, and a START DRAFT button for the host."""
+    from data import draft_sync as _ds
+    client = _ds.active()
+    snap = client.state() if client else None
+    status = _sync_ui.connection_status()
+
+    # Background
+    cyber.draw_grid_bg(dl, 0, 0, vw, vh, spacing=40, alpha=18,
+                       speed_x=0, speed_y=0)
+
+    # Header
+    hdr_h = 54
+    dpg.draw_rectangle((0, 0), (vw, hdr_h), fill=(*C["panel_dk"][:3], 240),
+                       color=(0, 0, 0, 0), parent=dl)
+    dpg.draw_line((0, hdr_h - 1), (vw, hdr_h - 1),
+                  color=(*C["cy_dk"][:3], 220), thickness=1, parent=dl)
+    cyber.draw_bracket_label(dl, 24, 12, "DRAFT LOBBY",
+                             (*C["cy_lt"][:3], 245), 28, _txt,
+                             font_key="mono_28",
+                             bracket_color=(*C["cy"][:3], 220), char_w=0.62)
+    if status:
+        col = C["term_g"][:3] if status == "synced" else C["amb"][:3]
+        _txt(dl, 320, 18, status[:80], (*col, 230), 16, "mono_16")
+
+    # EXIT button (top-right) — registers a hit
+    cb_w, cb_h = 100, 38
+    cb_x = vw - cb_w - 16
+    cb_y = (hdr_h - cb_h) // 2
+    cyber.draw_cut_rect(dl, cb_x, cb_y, cb_x + cb_w, cb_y + cb_h, cut=7,
+                        fill=(*C["panel"][:3], 185), color=None)
+    cyber.draw_marching_dash(dl, cb_x, cb_y, cb_x + cb_w, cb_y + cb_h,
+                             (*C["mg"][:3], 210), dash=8, gap=6, speed=14)
+    _txt(dl, cb_x + 30, cb_y + 9, "EXIT", (*C["mg_lt"][:3], 235), 18, "mono_18")
+    _board_hits.append((cb_x, cb_y, cb_w, cb_h, "exit", None))
+
+    # Two-column slot list
+    slots_map = (snap or {}).get("slots") or {}
+    specs = (snap or {}).get("spectators") or []
+    host_name = (snap or {}).get("host")
+    you = client.you() if client else {}
+    my_slot = you.get("slot", "")
+
+    col_w = (vw - 60) // 2
+    col_y = hdr_h + 30
+    row_h = 64
+
+    for ci, (side, accent) in enumerate((("BLUE", BLUE_ACCENT_LT),
+                                          ("RED",  RED_ACCENT_LT))):
+        cx = 30 + ci * (col_w + 0)
+        _txt(dl, cx, col_y, f"{side} TEAM", (*accent, 240), 26, "raj_sb_24")
+        dpg.draw_line((cx, col_y + 38), (cx + col_w - 30, col_y + 38),
+                      color=(*accent, 200), thickness=1, parent=dl)
+        for i in range(5):
+            slot_key = f"{side.lower()}{i+1}"
+            occupant = slots_map.get(slot_key)
+            y = col_y + 52 + i * row_h
+            box_col = (*accent, 80 if occupant else 30)
+            dpg.draw_rectangle((cx, y), (cx + col_w - 30, y + row_h - 12),
+                               fill=(*C["card"][:3], 160), color=box_col,
+                               thickness=1, rounding=4, parent=dl)
+            _txt(dl, cx + 16, y + 8, f"{side[0]}{i+1}",
+                 (*accent, 230), 18, "mono_18")
+            if occupant:
+                label = occupant
+                if host_name and occupant == host_name:
+                    label += "  (host)"
+                if slot_key == my_slot:
+                    label += "  ← you"
+                _txt(dl, cx + 60, y + 8, label,
+                     (*C["txt"][:3], 240), 19, "raj_sb_18")
+                _txt(dl, cx + 60, y + 30, "ready",
+                     (*C["term_g"][:3], 200), 14, "mono_14")
+            else:
+                _txt(dl, cx + 60, y + 14, "(empty)",
+                     (*C["txt_dim"][:3], 180), 18, "raj_sb_18")
+
+    # Spectators
+    sp_y = col_y + 52 + 5 * row_h + 12
+    _txt(dl, 30, sp_y, "SPECTATORS", (*C["txt_dim"][:3], 200), 16, "mono_16")
+    if specs:
+        _txt(dl, 30, sp_y + 22, "  ".join(specs)[:120],
+             (*C["txt"][:3], 220), 16, "raj_sb_14")
+    else:
+        _txt(dl, 30, sp_y + 22, "—", (*C["txt_dim"][:3], 180), 16, "raj_sb_14")
+
+    # START DRAFT button — centered, big, gold when enabled
+    can, reason = _sync_ui.can_start_draft()
+    sb_w, sb_h = 320, 56
+    sb_x = vw // 2 - sb_w // 2
+    sb_y = vh - sb_h - 60
+
+    fill = (*C["card"][:3], 200) if can else (*C["card"][:3], 90)
+    accent = C["gold"][:3] if can else C["txt_dim"][:3]
+    glow = 235 if can else 90
+    cyber.draw_cut_rect(dl, sb_x, sb_y, sb_x + sb_w, sb_y + sb_h, cut=9,
+                        fill=fill, color=None)
+    cyber.draw_marching_dash(dl, sb_x, sb_y, sb_x + sb_w, sb_y + sb_h,
+                             (*accent, glow), dash=10, gap=7, speed=14)
+    label = "START DRAFT" if can else "START DRAFT"
+    label_x = sb_x + (sb_w - len(label) * 16) // 2
+    _txt(dl, label_x, sb_y + 16, label, (*accent, glow), 26, "mono_28")
+    if can:
+        _board_hits.append((sb_x, sb_y, sb_w, sb_h, "start_draft", None))
+
+    # Hint line below the button explaining what's needed
+    hint_y = sb_y + sb_h + 14
+    if you.get("is_host"):
+        hint = "host — press START when ready" if can else f"waiting: {reason}"
+    else:
+        hint = "waiting for host to press START DRAFT"
+    _txt(dl, vw // 2 - len(hint) * 4, hint_y, hint,
+         (*C["txt_dim"][:3], 200), 16, "raj_sb_14")
+
+
 def _draw_board(dl, vw, vh):
     # Sync mirror first: if a session is active, fold the latest server
     # snapshot into draft.board before we render. Recompute the recommender
@@ -1650,6 +1767,15 @@ def _draw_board(dl, vw, vh):
     _sync_ui.sync_tick(draft)
     if draft.board is not None and draft.board.pointer != _prev_pointer:
         _board_recompute()
+
+    # If we're in a synced session whose host hasn't pressed START yet,
+    # render the lobby instead of the pick/ban board. The board state still
+    # mirrors in the background so the moment START fires we have everything
+    # we need to render the real board on the next frame.
+    if _sync_ui.in_lobby():
+        _board_hits.clear()
+        _draw_sync_lobby(dl, vw, vh)
+        return
 
     _board_hits.clear()
     champion_icons.flush_pending()          # register any downloaded icons
@@ -2871,7 +2997,9 @@ def _board_handle_input(vw, vh):
         return
     for (hx, hy, hw, hh, kind, payload) in list(_board_hits):
         if hx <= mx <= hx + hw and hy <= my <= hy + hh:
-            if kind == "exit":
+            if kind == "start_draft":
+                _sync_ui.send_start_draft()
+            elif kind == "exit":
                 draft.board_live_stop = True
                 _sync_ui.disconnect_if_active()
                 draft.phase = DraftPhase.IDLE

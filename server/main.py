@@ -120,6 +120,10 @@ class DraftState:
     # interpret it; it just fans out.
     players: Dict[str, List[Dict[str, Any]]] = field(
         default_factory=lambda: {"BLUE": [], "RED": []})
+    # Lobby gate. The room sits in lobby (started=False) until the host sends
+    # `start_draft`. Apply actions are rejected while !started so an early
+    # joiner can't pre-ban accidentally. Set to True at start; reset on reset.
+    started: bool = False
 
     def used_champs(self) -> Set[str]:
         used: Set[str] = set()
@@ -137,6 +141,8 @@ class DraftState:
         return None
 
     def apply(self, champ: str, role: Optional[str]) -> Tuple[bool, str]:
+        if not self.started:
+            return False, "draft not started — host must press START DRAFT"
         act = self.current_action()
         if act is None:
             return False, "draft is complete"
@@ -187,6 +193,32 @@ class DraftState:
         self.picks = {"BLUE": {}, "RED": {}}
         self.bans = {"BLUE": [], "RED": []}
         self.pointer = 0
+        self.started = False
+
+    def start(self) -> Tuple[bool, str]:
+        if self.started:
+            return False, "draft already started"
+        self.started = True
+        return True, ""
+
+    def set_slot_player(self, side: str, idx: int,
+                        player: Dict[str, Any]) -> Tuple[bool, str]:
+        """Update one slot (idx 0..4) on `side` with the given player dict.
+        Used by the lobby's per-slot name editor."""
+        if side not in SIDES:
+            return False, "bad side"
+        if not (0 <= idx < 5):
+            return False, "slot idx must be 0..4"
+        pl = self.players.setdefault(side, [])
+        while len(pl) < 5:
+            pl.append({"name": "", "tier": "Unranked",
+                       "final_score": 50.0, "score": 50.0})
+        if isinstance(player, str):
+            player = {"name": player}
+        merged = dict(pl[idx])
+        merged.update(player or {})
+        pl[idx] = merged
+        return True, ""
 
     def to_json(self) -> Dict[str, Any]:
         return {
@@ -195,6 +227,7 @@ class DraftState:
             "pointer": self.pointer,
             "our_side": self.our_side,
             "players": self.players,
+            "started": self.started,
             "sequence_len": len(DRAFT_SEQUENCE),
         }
 
@@ -393,6 +426,19 @@ async def ws_endpoint(ws: WebSocket, code: str) -> None:
             client.is_host = True
         room.last_active = time.time()
 
+        # Auto-populate the player roster slot with the joiner's display name
+        # so the lobby + draft views show real names instead of B1..R5
+        # placeholders. Lobby is the right time — once draft has started we
+        # don't want to overwrite a player whose data was set deliberately.
+        if not room.state.started and slot != "spectator":
+            side = slot_side(slot)
+            try:
+                idx = int(slot[-1]) - 1
+            except (TypeError, ValueError):
+                idx = -1
+            if side and 0 <= idx < 5:
+                room.state.set_slot_player(side, idx, {"name": name})
+
     await _send(ws, {
         "type": "hello",
         "you": {"name": name, "slot": slot, "is_host": client.is_host},
@@ -495,6 +541,56 @@ async def ws_endpoint(ws: WebSocket, code: str) -> None:
                     continue
                 async with room.lock:
                     room.state.our_side = side
+                await _broadcast_state(room)
+                continue
+
+            if mtype == "start_draft":
+                if not client.is_host:
+                    await _send(ws, {"type": "error", "msg": "host only"})
+                    continue
+                # Require at least 1 connected non-spectator per side.
+                slots_filled = {"BLUE": 0, "RED": 0}
+                for c in room.clients.values():
+                    s = slot_side(c.slot)
+                    if s:
+                        slots_filled[s] += 1
+                if slots_filled["BLUE"] < 1 or slots_filled["RED"] < 1:
+                    await _send(ws, {"type": "error",
+                                     "msg": "need at least 1 player per side"})
+                    continue
+                async with room.lock:
+                    ok, err = room.state.start()
+                if not ok:
+                    await _send(ws, {"type": "error", "msg": err})
+                    continue
+                await _broadcast_state(room)
+                continue
+
+            if mtype == "set_slot_player":
+                # Host: edit any slot's player dict.
+                # Non-host: only their OWN slot.
+                side = str(msg.get("side", "")).upper()
+                try:
+                    idx = int(msg.get("idx", -1))
+                except (TypeError, ValueError):
+                    idx = -1
+                player = msg.get("player") or {}
+                client_side = slot_side(client.slot)
+                client_idx = -1
+                if client.slot.startswith("blue") or client.slot.startswith("red"):
+                    try:
+                        client_idx = int(client.slot[-1]) - 1
+                    except (TypeError, ValueError):
+                        client_idx = -1
+                if not client.is_host and (side != client_side or idx != client_idx):
+                    await _send(ws, {"type": "error",
+                                     "msg": "you can only edit your own slot"})
+                    continue
+                async with room.lock:
+                    ok, err = room.state.set_slot_player(side, idx, player)
+                if not ok:
+                    await _send(ws, {"type": "error", "msg": err})
+                    continue
                 await _broadcast_state(room)
                 continue
 

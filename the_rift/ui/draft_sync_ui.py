@@ -21,7 +21,7 @@ Public surface used by `ui/draft.py`:
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import dearpygui.dearpygui as dpg
 
@@ -161,7 +161,9 @@ def _do_join() -> None:
 
     # Reset mirror state and enter BOARD phase in the existing draft state
     # machine. Caller (ui/draft.py) owns the actual board object — we go
-    # through a lazy bridge here.
+    # through a lazy bridge here. The lobby renderer surfaces ongoing
+    # connection state, so we transition out of the dialog immediately
+    # rather than blocking the UI thread waiting for hello.
     global _last_rev_seen, _last_players_sig
     _last_rev_seen = -1
     _last_players_sig = None
@@ -342,3 +344,110 @@ def disconnect_if_active() -> None:
     global _last_rev_seen, _last_players_sig
     _last_rev_seen = -1
     _last_players_sig = None
+
+
+# ---------------------------------------------------------------------------
+# Lobby helpers (v2.8.1)
+# ---------------------------------------------------------------------------
+
+def is_started() -> bool:
+    """True once the host has pressed START DRAFT. False in solo mode (the
+    caller should fall through to the normal board)."""
+    client = draft_sync.active()
+    if client is None:
+        return True   # solo mode = draft is always "started"
+    snap = client.state()
+    if snap is None:
+        return False
+    return bool((snap.get("state") or {}).get("started"))
+
+
+def in_lobby() -> bool:
+    """True iff synced AND not yet started. UI gates on this to show the
+    lobby instead of the pick/ban board."""
+    client = draft_sync.active()
+    if client is None:
+        return False
+    snap = client.state()
+    if snap is None:
+        return True    # connected, no hello — show lobby with "connecting…"
+    return not bool((snap.get("state") or {}).get("started"))
+
+
+def can_start_draft() -> Tuple[bool, str]:
+    """Returns (can_start, reason). True only when:
+      - we're the host
+      - lobby hasn't already started
+      - at least 1 blue slot and 1 red slot are occupied
+    Reason is a short user-facing string for the disabled-state hint."""
+    client = draft_sync.active()
+    if client is None:
+        return False, ""
+    snap = client.state()
+    if snap is None:
+        return False, "connecting…"
+    you = client.you()
+    if not you.get("is_host"):
+        return False, "host only"
+    if (snap.get("state") or {}).get("started"):
+        return False, "already started"
+    slots = snap.get("slots") or {}
+    blue_n = sum(1 for k in slots if k.startswith("blue"))
+    red_n  = sum(1 for k in slots if k.startswith("red"))
+    if blue_n < 1 or red_n < 1:
+        return False, f"need ≥1 per side (blue {blue_n}, red {red_n})"
+    return True, ""
+
+
+def send_start_draft() -> None:
+    client = draft_sync.active()
+    if client is not None:
+        client.start_draft()
+
+
+def send_set_slot_player(side: str, idx: int,
+                         player: Dict[str, Any]) -> None:
+    client = draft_sync.active()
+    if client is not None:
+        client.set_slot_player(side, idx, player)
+
+
+def my_slot_idx() -> Optional[Tuple[str, int]]:
+    """('BLUE', 2) if our slot is blue3, etc. None for spectator/unknown."""
+    client = draft_sync.active()
+    if client is None:
+        return None
+    slot = (client.you() or {}).get("slot", "")
+    if slot.startswith("blue"):
+        try:
+            return "BLUE", int(slot[-1]) - 1
+        except (TypeError, ValueError):
+            return None
+    if slot.startswith("red"):
+        try:
+            return "RED", int(slot[-1]) - 1
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def connection_status() -> str:
+    """One-line status for the UI:
+       ""                                — not synced
+       "connecting to <host>…"           — WS not up yet, no prior error
+       "could not connect: <error>"      — WS down with a known cause
+       "connected, waiting for hello…"   — WS up but server hasn't responded
+       "synced"                          — WS up + hello received
+    """
+    client = draft_sync.active()
+    if client is None:
+        return ""
+    if client.state() is not None:
+        return "synced"
+    err = client.last_error()
+    if client.is_connected():
+        return err if err else "connected, waiting for room state…"
+    if err:
+        return f"could not connect: {err}"
+    return "connecting to server…"
+
