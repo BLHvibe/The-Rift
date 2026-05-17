@@ -1711,9 +1711,6 @@ def _draw_sync_lobby(dl, vw, vh):
     _txt(dl, cb_x + 30, cb_y + 9, "EXIT", (*C["mg_lt"][:3], 235), 18, "mono_18")
     _board_hits.append((cb_x, cb_y, cb_w, cb_h, "exit", None))
 
-    # Two-column slot list (compact). Each slot is also a drop target for the
-    # team-builder drag below — slot_hits register a rect with side+idx so the
-    # input handler knows where to send set_slot_player.
     slots_map = (snap or {}).get("slots") or {}
     specs = (snap or {}).get("spectators") or []
     host_name = (snap or {}).get("host")
@@ -1721,88 +1718,112 @@ def _draw_sync_lobby(dl, vw, vh):
     my_slot = you.get("slot", "")
     players_state = ((snap or {}).get("state") or {}).get("players") or {}
 
-    col_w  = (vw - 60) // 2
-    col_y  = hdr_h + 14
-    row_h  = 50
-    slot_box_h = row_h - 6
-    rosters_bottom = col_y + 38 + 5 * row_h
+    # ── WHO'S CONNECTED rail (compact, read-only, no drag) ───────────
+    # One line per side listing all 5 connection slots and their occupant.
+    # Decoupled from draft rosters below — joining/leaving the room does NOT
+    # change team composition; it just tells everyone who's in the call.
+    rail_y = hdr_h + 12
+    rail_h = 56
+    dpg.draw_rectangle((20, rail_y), (vw - 20, rail_y + rail_h),
+                       fill=(*C["panel"][:3], 100),
+                       color=(*C["rule_dark"][:3], 140),
+                       thickness=1, rounding=4, parent=dl)
+    _txt(dl, 30, rail_y + 4, "WHO'S CONNECTED",
+         (*C["txt_dim"][:3], 200), 13, "raj_sb_12")
+    for ci, (side, accent) in enumerate((("BLUE", BLUE_ACCENT_LT),
+                                          ("RED",  RED_ACCENT_LT))):
+        y = rail_y + 22 + ci * 16
+        _txt(dl, 32, y, f"{side[0]}:", (*accent, 230), 14, "mono_14")
+        x = 56
+        for i in range(5):
+            sk = f"{side.lower()}{i+1}"
+            occ = slots_map.get(sk)
+            label = f"{i+1} {occ}" if occ else f"{i+1} ·"
+            col = ((*C["txt"][:3], 230) if occ
+                   else (*C["txt_dim"][:3], 130))
+            if occ and host_name and occ == host_name:
+                label += "(h)"
+            if sk == my_slot:
+                col = (*C["gold_lt"][:3], 240)
+            _txt(dl, x, y, label[:24], col, 14, "raj_sb_14")
+            x += max(110, (vw - 80) // 5)
+    if specs:
+        _txt(dl, vw - 280, rail_y + 4,
+             f"SPECTATORS: {len(specs)}  ({' '.join(specs)[:30]})",
+             (*C["txt_dim"][:3], 200), 13, "raj_sb_12")
+
+    # ── DRAFT TEAMS — separate roster boxes, host drag-and-drop ──────
+    teams_y      = rail_y + rail_h + 14
+    col_w        = (vw - 60) // 2
+    row_h        = 46
+    slot_box_h   = row_h - 6
+    teams_header = 26
+    rosters_bottom = teams_y + teams_header + 5 * row_h
 
     for ci, (side, accent) in enumerate((("BLUE", BLUE_ACCENT_LT),
                                           ("RED",  RED_ACCENT_LT))):
         cx = 30 + ci * col_w
-        _txt(dl, cx, col_y, f"{side} TEAM", (*accent, 240), 22, "raj_sb_22")
-        dpg.draw_line((cx, col_y + 30), (cx + col_w - 30, col_y + 30),
+        title = f"{side} ROSTER"
+        _txt(dl, cx, teams_y, title, (*accent, 240), 20, "raj_sb_20")
+        dpg.draw_line((cx, teams_y + 22),
+                      (cx + col_w - 30, teams_y + 22),
                       color=(*accent, 200), thickness=1, parent=dl)
-        for i in range(5):
-            slot_key = f"{side.lower()}{i+1}"
-            occupant = slots_map.get(slot_key)
-            y = col_y + 38 + i * row_h
+        for i, role in enumerate(_ROLES):
+            y = teams_y + teams_header + i * row_h
             box_x1 = cx
             box_x2 = cx + col_w - 30
+            try:
+                pl = (players_state.get(side) or [])[i]
+            except IndexError:
+                pl = None
+            has_real = bool(pl and pl.get("name") and pl.get("tier"))
 
-            # Highlight slot box when dragging hovers it
-            hover = (_tb.drag is not None
-                     and is_host
+            hover = (_tb.drag is not None and is_host
                      and box_x1 <= _tb.drag_pos[0] <= box_x2
                      and y <= _tb.drag_pos[1] <= y + slot_box_h)
-            box_fill = (*C["card"][:3], 175 if hover else 150)
-            box_border = (*accent, 220 if hover else (80 if occupant else 30))
+            box_fill = (*C["card"][:3], 180 if has_real else (160 if hover else 120))
+            box_border = (*accent, 230 if (has_real or hover) else 60)
             dpg.draw_rectangle((box_x1, y), (box_x2, y + slot_box_h),
                                fill=box_fill, color=box_border,
                                thickness=1, rounding=4, parent=dl)
             if hover:
                 dpg.draw_rectangle((box_x1, y), (box_x2, y + slot_box_h),
-                                   fill=(*accent, 22), color=(*accent, 180),
+                                   fill=(*accent, 28), color=(*accent, 200),
                                    thickness=1, rounding=4, parent=dl)
-            _txt(dl, box_x1 + 12, y + 7, f"{side[0]}{i+1}",
-                 (*accent, 230), 16, "mono_16")
 
-            # Top-line: connected user
-            if occupant:
-                user_label = occupant
-                if host_name and occupant == host_name:
-                    user_label += "  (host)"
-                if slot_key == my_slot:
-                    user_label += "  ← you"
-                _txt(dl, box_x1 + 50, y + 5, user_label,
-                     (*C["txt"][:3], 240), 16, "raj_sb_16")
-            else:
-                _txt(dl, box_x1 + 50, y + 5, "(empty seat)",
-                     (*C["txt_dim"][:3], 170), 16, "raj_sb_14")
+            # Role tag strip on the left
+            rc = _ROLE_COLORS.get(role, (120, 120, 120))
+            dpg.draw_rectangle((box_x1, y), (box_x1 + 50, y + slot_box_h),
+                               fill=(*rc, 60), color=(0, 0, 0, 0),
+                               rounding=4, parent=dl)
+            _txt(dl, box_x1 + 8, y + slot_box_h // 2 - 9, role,
+                 (*rc, 240), 16, "mono_16")
 
-            # Bottom-line: assigned draft player (from server players state).
-            # When the host drags a pool card onto this slot we'll send a
-            # set_slot_player; until then this echoes the auto-fill (user's
-            # display name only).
-            try:
-                pl = (players_state.get(side) or [])[i]
-            except IndexError:
-                pl = None
-            if pl and pl.get("name") and pl["name"] != occupant:
+            if has_real:
                 tier_c = RANK_COLORS.get(pl.get("tier", "Unranked"),
                                          RANK_COLORS["Unranked"])
-                sc = _tb_score_str(pl)
-                tag = f"→ {pl['name']}  {pl.get('tier','Unranked')[:4].upper()}"
-                if sc:
-                    tag += f"  {sc}"
-                _txt(dl, box_x1 + 50, y + slot_box_h - 18, tag,
+                _txt(dl, box_x1 + 60, y + 4, pl["name"].upper(),
+                     (*C["gold_lt"][:3], 235), 19, "raj_24")
+                _txt(dl, box_x1 + 60, y + slot_box_h - 18,
+                     pl.get("tier", "Unranked")[:4].upper(),
                      (*tier_c[:3], 220), 14, "raj_sb_14")
+                sc = _tb_score_str(pl)
+                if sc:
+                    _txt(dl, box_x2 - 56, y + 6, sc,
+                         (*C["txt2"][:3], 220), 18, "raj_sb_18")
             elif is_host:
-                _txt(dl, box_x1 + 50, y + slot_box_h - 18,
-                     "drag a player here", (*C["txt_dim"][:3], 130),
-                     13, "raj_sb_12")
+                _txt(dl, box_x1 + 60, y + slot_box_h // 2 - 9,
+                     "drag a player here",
+                     (*C["txt_dim"][:3], 140), 14, "raj_sb_14")
+            else:
+                _txt(dl, box_x1 + 60, y + slot_box_h // 2 - 9,
+                     "—", (*C["txt_dim"][:3], 130), 14, "raj_sb_14")
 
-            # Register slot as a drop target (only meaningful for the host).
             _lobby_hits.append((box_x1, y, box_x2 - box_x1, slot_box_h,
                                 "lobby_slot", (side, i)))
 
-    # Spectators (single line, under the rosters)
-    sp_y = rosters_bottom + 6
-    spec_line = "SPECTATORS:  " + ("  ".join(specs) if specs else "—")
-    _txt(dl, 30, sp_y, spec_line[:140], (*C["txt_dim"][:3], 200), 14, "raj_sb_14")
-
     # ── Player pool (host-only drag-and-drop) ────────────────────────
-    pool_top    = sp_y + 26
+    pool_top    = rosters_bottom + 18
     sb_w, sb_h  = 320, 56
     sb_y        = vh - sb_h - 60
     pool_bottom = sb_y - 28

@@ -426,18 +426,10 @@ async def ws_endpoint(ws: WebSocket, code: str) -> None:
             client.is_host = True
         room.last_active = time.time()
 
-        # Auto-populate the player roster slot with the joiner's display name
-        # so the lobby + draft views show real names instead of B1..R5
-        # placeholders. Lobby is the right time — once draft has started we
-        # don't want to overwrite a player whose data was set deliberately.
-        if not room.state.started and slot != "spectator":
-            side = slot_side(slot)
-            try:
-                idx = int(slot[-1]) - 1
-            except (TypeError, ValueError):
-                idx = -1
-            if side and 0 <= idx < 5:
-                room.state.set_slot_player(side, idx, {"name": name})
+        # Draft rosters are explicit (host drag-and-drop in the lobby), not
+        # tied to WebSocket connection slots. We intentionally do NOT auto-
+        # populate state.players on connect — the connection slots and the
+        # team rosters are decoupled, per v2.8.3 UI separation.
 
     await _send(ws, {
         "type": "hello",
@@ -567,25 +559,18 @@ async def ws_endpoint(ws: WebSocket, code: str) -> None:
                 continue
 
             if mtype == "set_slot_player":
-                # Host: edit any slot's player dict.
-                # Non-host: only their OWN slot.
+                # Host-only: edit any draft-roster slot. Rosters are decoupled
+                # from WS connection slots (v2.8.3) — only the host drives
+                # team composition from the lobby's drag-and-drop pool.
+                if not client.is_host:
+                    await _send(ws, {"type": "error", "msg": "host only"})
+                    continue
                 side = str(msg.get("side", "")).upper()
                 try:
                     idx = int(msg.get("idx", -1))
                 except (TypeError, ValueError):
                     idx = -1
                 player = msg.get("player") or {}
-                client_side = slot_side(client.slot)
-                client_idx = -1
-                if client.slot.startswith("blue") or client.slot.startswith("red"):
-                    try:
-                        client_idx = int(client.slot[-1]) - 1
-                    except (TypeError, ValueError):
-                        client_idx = -1
-                if not client.is_host and (side != client_side or idx != client_idx):
-                    await _send(ws, {"type": "error",
-                                     "msg": "you can only edit your own slot"})
-                    continue
                 async with room.lock:
                     ok, err = room.state.set_slot_player(side, idx, player)
                 if not ok:
