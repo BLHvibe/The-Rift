@@ -1642,14 +1642,45 @@ def _board_legal_pool(state, action):
     return [(c, None) for c in sorted(allc) if c not in used]
 
 
+# ---------------------------------------------------------------------------
+# Sync lobby — drag-and-drop team builder + START gate
+# ---------------------------------------------------------------------------
+
+# Hit rects emitted by _draw_sync_lobby and consumed by _lobby_handle_input.
+# (x, y, w, h, "lobby_slot", (side, idx)) for slot drop targets.
+# (x, y, w, h, "lobby_pool", player_dict) for source cards.
+_lobby_hits: list = []
+# True after the lobby has populated _tb.pool from the current data layer for
+# this lobby session; reset on disconnect / EXIT.
+_lobby_pool_ready: bool = False
+
+
+def _lobby_reset_pool():
+    """Force the next lobby frame to refresh _tb.pool from data sources."""
+    global _lobby_pool_ready
+    _lobby_pool_ready = False
+
+
 def _draw_sync_lobby(dl, vw, vh):
     """Pre-draft lobby shown when a sync session is open but
     `start_draft` hasn't fired yet. Surfaces connection state, who's
-    connected per slot, and a START DRAFT button for the host."""
+    connected per slot, hosts the team-builder drag-and-drop, and a
+    START DRAFT button (host only)."""
     from data import draft_sync as _ds
     client = _ds.active()
     snap = client.state() if client else None
     status = _sync_ui.connection_status()
+    is_host = bool((client.you() or {}).get("is_host")) if client else False
+
+    # Lazily fill _tb.pool with live scouting data once per lobby session.
+    global _lobby_pool_ready
+    if not _lobby_pool_ready:
+        _tb.pool      = list(_get_player_pool())
+        _tb.drag      = None
+        _tb.drag_from = None
+        _lobby_pool_ready = True
+
+    _lobby_hits.clear()
 
     # Background
     cyber.draw_grid_bg(dl, 0, 0, vw, vh, spacing=40, alpha=18,
@@ -1680,55 +1711,153 @@ def _draw_sync_lobby(dl, vw, vh):
     _txt(dl, cb_x + 30, cb_y + 9, "EXIT", (*C["mg_lt"][:3], 235), 18, "mono_18")
     _board_hits.append((cb_x, cb_y, cb_w, cb_h, "exit", None))
 
-    # Two-column slot list
+    # Two-column slot list (compact). Each slot is also a drop target for the
+    # team-builder drag below — slot_hits register a rect with side+idx so the
+    # input handler knows where to send set_slot_player.
     slots_map = (snap or {}).get("slots") or {}
     specs = (snap or {}).get("spectators") or []
     host_name = (snap or {}).get("host")
     you = client.you() if client else {}
     my_slot = you.get("slot", "")
+    players_state = ((snap or {}).get("state") or {}).get("players") or {}
 
-    col_w = (vw - 60) // 2
-    col_y = hdr_h + 30
-    row_h = 64
+    col_w  = (vw - 60) // 2
+    col_y  = hdr_h + 14
+    row_h  = 50
+    slot_box_h = row_h - 6
+    rosters_bottom = col_y + 38 + 5 * row_h
 
     for ci, (side, accent) in enumerate((("BLUE", BLUE_ACCENT_LT),
                                           ("RED",  RED_ACCENT_LT))):
-        cx = 30 + ci * (col_w + 0)
-        _txt(dl, cx, col_y, f"{side} TEAM", (*accent, 240), 26, "raj_sb_24")
-        dpg.draw_line((cx, col_y + 38), (cx + col_w - 30, col_y + 38),
+        cx = 30 + ci * col_w
+        _txt(dl, cx, col_y, f"{side} TEAM", (*accent, 240), 22, "raj_sb_22")
+        dpg.draw_line((cx, col_y + 30), (cx + col_w - 30, col_y + 30),
                       color=(*accent, 200), thickness=1, parent=dl)
         for i in range(5):
             slot_key = f"{side.lower()}{i+1}"
             occupant = slots_map.get(slot_key)
-            y = col_y + 52 + i * row_h
-            box_col = (*accent, 80 if occupant else 30)
-            dpg.draw_rectangle((cx, y), (cx + col_w - 30, y + row_h - 12),
-                               fill=(*C["card"][:3], 160), color=box_col,
-                               thickness=1, rounding=4, parent=dl)
-            _txt(dl, cx + 16, y + 8, f"{side[0]}{i+1}",
-                 (*accent, 230), 18, "mono_18")
-            if occupant:
-                label = occupant
-                if host_name and occupant == host_name:
-                    label += "  (host)"
-                if slot_key == my_slot:
-                    label += "  ← you"
-                _txt(dl, cx + 60, y + 8, label,
-                     (*C["txt"][:3], 240), 19, "raj_sb_18")
-                _txt(dl, cx + 60, y + 30, "ready",
-                     (*C["term_g"][:3], 200), 14, "mono_14")
-            else:
-                _txt(dl, cx + 60, y + 14, "(empty)",
-                     (*C["txt_dim"][:3], 180), 18, "raj_sb_18")
+            y = col_y + 38 + i * row_h
+            box_x1 = cx
+            box_x2 = cx + col_w - 30
 
-    # Spectators
-    sp_y = col_y + 52 + 5 * row_h + 12
-    _txt(dl, 30, sp_y, "SPECTATORS", (*C["txt_dim"][:3], 200), 16, "mono_16")
-    if specs:
-        _txt(dl, 30, sp_y + 22, "  ".join(specs)[:120],
-             (*C["txt"][:3], 220), 16, "raj_sb_14")
-    else:
-        _txt(dl, 30, sp_y + 22, "—", (*C["txt_dim"][:3], 180), 16, "raj_sb_14")
+            # Highlight slot box when dragging hovers it
+            hover = (_tb.drag is not None
+                     and is_host
+                     and box_x1 <= _tb.drag_pos[0] <= box_x2
+                     and y <= _tb.drag_pos[1] <= y + slot_box_h)
+            box_fill = (*C["card"][:3], 175 if hover else 150)
+            box_border = (*accent, 220 if hover else (80 if occupant else 30))
+            dpg.draw_rectangle((box_x1, y), (box_x2, y + slot_box_h),
+                               fill=box_fill, color=box_border,
+                               thickness=1, rounding=4, parent=dl)
+            if hover:
+                dpg.draw_rectangle((box_x1, y), (box_x2, y + slot_box_h),
+                                   fill=(*accent, 22), color=(*accent, 180),
+                                   thickness=1, rounding=4, parent=dl)
+            _txt(dl, box_x1 + 12, y + 7, f"{side[0]}{i+1}",
+                 (*accent, 230), 16, "mono_16")
+
+            # Top-line: connected user
+            if occupant:
+                user_label = occupant
+                if host_name and occupant == host_name:
+                    user_label += "  (host)"
+                if slot_key == my_slot:
+                    user_label += "  ← you"
+                _txt(dl, box_x1 + 50, y + 5, user_label,
+                     (*C["txt"][:3], 240), 16, "raj_sb_16")
+            else:
+                _txt(dl, box_x1 + 50, y + 5, "(empty seat)",
+                     (*C["txt_dim"][:3], 170), 16, "raj_sb_14")
+
+            # Bottom-line: assigned draft player (from server players state).
+            # When the host drags a pool card onto this slot we'll send a
+            # set_slot_player; until then this echoes the auto-fill (user's
+            # display name only).
+            try:
+                pl = (players_state.get(side) or [])[i]
+            except IndexError:
+                pl = None
+            if pl and pl.get("name") and pl["name"] != occupant:
+                tier_c = RANK_COLORS.get(pl.get("tier", "Unranked"),
+                                         RANK_COLORS["Unranked"])
+                sc = _tb_score_str(pl)
+                tag = f"→ {pl['name']}  {pl.get('tier','Unranked')[:4].upper()}"
+                if sc:
+                    tag += f"  {sc}"
+                _txt(dl, box_x1 + 50, y + slot_box_h - 18, tag,
+                     (*tier_c[:3], 220), 14, "raj_sb_14")
+            elif is_host:
+                _txt(dl, box_x1 + 50, y + slot_box_h - 18,
+                     "drag a player here", (*C["txt_dim"][:3], 130),
+                     13, "raj_sb_12")
+
+            # Register slot as a drop target (only meaningful for the host).
+            _lobby_hits.append((box_x1, y, box_x2 - box_x1, slot_box_h,
+                                "lobby_slot", (side, i)))
+
+    # Spectators (single line, under the rosters)
+    sp_y = rosters_bottom + 6
+    spec_line = "SPECTATORS:  " + ("  ".join(specs) if specs else "—")
+    _txt(dl, 30, sp_y, spec_line[:140], (*C["txt_dim"][:3], 200), 14, "raj_sb_14")
+
+    # ── Player pool (host-only drag-and-drop) ────────────────────────
+    pool_top    = sp_y + 26
+    sb_w, sb_h  = 320, 56
+    sb_y        = vh - sb_h - 60
+    pool_bottom = sb_y - 28
+
+    # Section header
+    hdr_label = ("HOST: drag a player onto a slot to assign"
+                 if is_host
+                 else "PLAYER POOL")
+    _txt(dl, 30, pool_top, hdr_label, (*C["gold_lt"][:3], 220), 16, "raj_sb_16")
+    dpg.draw_line((30, pool_top + 22), (vw - 30, pool_top + 22),
+                  color=(*C["rule_dark"][:3], 160), thickness=1, parent=dl)
+
+    pool_grid_top = pool_top + 30
+    pool_grid_h   = max(0, pool_bottom - pool_grid_top)
+
+    if pool_grid_h >= _TB_CARD_H + 4:
+        # Filter pool: hide players already assigned to either side.
+        assigned_names = set()
+        for side in ("BLUE", "RED"):
+            for p in (players_state.get(side) or []):
+                if isinstance(p, dict) and p.get("name"):
+                    assigned_names.add(p["name"])
+        pool_vis = [p for p in _tb.pool
+                    if p.get("name") not in assigned_names
+                    and (not _tb.drag or p.get("name") != _tb.drag.get("name"))]
+
+        cw2  = _TB_CARD_W
+        ch2  = _TB_CARD_H
+        cgap = 8
+        cols = max(1, (vw - 60 + cgap) // (cw2 + cgap))
+
+        max_rows = pool_grid_h // (ch2 + cgap)
+        max_cards = max_rows * cols
+
+        for i, p in enumerate(pool_vis[:max_cards]):
+            px = 30 + (i % cols) * (cw2 + cgap)
+            py = pool_grid_top + (i // cols) * (ch2 + cgap)
+            _draw_tb_card(dl, px, py, cw2, ch2, p)
+            if is_host:
+                _lobby_hits.append((px, py, cw2, ch2, "lobby_pool", p))
+
+        if not pool_vis and is_host:
+            _txt(dl, 30, pool_grid_top + 8,
+                 "All players assigned — press START DRAFT.",
+                 (*C["txt_dim"][:3], 140), 16, "raj_sb_14")
+        if len(pool_vis) > max_cards:
+            _txt(dl, vw - 240, pool_top,
+                 f"(+{len(pool_vis) - max_cards} hidden — resize window)",
+                 (*C["txt_dim"][:3], 150), 13, "raj_sb_12")
+
+    # ── Dragged card (top layer) ────────────────────────────────────
+    if _tb.drag and is_host:
+        mx, my = _tb.drag_pos
+        _draw_tb_card(dl, mx - _TB_CARD_W // 2, my - _TB_CARD_H // 2,
+                      _TB_CARD_W, _TB_CARD_H, _tb.drag, dragging=True)
 
     # START DRAFT button — centered, big, gold when enabled
     can, reason = _sync_ui.can_start_draft()
@@ -2958,7 +3087,103 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
                            color=(0, 0, 0, 0), rounding=2, parent=dl)
 
 
+def _lobby_handle_input(vw, vh):
+    """Mouse input for the synced draft lobby. Handles:
+       - click on START DRAFT / EXIT (registered in _board_hits)
+       - host-only drag-and-drop from pool to slot
+       - host-only drag-out of slot to clear it"""
+    mouse = dpg.get_mouse_pos(local=False)
+    vp = dpg.get_viewport_pos()
+    mx = mouse[0] - vp[0] - 68
+    my = mouse[1] - vp[1] - 52
+    _tb.drag_pos = (mx, my)
+
+    client = None
+    try:
+        from data import draft_sync as _ds
+        client = _ds.active()
+    except Exception:
+        pass
+    is_host = bool((client.you() or {}).get("is_host")) if client else False
+
+    # ── Click on START DRAFT / EXIT (button hits live in _board_hits) ──
+    if dpg.is_mouse_button_clicked(0) and _tb.drag is None:
+        for (hx, hy, hw, hh, kind, payload) in list(_board_hits):
+            if hx <= mx <= hx + hw and hy <= my <= hy + hh:
+                if kind == "start_draft":
+                    _sync_ui.send_start_draft()
+                    return
+                if kind == "exit":
+                    _sync_ui.disconnect_if_active()
+                    _lobby_reset_pool()
+                    draft.phase = DraftPhase.IDLE
+                    return
+
+    if not is_host:
+        return   # spectators / players don't get to drag the host's pool
+
+    # ── Drag start: pool card or filled slot ──────────────────────────
+    if dpg.is_mouse_button_down(0) and _tb.drag is None:
+        for (hx, hy, hw, hh, kind, payload) in _lobby_hits:
+            if not (hx <= mx <= hx + hw and hy <= my <= hy + hh):
+                continue
+            if kind == "lobby_pool":
+                _tb.drag = dict(payload)        # copy so we don't mutate pool entry
+                _tb.drag_from = ("lobby_pool",)
+                return
+            if kind == "lobby_slot":
+                # Pick up the assigned player from this slot (if any).
+                side, idx = payload
+                snap = client.state() if client else None
+                pl = None
+                try:
+                    pl = ((snap or {}).get("state") or {}) \
+                        .get("players", {}).get(side, [])[idx]
+                except (IndexError, TypeError, AttributeError):
+                    pl = None
+                # Only pick up if there's substantive assigned data (not just
+                # the auto-populated display name from the join handshake).
+                if isinstance(pl, dict) and pl.get("tier") \
+                        and pl.get("tier") != "Unranked":
+                    _tb.drag = dict(pl)
+                    _tb.drag_from = ("lobby_slot", side, idx)
+                    # Tentatively clear the slot on the server so the UI
+                    # responds immediately; if the user drops it nowhere we
+                    # restore in the drop branch below.
+                    _sync_ui.send_set_slot_player(side, idx, {"name": "",
+                                                              "tier": "Unranked",
+                                                              "final_score": 50.0})
+                return
+
+    # ── Drag end: drop on a slot, or back where it came from ──────────
+    if not dpg.is_mouse_button_down(0) and _tb.drag is not None:
+        dropped = False
+        for (hx, hy, hw, hh, kind, payload) in _lobby_hits:
+            if kind != "lobby_slot":
+                continue
+            if hx <= mx <= hx + hw and hy <= my <= hy + hh:
+                side, idx = payload
+                _sync_ui.send_set_slot_player(side, idx, dict(_tb.drag))
+                dropped = True
+                break
+        if not dropped and _tb.drag_from \
+                and _tb.drag_from[0] == "lobby_slot":
+            # Dropped outside — return to original slot (we'd cleared it on
+            # pickup; restore now).
+            _, side, idx = _tb.drag_from
+            _sync_ui.send_set_slot_player(side, idx, dict(_tb.drag))
+        _tb.drag = None
+        _tb.drag_from = None
+
+
 def _board_handle_input(vw, vh):
+    # Lobby short-circuit: when synced and host hasn't pressed START yet,
+    # the board input rules don't apply (no pick/ban, just drag-and-drop +
+    # the START / EXIT buttons).
+    if _sync_ui.in_lobby():
+        _lobby_handle_input(vw, vh)
+        return
+
     # ── Keyboard: type-to-filter the manual pool ─────────────────────
     kw = draft._board_key_was_down
     for key, ch in _SEARCH_LETTER_KEYS:
@@ -3002,6 +3227,7 @@ def _board_handle_input(vw, vh):
             elif kind == "exit":
                 draft.board_live_stop = True
                 _sync_ui.disconnect_if_active()
+                _lobby_reset_pool()
                 draft.phase = DraftPhase.IDLE
             elif kind == "undo":
                 # Synced: host-only on the server side; route and let mirror

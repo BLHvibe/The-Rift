@@ -22,7 +22,11 @@ REM Give the server a moment to bind to :8000 before the tunnel attaches.
 timeout /t 2 /nobreak >nul
 
 echo Starting ngrok tunnel...
-start "Rift Sync Tunnel" cmd /k "\"%NGROK_EXE%\" http --url=%TUNNEL_URL% 8000"
+REM cmd /k quoting rule: when the full /k argument contains nested quotes,
+REM cmd strips one leading + trailing quote, so write the path with normal
+REM "..." inside an outer "...". The "\""path"\"" form from earlier produced
+REM literal backslash-quote chars and ngrok failed to launch.
+start "Rift Sync Tunnel" cmd /k ""%NGROK_EXE%" http --url=%TUNNEL_URL% 8000"
 
 echo.
 echo ==================================================
