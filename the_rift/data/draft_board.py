@@ -337,6 +337,7 @@ def _candidates_for_player(
     primary_roles: Dict[str, str],
     exclude: Set[str],
     k: int = 8,
+    scout_champs: Optional[Dict[str, List[Dict]]] = None,
 ) -> List[Tuple[str, float]]:
     """(champ, comfort) for a player at a role, via the engine's own candidate
     generator, with already-used champions removed."""
@@ -348,7 +349,14 @@ def _candidates_for_player(
     if gen is None:
         return []
     try:
-        cands = gen(p, inhouse_champs or {}, primary_roles or {}, k + len(exclude))
+        cands = gen(p, inhouse_champs or {}, primary_roles or {}, k + len(exclude),
+                    scout_champs=scout_champs or {})
+    except TypeError:
+        # Older engine without scout_champs kwarg — fall back gracefully.
+        try:
+            cands = gen(p, inhouse_champs or {}, primary_roles or {}, k + len(exclude))
+        except Exception:
+            return []
     except Exception:
         return []
     out = [(c, s) for (c, s) in cands if c and c not in exclude]
@@ -525,13 +533,15 @@ def side_best_comfort(
     roles: Sequence[str],
     inhouse_champs: Dict[str, List[Dict]],
     primary_roles: Dict[str, str],
+    scout_champs: Optional[Dict[str, List[Dict]]] = None,
 ) -> Dict[str, float]:
     """champ -> best comfort across the given players (each at their role).
     Feeds `contested`."""
     out: Dict[str, float] = {}
     for p, role in zip(players, roles):
         for ch, sc in _candidates_for_player(
-            p, role, inhouse_champs, primary_roles, set(), k=12
+            p, role, inhouse_champs, primary_roles, set(), k=12,
+            scout_champs=scout_champs,
         ):
             if sc > out.get(ch, 0.0):
                 out[ch] = sc
@@ -580,6 +590,7 @@ def target_archetype(
     inhouse_champs: Dict[str, List[Dict]],
     primary_roles: Dict[str, str],
     forced_arch: Optional[str] = None,
+    scout_champs: Optional[Dict[str, List[Dict]]] = None,
 ) -> Dict[str, Any]:
     """Best archetype this side's *players* support (via recommend_comps),
     plus the per-axis deficit vs locked picks so picks can be steered toward a
@@ -614,13 +625,23 @@ def target_archetype(
     if not hasattr(_eng, "recommend_comps"):
         return {}
     try:
-        comps = _eng.recommend_comps(
-            state.engine_players(side),
-            inhouse_champs=inhouse_champs,
-            primary_roles=primary_roles,
-            enemy_picks=state.locked_picks(_other(side)),
-            n_results=1,
-        )
+        try:
+            comps = _eng.recommend_comps(
+                state.engine_players(side),
+                inhouse_champs=inhouse_champs,
+                primary_roles=primary_roles,
+                enemy_picks=state.locked_picks(_other(side)),
+                n_results=1,
+                scout_champs=scout_champs or {},
+            )
+        except TypeError:
+            comps = _eng.recommend_comps(
+                state.engine_players(side),
+                inhouse_champs=inhouse_champs,
+                primary_roles=primary_roles,
+                enemy_picks=state.locked_picks(_other(side)),
+                n_results=1,
+            )
     except Exception:
         return {}
     if not comps:
@@ -663,6 +684,7 @@ def recommend_bans_split(
     inhouse_champs: Dict[str, List[Dict]],
     primary_roles: Dict[str, str],
     n: int = 5,
+    scout_champs: Optional[Dict[str, List[Dict]]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Phase-aware ban suggestions.
@@ -683,13 +705,23 @@ def recommend_bans_split(
     threat: Dict[str, Dict[str, Any]] = {}
     if _eng is not None and hasattr(_eng, "recommend_bans"):
         try:
-            _, detail = _eng.recommend_bans(
-                state.engine_players(enemy_side),
-                inhouse_champs=inhouse_champs,
-                own_picks=state.locked_picks(action.side),
-                primary_roles=primary_roles,
-                n_bans=40,
-            )
+            try:
+                _, detail = _eng.recommend_bans(
+                    state.engine_players(enemy_side),
+                    inhouse_champs=inhouse_champs,
+                    own_picks=state.locked_picks(action.side),
+                    primary_roles=primary_roles,
+                    n_bans=40,
+                    scout_champs=scout_champs or {},
+                )
+            except TypeError:
+                _, detail = _eng.recommend_bans(
+                    state.engine_players(enemy_side),
+                    inhouse_champs=inhouse_champs,
+                    own_picks=state.locked_picks(action.side),
+                    primary_roles=primary_roles,
+                    n_bans=40,
+                )
             for d in detail:
                 ch = d.get("champion")
                 if ch and ch not in used:
@@ -765,6 +797,7 @@ def recommend_action(
     primary_roles: Optional[Dict[str, str]] = None,
     n: int = 5,
     forced_arch: Optional[str] = None,
+    scout_champs: Optional[Dict[str, List[Dict]]] = None,
 ) -> Dict[str, Any]:
     """
     Recommend the current action.
@@ -785,6 +818,7 @@ def recommend_action(
     """
     inhouse_champs = inhouse_champs or {}
     primary_roles = primary_roles or {}
+    scout_champs = scout_champs or {}
 
     a = state.current_action()
     if a is None:
@@ -813,7 +847,8 @@ def recommend_action(
     if a.kind == "ban":
         try:
             suggestions = recommend_bans_split(
-                state, a, inhouse_champs, primary_roles, n=n)
+                state, a, inhouse_champs, primary_roles, n=n,
+                scout_champs=scout_champs)
         except Exception as e:  # pragma: no cover
             notes.append(f"ban engine fallback: {e}")
             suggestions = []
@@ -827,7 +862,8 @@ def recommend_action(
     else:  # pick — E3: comfort + blind-safety + counter + flex + steering
         open_r = state.open_roles(a.side)
         tcomp = target_archetype(state, a.side, inhouse_champs, primary_roles,
-                                  forced_arch=forced_arch)
+                                  forced_arch=forced_arch,
+                                  scout_champs=scout_champs)
         deficit = tcomp.get("deficit", {}) if tcomp else {}
         # Strict contested: a champ is only "contested" when a player on EACH
         # side has actually played it in customs (≥3 games) — not ranked
@@ -861,7 +897,8 @@ def recommend_action(
             pname = player.get("name", "player")
             opp_champ = enemy_by_role.get(role)   # same-lane enemy, if known
             for ch, sc in _candidates_for_player(
-                player, role, inhouse_champs, primary_roles, used, k=n + 2
+                player, role, inhouse_champs, primary_roles, used, k=n + 2,
+                scout_champs=scout_champs,
             ):
                 bs = blind_safety(ch)
                 fr = flex_score(ch, open_r)

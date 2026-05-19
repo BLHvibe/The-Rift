@@ -45,7 +45,7 @@ def _state_sig(b):
         return None
 
 
-def _refresh_engine(b, inhouse, primary):
+def _refresh_engine(b, inhouse, primary, scout=None):
     """Re-run recommend_comps for both sides when the board changed. Cheap
     because it is gated by the picks signature, not the frame clock."""
     sig = _state_sig(b)
@@ -53,21 +53,27 @@ def _refresh_engine(b, inhouse, primary):
         return
     _cache["sig"] = sig
     bc = rc = 0.0
+    scout = scout or {}
     if _eng is not None:
-        try:
-            br = _eng.recommend_comps(b.players["BLUE"], inhouse, primary,
-                                      enemy_picks=b.locked_picks("RED"),
-                                      n_results=1)
-            bc = float(br[0]["combined"]) if br else 0.0
-        except Exception:
-            bc = 0.0
-        try:
-            rr = _eng.recommend_comps(b.players["RED"], inhouse, primary,
-                                      enemy_picks=b.locked_picks("BLUE"),
-                                      n_results=1)
-            rc = float(rr[0]["combined"]) if rr else 0.0
-        except Exception:
-            rc = 0.0
+        for side, enemy, target_key in (("BLUE", "RED", "blue"),
+                                        ("RED",  "BLUE", "red")):
+            try:
+                try:
+                    res = _eng.recommend_comps(b.players[side], inhouse, primary,
+                                               enemy_picks=b.locked_picks(enemy),
+                                               n_results=1,
+                                               scout_champs=scout)
+                except TypeError:
+                    res = _eng.recommend_comps(b.players[side], inhouse, primary,
+                                               enemy_picks=b.locked_picks(enemy),
+                                               n_results=1)
+                val = float(res[0]["combined"]) if res else 0.0
+            except Exception:
+                val = 0.0
+            if target_key == "blue":
+                bc = val
+            else:
+                rc = val
     _cache["blue_combined"] = bc
     _cache["red_combined"] = rc
     tot = bc + rc
@@ -484,10 +490,10 @@ def _w_predictor(dl, x, y, w, h, b, txt):
 # ---------------------------------------------------------------------------
 # Public — right rail
 # ---------------------------------------------------------------------------
-def draw_rail(dl, x, y, w, h, b, rec, txt, inhouse, primary):
+def draw_rail(dl, x, y, w, h, b, rec, txt, inhouse, primary, scout=None):
     """Stack the analytics widgets down the right rail."""
     try:
-        _refresh_engine(b, inhouse or {}, primary or {})
+        _refresh_engine(b, inhouse or {}, primary or {}, scout or {})
     except Exception:
         pass
     gap = 8

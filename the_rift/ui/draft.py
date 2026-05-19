@@ -11,7 +11,9 @@ import math, time
 import dearpygui.dearpygui as dpg
 from theme import C, RANK_COLORS
 from core.animations import anim
-from data.reader import live, load_prediction_data, write_draft_picks, run_draft_subprocess, read_draft_results, write_activity_event
+from data.reader import (live, load_prediction_data, write_draft_picks,
+                         run_draft_subprocess, read_draft_results,
+                         write_activity_event, prefetch_scout_sheets)
 from data.config import load_config
 from data import draft_engine as _eng
 from data.draft_board import (DraftBoardState, recommend_action,
@@ -271,11 +273,19 @@ def _compute_matchups(blue, red, blue_picks=None, red_picks=None):
     )
 
 
+def _scout_champs_for_players(players):
+    """Build {name: scout_champ_pool} for the engine from cached scout sheets."""
+    names = [p.get("name") for p in players if p and p.get("name")]
+    return live.scout_champs_map(names) if names else {}
+
+
 def _compute_bans(opposing_players, own_picks=None):
     """
     Bans vs opposing team. Delegates to draft_engine for Bayesian-shrunk threat,
     form modifier, role-context boost, and counter-coverage discount when our
-    team already counters a champion.
+    team already counters a champion. Also pulls each opposing player's
+    scout-sheet FULL CHAMPION POOL (ranked + draft) so threats that aren't in
+    customs still register.
     """
     return _eng.recommend_bans(
         opposing_players,
@@ -283,6 +293,7 @@ def _compute_bans(opposing_players, own_picks=None):
         own_picks=own_picks or [],
         primary_roles=live.primary_roles,
         n_bans=5,
+        scout_champs=_scout_champs_for_players(opposing_players),
     )
 
 
@@ -290,7 +301,8 @@ def _compute_comps_detail(players, enemy_picks=None):
     """
     Per-player champion picks per archetype using beam search global optimisation.
     Adds team identity vector, synergy/anti-synergy pairs, AP/AD damage profile,
-    counter-pick scoring vs locked enemy champions.
+    counter-pick scoring vs locked enemy champions. Scout-sheet champ pool
+    augments customs for ranked/draft signal.
     """
     return _eng.recommend_comps(
         players,
@@ -298,6 +310,7 @@ def _compute_comps_detail(players, enemy_picks=None):
         primary_roles=live.primary_roles,
         enemy_picks=enemy_picks or (),
         n_results=5,
+        scout_champs=_scout_champs_for_players(players),
     )
 
 # Fly-in config
@@ -389,6 +402,14 @@ class DraftState:
         self.phase   = DraftPhase.ASSEMBLING
         self._total  = len(blue) + len(red)
         self._landed = 0
+        # Prefetch scout sheets so ranked/draft champion pools feed the engine
+        # by the time the user clicks BEGIN ANALYSIS.
+        try:
+            names = [p.get("name") for p in (blue + red) if p and p.get("name")]
+            if names:
+                prefetch_scout_sheets(names)
+        except Exception:
+            pass
         for i in range(len(blue)):
             self.blue_slots[i] = {"x_frac": 0.0, "alpha": 0, "landed": False}
         for i in range(len(red)):
@@ -937,6 +958,18 @@ def _tb_handle_input(vw, vh):
 
         _tb.drag      = None
         _tb.drag_from = None
+        # As soon as both teams are full, kick off a single batched fetch of
+        # every active player's scout sheet so ranked/draft champion pools
+        # are cached before the user starts the draft. Deduped via
+        # live._scout_inflight + live.scout_sheets cache.
+        if all(_tb.blue) and all(_tb.red):
+            try:
+                names = [p["name"] for p in (_tb.blue + _tb.red)
+                         if p and p.get("name")]
+                if names:
+                    prefetch_scout_sheets(names)
+            except Exception:
+                pass
 
 
 def _tb_release_displaced(player):
@@ -1436,10 +1469,12 @@ def _enemy_target_comp(b, act):
         return {}
     enemy_side = "RED" if act.side == "BLUE" else "BLUE"
     try:
+        enemy_players = list(b.players.get(enemy_side, []))
         return target_archetype(
             b, enemy_side,
             getattr(live, "inhouse_champs", {}) or {},
-            getattr(live, "primary_roles", {}) or {})
+            getattr(live, "primary_roles", {}) or {},
+            scout_champs=_scout_champs_for_players(enemy_players))
     except Exception:
         return {}
 
@@ -1452,6 +1487,7 @@ def _enemy_pick_preview(b, side, n=3):
     used = b.used_champs() if hasattr(b, "used_champs") else set()
     icmp = getattr(live, "inhouse_champs", {}) or {}
     proles = getattr(live, "primary_roles", {}) or {}
+    scout_map = _scout_champs_for_players(list(b.players.get(side, [])))
     out = []
     if not hasattr(b, "open_roles"):
         return out
@@ -1460,7 +1496,8 @@ def _enemy_pick_preview(b, side, n=3):
         if not pl:
             continue
         try:
-            cands = _candidates_for_player(pl, role, icmp, proles, used, k=n)
+            cands = _candidates_for_player(pl, role, icmp, proles, used, k=n,
+                                           scout_champs=scout_map)
         except Exception:
             cands = []
         names = [c[0] for c in cands][:n]
@@ -1514,6 +1551,9 @@ def _board_begin_synced():
     draft.board_live_stop = False
     draft._board_live_sig = None
     draft.phase = DraftPhase.BOARD
+    # Synced rosters arrive later via sync_tick — placeholders here have no
+    # real names so no prefetch yet. sync_tick will trigger prefetch when
+    # real players land.
     _board_recompute()
 
 
@@ -1551,6 +1591,17 @@ def _board_begin():
     draft.board_live_stop = False
     draft._board_live_sig = None
     draft.phase = DraftPhase.BOARD
+    # Kick off background scout-sheet fetch. Sheets land into live.scout_sheets
+    # and are picked up by the next _board_recompute (next pick/ban or arch
+    # change). We don't trigger recompute from the worker thread to avoid
+    # racing with the UI render loop.
+    try:
+        names = [p.get("name") for p in (blue_players + red_players)
+                 if p and p.get("name")]
+        if names:
+            prefetch_scout_sheets(names)
+    except Exception:
+        pass
     _board_recompute()
     if draft.board_live:
         import threading
@@ -1564,10 +1615,15 @@ def _board_recompute():
         draft.board_rec = None
         return
     try:
+        # Build a scout_champs map spanning both teams so the engine sees
+        # every active player's ranked/draft champion pool.
+        all_players = list(b.players.get("BLUE", [])) + list(b.players.get("RED", []))
+        scout_map = _scout_champs_for_players(all_players)
         draft.board_rec = recommend_action(
             b, getattr(live, "inhouse_champs", {}) or {},
             getattr(live, "primary_roles", {}) or {}, n=6,
-            forced_arch=draft.board_target_arch)
+            forced_arch=draft.board_target_arch,
+            scout_champs=scout_map)
     except Exception as e:                       # pragma: no cover
         draft.board_rec = {
             "done": b.is_complete(), "action": b.current_action(),
@@ -2179,9 +2235,11 @@ def _draw_board(dl, vw, vh):
     _draw_board_center(dl, cen_x, body_y, cen_w, body_h, b, rec,
                        interactive=not live_connected)
     try:
+        _rail_all = list(b.players.get("BLUE", [])) + list(b.players.get("RED", []))
         board_rail.draw_rail(dl, rail_x, body_y, rail_w, body_h, b, rec,
                              _txt, getattr(live, "inhouse_champs", {}) or {},
-                             getattr(live, "primary_roles", {}) or {})
+                             getattr(live, "primary_roles", {}) or {},
+                             scout=_scout_champs_for_players(_rail_all))
     except Exception:
         pass
     try:
@@ -2293,7 +2351,8 @@ def _draw_board_team(dl, x, y, w, h, b, side, act):
                 depth = len(_candidates_for_player(
                     pl, role, getattr(live, "inhouse_champs", {}) or {},
                     getattr(live, "primary_roles", {}) or {},
-                    b.used_champs(), k=10))
+                    b.used_champs(), k=10,
+                    scout_champs=_scout_champs_for_players([pl])))
             except Exception:
                 depth = 0
             cap_x = x + w - 13

@@ -762,13 +762,51 @@ def customs_champs(p: Dict[str, Any],
     return out
 
 
+# Multiplier on scout-sheet (ranked + draft) comfort relative to customs:
+# scout-sheet data covers ranked/draft games (no inhouse weighting, no
+# per-game recency). It is a stronger signal than name-only top_champs but
+# weaker than demonstrated customs play.
+_SCOUT_CHAMPS_WEIGHT = 0.85
+
+
+def scout_pool_champs(p: Dict[str, Any],
+                      scout_champs: Dict[str, List[Dict]],
+                      min_games: int = 3) -> Dict[str, float]:
+    """{champ: comfort} from a player's scout-sheet FULL CHAMPION POOL
+    (ranked + draft, pooled across roles). Used as a secondary signal when
+    a champ has no customs play. Weighted below customs via _SCOUT_CHAMPS_WEIGHT."""
+    out: Dict[str, float] = {}
+    pname = p.get("name", "")
+    for ch in (scout_champs.get(pname, []) or []):
+        cname = ch.get("champ")
+        if not cname:
+            continue
+        g = parse_float(ch.get("games", 0))
+        if g < min_games:
+            continue
+        out[cname] = _SCOUT_CHAMPS_WEIGHT * champion_comfort(
+            g, parse_wr(ch.get("wr", "50%")),
+            parse_float(ch.get("kda"), 1.5), role_match=True,
+            form=p.get("form"), inhouse=False, results=None)
+    return out
+
+
 def _player_candidates(
     p: Dict[str, Any],
     inhouse_champs: Dict[str, List[Dict]],
     primary_roles: Dict[str, str],
     max_candidates: int = 8,
+    scout_champs: Optional[Dict[str, List[Dict]]] = None,
 ) -> List[Tuple[str, float]]:
-    """Return list of (champ, comfort) candidates for a player, sorted high→low."""
+    """Return list of (champ, comfort) candidates for a player, sorted high→low.
+
+    Comfort sources, in order of signal strength (each only used if previous
+    didn't already cover the champ with a higher score):
+      1. inhouse_champs — customs games, full per-champ stats + last-100 recency
+      2. scout_champs   — scout-sheet FULL CHAMPION POOL (ranked + draft, pooled)
+      3. top_champs     — name-only top 3 from rankings sheet, sample size guessed
+      4. CHAMP_PRIORS   — global priors fallback when player has zero data
+    """
     role = p.get("role", "")
     valid = ROLE_VALID.get(role, set())
     pname = p.get("name", "")
@@ -808,6 +846,25 @@ def _player_candidates(
                                        role_match=ch_role_match, form=form,
                                        inhouse=True, results=ch.get("results"))
 
+    # Scout-sheet champion pool (ranked + draft). Per-champ games/wr/kda but
+    # pooled across roles, so role-match falls back to player primary.
+    if scout_champs:
+        for ch in (scout_champs.get(pname, []) or []):
+            cname = ch.get("champ")
+            if not cname or cname not in valid:
+                continue
+            g = parse_float(ch.get("games", 0))
+            if g < 3:
+                continue
+            score = _SCOUT_CHAMPS_WEIGHT * champion_comfort(
+                g, parse_wr(ch.get("wr", "50%")),
+                parse_float(ch.get("kda"), 1.5),
+                role_match=role_match, form=form,
+                inhouse=False, results=None)
+            # Only add if it beats whatever we already have (customs wins ties).
+            if score > seen.get(cname, 0.0):
+                seen[cname] = score
+
     # Top champs (ranked-tier; no per-champ stats — use Bayesian-shrunk player WR)
     pwr  = parse_wr(p.get("winrate", p.get("wr", 50.0)))
     pg   = parse_float(p.get("games", 20))
@@ -846,6 +903,7 @@ def beam_search_comp(
     enemy_picks: Sequence[str] = (),
     beam_width: int = 16,
     max_candidates: int = 6,
+    scout_champs: Optional[Dict[str, List[Dict]]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Find the best 5-champion assignment for an archetype via beam search.
@@ -858,7 +916,8 @@ def beam_search_comp(
         return None
 
     candidates_per_player = [
-        _player_candidates(p, inhouse_champs, primary_roles, max_candidates)
+        _player_candidates(p, inhouse_champs, primary_roles, max_candidates,
+                           scout_champs=scout_champs)
         for p in players
     ]
 
@@ -918,19 +977,26 @@ def recommend_comps(
     enemy_picks: Sequence[str] = (),
     n_results: int = 5,
     beam_width: int = 16,
+    scout_champs: Optional[Dict[str, List[Dict]]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Returns ranked archetype recommendations. Each entry has:
       archetype, label, viability, synergy (0..5 dot count), combined,
       picks: [{champion, fit_score}], win_condition, spike, score_breakdown
+
+    `scout_champs` is the scout-sheet FULL CHAMPION POOL per player
+    (`{name: [{champ, games, wr, kda, ...}, ...]}`) — ranked + draft data
+    used as a secondary comfort source after customs.
     """
     inhouse_champs = inhouse_champs or {}
     primary_roles  = primary_roles  or {}
+    scout_champs   = scout_champs   or {}
 
     results: List[Dict[str, Any]] = []
     for arch_name, arch_data in ARCHETYPES.items():
         beam = beam_search_comp(players, inhouse_champs, primary_roles, arch_name,
-                                enemy_picks=enemy_picks, beam_width=beam_width)
+                                enemy_picks=enemy_picks, beam_width=beam_width,
+                                scout_champs=scout_champs)
         if not beam:
             continue
         champs   = beam["champs"]
@@ -989,15 +1055,21 @@ def recommend_bans(
     own_picks: Sequence[str] = (),
     primary_roles: Optional[Dict[str, str]] = None,
     n_bans: int = 5,
+    scout_champs: Optional[Dict[str, List[Dict]]] = None,
 ) -> Tuple[List[str], List[Dict[str, Any]]]:
     """
     Bans use Bayesian-shrunk threat, role-context, and counter-coverage.
 
     threat = shrunk_wr × log(games+1) × kda_factor × rank_weight × role_factor
     coverage_discount = up to -40% if your team strongly counters this champ
+
+    `scout_champs` (optional) augments customs data with the scout-sheet
+    FULL CHAMPION POOL (ranked + draft) so threats that show up in ranked
+    but not customs still get surfaced.
     """
     inhouse_champs = inhouse_champs or {}
     primary_roles  = primary_roles  or {}
+    scout_champs   = scout_champs   or {}
 
     seen: Dict[str, Dict[str, Any]] = {}
     for p in opposing_players:
@@ -1045,7 +1117,42 @@ def recommend_bans(
                     "phase_reason": "",
                 }
 
-        # Top champs fallback (player has no inhouse history)
+        # Scout-sheet champion pool (ranked + draft). Real per-champ games/wr/kda
+        # — much stronger threat signal than the name-only top_champs fallback.
+        # Discount slightly vs customs since pool is across-role and lower stakes.
+        for ch in (scout_champs.get(pname, []) or []):
+            cname = ch.get("champ")
+            if not cname:
+                continue
+            if role_pool and cname not in role_pool:
+                continue
+            g = parse_float(ch.get("games", 0))
+            if g < 3:
+                continue
+            wr   = parse_wr(ch.get("wr", "50%"))
+            kda  = parse_float(ch.get("kda"), 1.5)
+            wr_post = shrink_wr_from_pct(wr, g)
+            kda_factor = min(kda / 2.5, 1.6)
+            ssz = math.log(1.0 + g) / math.log(11.0)
+            ssz = min(ssz * 1.2, 1.4)
+            role_factor = 1.0
+            if primary and primary == ROLE_NORM.get(prole, prole):
+                role_factor = 1.15
+            # 0.85 multiplier mirrors _SCOUT_CHAMPS_WEIGHT — customs threat wins
+            # on the same champion, but ranked-only threats still register.
+            threat = wr_post * ssz * kda_factor * rank_weight * role_factor * _SCOUT_CHAMPS_WEIGHT
+            threat *= form_multiplier(form)
+            any_data = True
+            if cname not in seen or threat > seen[cname]["threat_raw"]:
+                seen[cname] = {
+                    "champion": cname, "player": pname,
+                    "games": int(g), "wr": round(wr, 1),
+                    "kda": round(kda, 2),
+                    "threat_raw": threat,
+                    "phase_reason": "",
+                }
+
+        # Top champs fallback (player has no inhouse or scout-sheet history)
         if not any_data:
             for champ in (p.get("top_champs") or [])[:5]:
                 if not champ or champ in seen:

@@ -7,7 +7,7 @@ import math, time, random as _rnd
 import dearpygui.dearpygui as dpg
 from theme import C, RANK_COLORS
 from core.animations import anim
-from data.reader import live, load_scout_sheet
+from data.reader import live, load_scout_sheet, cache_scout_sheet
 from data.tips import TIPS as _TIPS
 from ui.tierlist import _wheel_delta as _wheel_delta_shared
 
@@ -767,6 +767,9 @@ class ScoutState:
 
 
 def _on_sheet_loaded(name, sheet_data, history):
+    # Always cache the parsed sheet for the draft engine, even if the user
+    # has navigated to a different player by the time it lands.
+    cache_scout_sheet(name, sheet_data)
     if scout.selected != name:
         return
     base = _build_full_report(name) or {}

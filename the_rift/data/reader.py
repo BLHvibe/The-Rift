@@ -48,10 +48,50 @@ class LiveData:
         self.activity       = []   # list of activity event dicts (newest first)
         self.players        = []   # ordered list of real player display names (from Players sheet)
         self.summoner_map   = {}   # gameName (Riot ID game part) → display name
+        # Cache of parsed per-player scouting sheets (champ_pool, roles, etc.).
+        # Populated lazily by load_scout_sheet callbacks and by prefetch_scout_sheets.
+        # Per-player draft engine reads this to weight ranked/draft champion stats.
+        self.scout_sheets   = {}   # player_name → parsed scout-sheet dict
+        self._scout_inflight = set()  # player names currently being fetched
         self.loaded     = False
         self.loading    = False
         self.error      = None
         self._lock      = threading.Lock()
+
+    def scout_champs_for(self, name):
+        """Return scout-sheet FULL CHAMPION POOL as a list shaped like
+        inhouse_champs entries: [{champ, games, wr, kda, ...}, ...].
+        Empty list if no scout sheet has been loaded for this player yet."""
+        sheet = self.scout_sheets.get(name)
+        if not sheet:
+            return []
+        pool = sheet.get("champ_pool") or []
+        out = []
+        for c in pool:
+            cname = c.get("name") or c.get("champ")
+            if not cname:
+                continue
+            out.append({
+                "champ":   cname,
+                "games":   c.get("games", 0),
+                "wins":    c.get("wins", 0),
+                "losses":  c.get("losses", 0),
+                "wr":      c.get("wr", "50%"),
+                "kda":     c.get("kda", 1.5),
+                "kills":   c.get("kills", 0),
+                "deaths":  c.get("deaths", 0),
+                "assists": c.get("assists", 0),
+                "damage":  c.get("damage", ""),
+                # No per-game chronology in the scout sheet — recency-weight WR
+                # falls back to all-time posterior for these.
+                "results": None,
+                "roles":   {},
+            })
+        return out
+
+    def scout_champs_map(self, names):
+        """Bulk version: {name: scout_champs_for(name)} for the given names."""
+        return {n: self.scout_champs_for(n) for n in names if n}
 
     def set(self, rankings, scout, inhouse, inhouse_champs, primary_roles=None,
             players=None, summoner_map=None):
@@ -1205,6 +1245,120 @@ def load_scout_sheet(player_name, on_done=None, on_error=None):
 
     threading.Thread(target=_bg, daemon=True,
                      name=f"scout_{player_name[:12]}").start()
+
+
+def cache_scout_sheet(player_name, sheet_data):
+    """Store a parsed scout-sheet dict in live.scout_sheets for the draft engine."""
+    if not player_name or not sheet_data:
+        return
+    with live._lock:
+        live.scout_sheets[player_name] = sheet_data
+        live._scout_inflight.discard(player_name)
+
+
+def prefetch_scout_sheets(names, on_progress=None, on_done=None):
+    """Background bulk-fetch of scout sheets for the given player names.
+
+    Uses a single Sheets API ``values:batchGet`` call to pull every player's
+    'Scout - {name}' worksheet in one round-trip. Compared to the legacy
+    per-player loop this is:
+      * ~Nx faster (one HTTPS round-trip total vs N sequential ones)
+      * 1 Sheets quota unit instead of N (matters when multiple users draft
+        concurrently — the per-user 60-reads/min limit hits fast at N=10)
+      * Worksheet metadata fetched once via spreadsheet.worksheets() so we
+        skip the ``sh.worksheet(name)`` 404 round-trip per missing player
+
+    Populates ``live.scout_sheets`` so the draft engine can read each player's
+    ranked/draft champion pool. No-op for names already cached or in flight.
+    ``on_progress(name, ok)`` fires once per player as their parsed sheet is
+    cached (from the worker thread). ``on_done(results_dict)`` fires once at
+    the end with ``{name: parsed_dict_or_None, ...}`` (plus optional 'error').
+    """
+    targets = []
+    with live._lock:
+        for n in names:
+            if not n:
+                continue
+            if n in live.scout_sheets or n in live._scout_inflight:
+                continue
+            live._scout_inflight.add(n)
+            targets.append(n)
+    if not targets:
+        if on_done:
+            try: on_done({})
+            except Exception: pass
+        return
+
+    def _bg():
+        results = {}
+        try:
+            cfg = load_config()
+            sh = _gspread_connect(cfg)
+        except Exception as e:
+            with live._lock:
+                for n in targets:
+                    live._scout_inflight.discard(n)
+            if on_done:
+                try: on_done({"error": f"sheets connect failed: {e}"})
+                except Exception: pass
+            return
+
+        # One metadata call: which 'Scout - X' worksheets actually exist.
+        try:
+            existing = {ws.title for ws in sh.worksheets()}
+        except Exception:
+            existing = set()
+
+        sheet_for = {}   # player_name -> worksheet title
+        ranges = []      # parallel to sheet_for.keys(), preserves order
+        order = []
+        for n in targets:
+            title = f"Scout - {n}"[:30]
+            if title in existing:
+                sheet_for[n] = title
+                ranges.append(f"'{title}'!A1:Z200")
+                order.append(n)
+            else:
+                results[n] = None  # no scout sheet for this player
+
+        # Single batchGet for every player's scout sheet.
+        if ranges:
+            try:
+                batch = sh.values_batch_get(ranges)
+                value_ranges = batch.get("valueRanges", [])
+                for idx, n in enumerate(order):
+                    if idx >= len(value_ranges):
+                        results[n] = None
+                        continue
+                    values = value_ranges[idx].get("values", []) or []
+                    try:
+                        data = _parse_scouting_sheet(values)
+                    except Exception:
+                        data = None
+                    if data:
+                        cache_scout_sheet(n, data)
+                        results[n] = data
+                        if on_progress:
+                            try: on_progress(n, True)
+                            except Exception: pass
+                    else:
+                        results[n] = None
+                        if on_progress:
+                            try: on_progress(n, False)
+                            except Exception: pass
+            except Exception as e:
+                results["error"] = f"batchGet failed: {e}"
+
+        # Clear inflight for everyone (cached or not — don't retry-loop on misses).
+        with live._lock:
+            for n in targets:
+                live._scout_inflight.discard(n)
+
+        if on_done:
+            try: on_done(results)
+            except Exception: pass
+
+    threading.Thread(target=_bg, daemon=True, name="scout_prefetch").start()
 
 
 def _read_rank_history_for_player(sh, player_name):
