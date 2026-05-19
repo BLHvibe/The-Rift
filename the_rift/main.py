@@ -54,6 +54,14 @@ def _load_all_textures():
         dpg.add_static_texture(width=w, height=h, default_value=flat,
                                tag="tex_noise", parent=_TEX_REG)
 
+    splash_path = os.path.join(asset_dir, "splash_main.png")
+    if os.path.exists(splash_path):
+        img  = Image.open(splash_path).convert("RGBA")
+        w, h = img.size
+        flat = (np.array(img, dtype=np.float32) / 255.0).flatten().tolist()
+        dpg.add_static_texture(width=w, height=h, default_value=flat,
+                               tag="tex_splash_main", parent=_TEX_REG)
+
 
 # ---------------------------------------------------------------------------
 # Programmatic crown drawing
@@ -289,23 +297,43 @@ def _draw_splash(dl, sp: Splash, vw, vh):
 
     fa  = int(sp.fade_alpha)
     cx  = vw // 2
-    cy  = vh // 2 - 50
+
+    # Image-anchored layout: caricature is the hero, title + subtitle cascade below.
+    _IMG_W, _IMG_H = 960, 640
+    img_x = cx - _IMG_W // 2
+    img_y = max(15, (vh - _IMG_H - 140) // 2)
+    cy    = img_y + _IMG_H + 15   # title sits just below the image; other rows offset
 
     # Full background
     dpg.draw_rectangle((0,0),(vw,vh),
                         fill=(*C["bg"][:3], fa),
                         color=(0,0,0,0), parent=dl)
 
-    # --- Crown (programmatic) ---
+    # --- Splash caricature (replaces vector crown) ---
     pulse  = (math.sin(sp.pulse_t) + 1) / 2
     ca     = int(sp.crown_alpha * fa / 255)
 
-    # Soft gold glow halo behind crown using layered circles
-    if ca > 10:
+    if ca > 10 and dpg.does_item_exist("tex_splash_main"):
+        # Soft gold glow halo behind the image
+        glow_a = int(pulse * 70 * fa / 255)
+        halo_cx, halo_cy = cx, img_y + _IMG_H // 2
+        for r, ga in [(200, glow_a//3), (150, glow_a//2), (105, glow_a)]:
+            dpg.draw_circle((halo_cx, halo_cy), r, color=(0,0,0,0),
+                            fill=(*C["gold_dk"][:3], ga), parent=dl)
+        dpg.draw_image("tex_splash_main",
+                       (img_x, img_y), (img_x + _IMG_W, img_y + _IMG_H),
+                       color=(255, 255, 255, ca), parent=dl)
+        # Gold border
+        dpg.draw_rectangle((img_x - 2, img_y - 2),
+                           (img_x + _IMG_W + 2, img_y + _IMG_H + 2),
+                           color=(*C["gold"][:3], ca),
+                           fill=(0, 0, 0, 0), thickness=2, parent=dl)
+    elif ca > 10:
+        # Fallback to vector crown if texture failed to load
         glow_a = int(pulse * 55 * fa / 255)
         crown_cx = cx
-        crown_cy = cy - 42           # base-top sits 42px above cy
-        crown_sz = 108               # half-width
+        crown_cy = cy - 42
+        crown_sz = 108
         for r, ga in [(90, glow_a//3), (65, glow_a//2), (45, glow_a)]:
             dpg.draw_circle((crown_cx, crown_cy - crown_sz*0.35),
                             r, color=(0,0,0,0),
@@ -330,7 +358,7 @@ def _draw_splash(dl, sp: Splash, vw, vh):
     # --- Gold rule ---
     if sp.rule_frac > 0:
         half = int(70 * sp.rule_frac)
-        ry   = cy + 80
+        ry   = cy + 70
         ra   = int(fa * 0.8)
         dpg.draw_line((cx-half, ry), (cx+half, ry),
                       color=(*C["gold"][:3], ra), thickness=1, parent=dl)
@@ -340,7 +368,7 @@ def _draw_splash(dl, sp: Splash, vw, vh):
         sa    = int((sp.rule_frac - 0.5) * 2 * 160 * fa / 255)
         sub   = sp.SUBTITLE
         sw    = len(sub) * 8
-        s_tag = dpg.draw_text((cx - sw//2, cy + 90), sub,
+        s_tag = dpg.draw_text((cx - sw//2, cy + 78), sub,
                               color=(*C["txt2"][:3], sa), size=15, parent=dl)
         if "raj_sb_14" in _FONTS:
             dpg.bind_item_font(s_tag, _FONTS["raj_sb_14"])
@@ -349,7 +377,8 @@ def _draw_splash(dl, sp: Splash, vw, vh):
     if sp.fact_alpha > 0:
         crd_w, crd_h = 440, 72
         crd_x = cx - crd_w // 2
-        crd_y = int(cy + 120 + sp.fact_y_off)
+        # Sits just below subtitle, but clamps to stay above the loading bar
+        crd_y = int(min(cy + 100 + sp.fact_y_off, vh - crd_h - 30))
         fa2   = int(sp.fact_alpha * fa / 255)
 
         dpg.draw_rectangle((crd_x, crd_y), (crd_x+crd_w, crd_y+crd_h),
