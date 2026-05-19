@@ -238,6 +238,27 @@ class DraftBoardState:
         self.pointer += 1
         return True
 
+    def reassign(self, side: str, from_role: str, to_role: str) -> bool:
+        """Swap the champion in `from_role` with whatever is in `to_role`
+        (or move it into the empty slot) on the same `side`. Post-hoc role
+        correction — pointer/history are intentionally untouched, since the
+        draft sequence already advanced when these picks were made."""
+        if side not in SIDES or from_role == to_role:
+            return False
+        if from_role not in ROLES or to_role not in ROLES:
+            return False
+        picks = self.picks[side]
+        if from_role not in picks:
+            return False
+        champ = picks[from_role]
+        other = picks.get(to_role)
+        picks[to_role] = champ
+        if other is None:
+            del picks[from_role]
+        else:
+            picks[from_role] = other
+        return True
+
     def mirror(self, picks: Dict[str, Dict[str, str]],
                bans: Dict[str, List[str]], completed: int,
                our_side: Optional[str] = None) -> None:

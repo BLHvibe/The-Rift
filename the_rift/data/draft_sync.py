@@ -126,6 +126,11 @@ class DraftSyncClient:
     def undo(self) -> None:
         self._send({"type": "undo"})
 
+    def reassign(self, side: str, from_role: str, to_role: str) -> None:
+        self._send({"type": "reassign", "side": side.upper(),
+                    "from_role": from_role.upper(),
+                    "to_role": to_role.upper()})
+
     def reset(self) -> None:
         self._send({"type": "reset"})
 

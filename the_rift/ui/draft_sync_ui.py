@@ -254,6 +254,16 @@ def is_active() -> bool:
     return draft_sync.active() is not None
 
 
+def is_host() -> bool:
+    client = draft_sync.active()
+    if client is None:
+        return False
+    try:
+        return bool(client.you().get("is_host"))
+    except Exception:
+        return False
+
+
 def route_apply(draft, champ: str, role: Optional[str] = None) -> bool:
     """Returns True if the call was forwarded to the sync server. In that case
     the caller MUST NOT also call draft.board.apply — the broadcast comes back
@@ -272,6 +282,17 @@ def route_undo(draft) -> bool:
     if client is None:
         return False
     client.undo()
+    return True
+
+
+def route_reassign(draft, side: str, from_role: str, to_role: str) -> bool:
+    """Returns True if forwarded to the sync server. In that case the caller
+    MUST NOT also call draft.board.reassign — the broadcast comes back via
+    sync_tick and updates the local board uniformly across all clients."""
+    client = draft_sync.active()
+    if client is None:
+        return False
+    client.reassign(side, from_role, to_role)
     return True
 
 

@@ -1193,6 +1193,24 @@ def _draw_tag_chip(dl, x, y, tag, alpha=255, big=False):
 # Each entry: (x, y, w, h, action, payload)
 _board_hits = []
 
+# Per-role slot rects registered by _draw_board_team, consumed by drag handler.
+# Each entry: (x, y, w, h, side, role, champ_or_None). Cleared each frame.
+_pick_slot_rects = []
+
+
+class _PickDrag:
+    """Drag state for moving a locked champion between role slots on the same
+    side after the pick has already been made. Separate from _tb (which drags
+    players, not champs)."""
+    side = None        # "BLUE" | "RED" while dragging, else None
+    from_role = None   # role the champ was picked into
+    champ = None       # champion name, for the ghost portrait
+    pos = (0, 0)       # current mouse in content-area coords
+    was_down = False   # mouse-button-down on previous frame (edge detect)
+
+_pdrag = _PickDrag()
+
+
 # Mouse position in content-area coords, updated each frame by _draw_board.
 # Lets every render helper compute hover state without re-doing the offset math.
 _mouse_xy = (0, 0)
@@ -1928,6 +1946,7 @@ def _draw_board(dl, vw, vh):
         return
 
     _board_hits.clear()
+    _pick_slot_rects.clear()
     champion_icons.flush_pending()          # register any downloaded icons
     splash_art.flush_pending()              # register any downloaded splashes
     # Lock the parent content window's vertical scroll — the board is a fixed
@@ -2177,6 +2196,16 @@ def _draw_board(dl, vw, vh):
     cyber.draw_scanlines(dl, 0, hdr_h, vw, vh - hdr_h,
                          color=C["scan_gy"], alpha=8, spacing=6, speed=0)
 
+    # Pick-drag ghost: a portrait following the cursor while the user drags
+    # a locked champion between role slots. Rendered last so it sits on top.
+    if _pdrag.side is not None and _pdrag.champ:
+        gsz = 40
+        gx = _pdrag.pos[0] - gsz // 2
+        gy = _pdrag.pos[1] - gsz // 2
+        rc = _side_accent(_pdrag.side, lt=True)
+        _draw_portrait(dl, gx, gy, gsz, _pdrag.champ, rc,
+                       alpha=235, rounding=6, border_w=2)
+
 
 def _draw_board_team(dl, x, y, w, h, b, side, act):
     accent    = _side_accent(side)
@@ -2208,9 +2237,22 @@ def _draw_board_team(dl, x, y, w, h, b, side, act):
     for i, role in enumerate(_ROLES):
         pl = b.players[side][i]
         champ = b.picks[side].get(role)
+        # Register the slot rect for the pick-drag handler.
+        _pick_slot_rects.append(
+            (x + 10, ry, w - 20, slot_h, side, role, champ))
+        # Drop-target highlight: when a pick is being dragged on this side,
+        # other slots glow to advertise they're droppable.
+        is_drop_target = (
+            _pdrag.side == side and _pdrag.from_role is not None
+            and role != _pdrag.from_role
+            and x + 10 <= _pdrag.pos[0] <= x + w - 10
+            and ry <= _pdrag.pos[1] <= ry + slot_h)
+        slot_fill = (*C["card"][:3], 220 if is_drop_target else 165)
+        slot_outline = ((*_side_accent(side, lt=True), 230)
+                        if is_drop_target else (*C["cy_dk"][:3], 150))
         cyber.draw_cut_rect(dl, x + 10, ry, x + w - 10, ry + slot_h, cut=6,
-                            fill=(*C["card"][:3], 165),
-                            color=(*C["cy_dk"][:3], 150), thickness=1)
+                            fill=slot_fill, color=slot_outline,
+                            thickness=2 if is_drop_target else 1)
         # Role accent stripe (left edge, widened to 6px) + scanline tint
         rc = _ROLE_COLORS.get(role, (120, 120, 120))
         dpg.draw_rectangle((x + 10, ry), (x + 16, ry + slot_h),
@@ -2218,12 +2260,15 @@ def _draw_board_team(dl, x, y, w, h, b, side, act):
                            rounding=0, parent=dl)
         cyber.draw_scanlines(dl, x + 10, ry, 6, slot_h,
                              color=C["scan_gy"], alpha=26, spacing=4, speed=0)
-        # Champion portrait (only when locked — otherwise blank)
+        # Champion portrait (only when locked — otherwise blank).
+        # While this slot's pick is being dragged, fade the source.
         port_x  = x + 20
         port_y  = ry + (slot_h - port_sz) // 2
+        is_drag_source = (_pdrag.side == side and _pdrag.from_role == role)
         if champ:
             _draw_portrait(dl, port_x, port_y, port_sz, champ, rc,
-                           alpha=240, rounding=5, border_w=2)
+                           alpha=90 if is_drag_source else 240,
+                           rounding=5, border_w=2)
         else:
             dpg.draw_rectangle((port_x, port_y),
                                (port_x + port_sz, port_y + port_sz),
@@ -3239,6 +3284,56 @@ def _board_handle_input(vw, vh):
     vp = dpg.get_viewport_pos()
     mx = mouse[0] - vp[0] - 68
     my = mouse[1] - vp[1] - 52
+
+    # ── Pick-drag: move a locked champion between role slots ─────────
+    # Synced sessions: only the host may reassign (server enforces this);
+    # non-hosts and spectators get no-op drag. Live LCU poll: disabled
+    # (the live feed is authoritative, manual reassign would desync).
+    _pdrag.pos = (mx, my)
+    mb_down = dpg.is_mouse_button_down(0)
+    is_synced = _sync_ui.is_active()
+    drag_disabled = draft.board_live or (is_synced and not _sync_ui.is_host())
+    if drag_disabled:
+        _pdrag.side = None
+        _pdrag.from_role = None
+        _pdrag.champ = None
+    elif _pdrag.side is None:
+        # Not dragging — start on mouse-down over a filled slot.
+        if mb_down and not _pdrag.was_down:
+            for (rx, ry_, rw, rh, side, role, champ) in _pick_slot_rects:
+                if champ and rx <= mx <= rx + rw and ry_ <= my <= ry_ + rh:
+                    _pdrag.side = side
+                    _pdrag.from_role = role
+                    _pdrag.champ = champ
+                    break
+    else:
+        # Currently dragging — drop on release.
+        if not mb_down:
+            target_role = None
+            for (rx, ry_, rw, rh, side, role, _c) in _pick_slot_rects:
+                if (side == _pdrag.side and role != _pdrag.from_role
+                        and rx <= mx <= rx + rw and ry_ <= my <= ry_ + rh):
+                    target_role = role
+                    break
+            if target_role and draft.board is not None:
+                # Synced: route through server, which will broadcast back via
+                # sync_tick. Local: mutate directly and recompute.
+                if _sync_ui.route_reassign(draft, _pdrag.side,
+                                           _pdrag.from_role, target_role):
+                    pass
+                elif draft.board.reassign(_pdrag.side, _pdrag.from_role,
+                                          target_role):
+                    _board_recompute()
+            _pdrag.side = None
+            _pdrag.from_role = None
+            _pdrag.champ = None
+    _pdrag.was_down = mb_down
+
+    # If a drag just started this frame, swallow the click so it doesn't
+    # also trigger any underlying hit rect (e.g. the manual pool grid).
+    if _pdrag.side is not None:
+        return
+
     if not dpg.is_mouse_button_clicked(0):
         return
     for (hx, hy, hw, hh, kind, payload) in list(_board_hits):

@@ -32,6 +32,7 @@ Client -> server:
   {"type": "apply",        "champ": "Aatrox", "role": "TOP"}
   {"type": "undo"}
   {"type": "reset"}
+  {"type": "reassign", "side": "BLUE", "from_role": "TOP", "to_role": "JGL"}
   {"type": "set_players",  "side": "BLUE", "players": [...]}
   {"type": "set_our_side", "side": "BLUE"}
   {"type": "set_slot",     "slot": "blue2"}     # leave/reclaim a slot
@@ -188,6 +189,28 @@ class DraftState:
                 last = next(reversed(self.picks[side]))
                 self.picks[side].pop(last)
         return True
+
+    def reassign(self, side: str, from_role: str, to_role: str) -> Tuple[bool, str]:
+        """Swap a locked pick between role slots on the same side. Post-hoc
+        role correction — pointer is unchanged. Mirrors
+        DraftBoardState.reassign on the client."""
+        if side not in SIDES:
+            return False, "bad side"
+        if from_role == to_role:
+            return False, "same role"
+        if from_role not in ROLES or to_role not in ROLES:
+            return False, "bad role"
+        picks = self.picks[side]
+        if from_role not in picks:
+            return False, f"no pick in {from_role}"
+        champ = picks[from_role]
+        other = picks.get(to_role)
+        picks[to_role] = champ
+        if other is None:
+            del picks[from_role]
+        else:
+            picks[from_role] = other
+        return True, ""
 
     def reset(self) -> None:
         self.picks = {"BLUE": {}, "RED": {}}
@@ -511,6 +534,21 @@ async def ws_endpoint(ws: WebSocket, code: str) -> None:
                     continue
                 async with room.lock:
                     room.state.undo()
+                await _broadcast_state(room)
+                continue
+
+            if mtype == "reassign":
+                if not client.is_host:
+                    await _send(ws, {"type": "error", "msg": "host only"})
+                    continue
+                side = str(msg.get("side", "")).upper()
+                from_role = str(msg.get("from_role", "")).upper()
+                to_role = str(msg.get("to_role", "")).upper()
+                async with room.lock:
+                    ok, err = room.state.reassign(side, from_role, to_role)
+                if not ok:
+                    await _send(ws, {"type": "error", "msg": err})
+                    continue
                 await _broadcast_state(room)
                 continue
 
