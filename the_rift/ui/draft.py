@@ -809,6 +809,10 @@ def _tb_handle_input(vw, vh):
         cx2 = vw - cw3 - 10
         cy2 = (hdr_h - ch3) // 2
         if cx2 <= mx <= cx2+cw3 and cy2 <= my <= cy2+ch3:
+            # v3.0.2: also drop the WS so we don't keep re-running the join
+            # callback on every server broadcast and yank ourselves back
+            # into TEAM_BUILD.
+            _sync_ui.disconnect_if_active()
             draft.phase = DraftPhase.IDLE
             return
 
@@ -1602,6 +1606,48 @@ def _draw_sync_lobby(dl, vw, vh):
     _txt(dl, cb_x + 30, cb_y + 9, "EXIT",
          (*lol_theme.LOL["red_side"][:3], 235), 18, "raj_sb_18")
     _board_hits.append((cb_x, cb_y, cb_w, cb_h, "exit", None))
+
+    # ── YOU [side] indicator + swap button (top-right, left of EXIT) ──
+    # Server-authoritative: `set_side("RED")` triggers a true swap in v3.0.2+
+    # so clicking the arrow flips both players' sides at once.
+    my_side_str = (client.you() or {}).get("side", "") if client else ""
+    if my_side_str in ("BLUE", "RED"):
+        side_col = lol_theme.LOL[
+            "blue_side" if my_side_str == "BLUE" else "red_side"]
+        you_w, you_h = 130, 38
+        you_x = cb_x - you_w - 12
+        you_y = cb_y
+        lol_theme.draw_navy_panel(
+            dl, you_x, you_y, you_x + you_w, you_y + you_h,
+            fill=lol_theme._alpha(lol_theme.LOL["navy_panel"], 220),
+            border_color=side_col,
+            border_thickness=2, rounding=4)
+        _txt(dl, you_x + 12, you_y + 9, f"YOU: {my_side_str}",
+             (*side_col[:3], 240), 18, "raj_sb_18")
+        # Swap arrow button — to the left of the YOU pill. Only meaningful
+        # when both sides are claimed; otherwise renders dim + ignores clicks.
+        sides_claimed = sum(1 for k in ("BLUE", "RED")
+                            if k in ((snap or {}).get("sides") or {}))
+        sw_w, sw_h = 44, 38
+        sw_x = you_x - sw_w - 8
+        sw_y = you_y
+        can_swap = sides_claimed >= 1   # always lets you flip; server-side
+                                        # handles the swap-vs-take logic
+        sw_border = (lol_theme.LOL["gold"] if can_swap
+                     else lol_theme.LOL["gold_dk"])
+        sw_text_col = (lol_theme.LOL["gold_lt"] if can_swap
+                       else lol_theme.LOL["txt_dim"])
+        lol_theme.draw_navy_panel(
+            dl, sw_x, sw_y, sw_x + sw_w, sw_y + sw_h,
+            fill=lol_theme._alpha(lol_theme.LOL["navy_panel"], 220),
+            border_color=sw_border,
+            border_thickness=2 if can_swap else 1, rounding=4)
+        _txt(dl, sw_x + 14, sw_y + 8, "⇄",
+             (*sw_text_col[:3], 240 if can_swap else 130),
+             22, "raj_sb_22")
+        if can_swap:
+            opp_side = "RED" if my_side_str == "BLUE" else "BLUE"
+            _board_hits.append((sw_x, sw_y, sw_w, sw_h, "swap_side", opp_side))
 
     slots_map = (snap or {}).get("slots") or {}
     specs = (snap or {}).get("spectators") or []
@@ -3977,6 +4023,17 @@ def _lobby_handle_input(vw, vh):
                     # without waiting for an opponent.
                     _enter_solo_briefing()
                     return
+                if kind == "swap_side":
+                    # v3.0.2: click ⇄ to flip sides with the other player.
+                    # Server-side `set_side` handles the swap atomically:
+                    # if the target side is occupied, the two users trade
+                    # places (no SPEC limbo). Both ready flags clear so
+                    # they re-confirm.
+                    try:
+                        _sync_ui.send_set_side(payload)
+                    except Exception:
+                        pass
+                    return
 
     if not is_host:
         return   # spectators / players don't get to drag the host's pool
@@ -4284,6 +4341,16 @@ def draw_draft(dl, vw, vh, fonts=None):
         return
 
     if phase == DraftPhase.TEAM_BUILD:
+        # v3.0.2 fix: in a synced LOBBY the team-builder UI needs to be
+        # the server-authoritative one (_draw_sync_lobby + _lobby_handle_input),
+        # not the solo _tb-state one. The solo builder only broadcasts side
+        # toggles, so drag-drop changes never reached the other client and
+        # the rosters appeared to "reset" on READY because they were never
+        # mirrored into draft.board.players in the first place.
+        if _sync_ui.in_lobby():
+            _draw_sync_lobby(dl, vw, vh)
+            _lobby_handle_input(vw, vh)
+            return
         _draw_team_builder_full(dl, vw, vh)
         _tb_handle_input(vw, vh)
         return

@@ -50,6 +50,13 @@ from data.draft_board import ROLES as _BOARD_ROLES
 _last_rev_seen: int = -1
 _last_players_sig: Optional[tuple] = None
 _join_callback = None
+# v3.0.2 bugfix: `_on_state_snapshot` was firing the join callback on every
+# server broadcast, not just the first one — so any server-side state update
+# (the other client typing, a side flip, a roster edit) would re-run
+# `_lobby_begin_synced` and throw the local user back into TEAM_BUILD even
+# after they'd hit CANCEL. This flag gates the callback to fire exactly once
+# per `auto_connect()` session.
+_join_callback_fired: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -75,9 +82,10 @@ def auto_connect(name: Optional[str] = None) -> None:
         cfg["display_name"] = name
         save_config(cfg)
 
-    global _last_rev_seen, _last_players_sig
+    global _last_rev_seen, _last_players_sig, _join_callback_fired
     _last_rev_seen = -1
     _last_players_sig = None
+    _join_callback_fired = False        # arm the one-shot for this session
 
     draft_sync.connect(
         url=url,
@@ -88,12 +96,20 @@ def auto_connect(name: Optional[str] = None) -> None:
 
 
 def _on_state_snapshot(_snap: Dict[str, Any]) -> None:
-    """First snapshot from the server fires the registered join callback."""
-    if _join_callback is not None:
-        try:
-            _join_callback()
-        except Exception:
-            pass
+    """First snapshot from the server fires the registered join callback.
+    Subsequent snapshots are picked up by `sync_tick` each frame — they do
+    NOT re-fire the callback, otherwise CANCEL → IDLE would get yanked
+    back to TEAM_BUILD on the next server broadcast."""
+    global _join_callback_fired
+    if _join_callback_fired:
+        return
+    if _join_callback is None:
+        return
+    _join_callback_fired = True
+    try:
+        _join_callback()
+    except Exception:
+        pass
 
 
 def _on_error(msg: str) -> None:
@@ -401,9 +417,10 @@ def disconnect_if_active() -> None:
         draft_sync.disconnect()
     except Exception:
         pass
-    global _last_rev_seen, _last_players_sig
+    global _last_rev_seen, _last_players_sig, _join_callback_fired
     _last_rev_seen = -1
     _last_players_sig = None
+    _join_callback_fired = False        # re-arm for the next auto_connect()
 
 
 def connection_status() -> str:

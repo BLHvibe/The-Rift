@@ -545,9 +545,14 @@ async def ws_endpoint(ws: WebSocket, _anything: str = "global") -> None:
                     if new_side != "SPEC":
                         other = ROOM.side_claimed_by(new_side)
                         if other is not None and other != cid:
-                            # Swap: take their side, push them to SPEC. Both
-                            # parties' ready flags get cleared so they re-confirm.
-                            ROOM.clients[other].side = "SPEC"
+                            # True swap: the other player takes MY current
+                            # side instead of getting punted to SPEC. Both
+                            # ready flags clear so they re-confirm.
+                            other_client = ROOM.clients[other]
+                            old_side = client.side
+                            other_client.side = old_side
+                            if old_side in SIDES:
+                                ROOM.ready[old_side] = False
                             ROOM.ready[new_side] = False
                     # If leaving a side, also clear that side's ready flag.
                     if client.side != "SPEC" and client.side != new_side:
