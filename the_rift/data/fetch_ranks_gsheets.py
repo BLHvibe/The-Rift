@@ -769,7 +769,11 @@ def write_scouting_sheet(spreadsheet, player_name, rank_str, lp, analysis, ranki
     except gspread.exceptions.WorksheetNotFound:
         pass
 
-    ws = sheets_retry(spreadsheet.add_worksheet, sheet_name, rows=120, cols=12)
+    # Phase 2: provision 14 columns (A:N) so the chronological win/loss
+    # "Results" string at column M lands inside the worksheet bounds. Older
+    # sheets created with cols=12 silently truncated column M, leaving the
+    # engine's ranked-recency boost dataless.
+    ws = sheets_retry(spreadsheet.add_worksheet, sheet_name, rows=120, cols=14)
 
     DARK = {"red": 0.11, "green": 0.11, "blue": 0.18}
     HEADER = {"red": 0.09, "green": 0.14, "blue": 0.28}
