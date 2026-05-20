@@ -1359,6 +1359,14 @@ def recommend_bans(
 
     seen: Dict[str, Dict[str, Any]] = {}
     for p in opposing_players:
+        # v3.0.4: skip enemy players who have already locked a pick. Their
+        # remaining champion pool is irrelevant — they can't make another
+        # pick this draft, so banning to deny them is wasted. Filtering
+        # at the player level (vs. just at the candidate-champion level
+        # via `used_champs`) also avoids surfacing OTHER champions from
+        # the locked player's pool that aren't real threats.
+        if p.get("locked_champ"):
+            continue
         pname = p.get("name", "")
         rank_weight = max(0.5, min(2.0, parse_float(p.get("final_score",
                                                            p.get("score", 50))) / 50.0))

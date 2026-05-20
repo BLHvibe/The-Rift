@@ -351,6 +351,7 @@ class DraftState:
         self.scout_total        = 0     # total players to fetch (for progress bar)
         self.scout_kicked       = False # already started the prefetch
         self.scout_ready_sent   = False # already sent set_scout_ready(True)
+        self.scout_started_at   = 0.0   # monotonic ts when SCOUTING phase entered (for timeout)
         self.briefing_started_at = 0.0  # monotonic ts when BRIEFING phase entered
         self.briefing_done_sent  = False # already sent set_briefing_done(True)
         self.briefing_data       = None # cached {our_comp, enemy_comp, key_bans}
@@ -1965,6 +1966,7 @@ def _maybe_start_scout_prefetch() -> None:
         return                        # rosters not yet mirrored
     draft.scout_kicked = True
     draft.scout_total = len(names)
+    draft.scout_started_at = time.monotonic()
     # Pre-mark anything already cached (we may have prefetched in TEAM_BUILD).
     try:
         for n in names:
@@ -1978,27 +1980,56 @@ def _maybe_start_scout_prefetch() -> None:
         # enough; the read-side just polls each frame.
         draft.scout_progress[name] = 1 if ok else 0
 
+    def _on_done(_results):
+        # v3.0.4: prefetch_scout_sheets skips names that are already in-flight
+        # from a previous call — for those, on_progress NEVER fires for this
+        # session. on_done is our backstop: when the bg thread finishes, any
+        # name still missing from scout_progress is treated as confirmed-
+        # failed (so the phase can advance). Names that DID land in
+        # live.scout_sheets are caught at read time by _maybe_send_scout_ready.
+        for n in names:
+            if n in (getattr(live, "scout_sheets", {}) or {}):
+                draft.scout_progress.setdefault(n, 1)
+            else:
+                draft.scout_progress.setdefault(n, 0)
+
     try:
-        prefetch_scout_sheets(names, on_progress=_on_progress)
+        prefetch_scout_sheets(names, on_progress=_on_progress, on_done=_on_done)
     except Exception:
         # Worst case: pretend we're done so the lobby doesn't get stuck.
         for n in names:
             draft.scout_progress[n] = 1
 
 
+# Safety net: if SCOUTING runs longer than this, advance regardless. Keeps a
+# hopelessly-broken fetch from blocking the lobby forever.
+_SCOUTING_TIMEOUT_S = 45.0
+
+
 def _maybe_send_scout_ready() -> None:
-    """When all 10 sheets have settled (succeeded OR confirmed-failed),
-    tell the server we're ready to advance. Sends at most once per
-    SCOUTING entry. v3.0.3: failures (v == 0) now count as "done" so a
-    player with no scout sheet doesn't block phase advance forever."""
-    if draft.scout_ready_sent:
+    """When all sheets have settled (success / confirmed-failed / inflight-
+    landed-in-scout_sheets), tell the server we're ready to advance.
+    Sends at most once per SCOUTING entry.
+
+    v3.0.4: also polls live.scout_sheets directly so names whose fetch was
+    skipped due to being in-flight from an earlier call still register as
+    settled when their scout sheet lands. 45-second hard timeout as a final
+    safety net.
+    """
+    if draft.scout_ready_sent or draft.scout_total <= 0:
         return
-    if draft.scout_total <= 0:
-        return
-    # Any entry in scout_progress means the callback fired for that name
-    # (success → 1, failure → 0); both are terminal states.
-    done = len(draft.scout_progress)
-    if done >= draft.scout_total:
+    names = _scout_player_names()
+    sheets = getattr(live, "scout_sheets", {}) or {}
+    # Any name in scout_sheets is success-settled (1). Anything already
+    # marked by the on_progress / on_done callbacks is settled too.
+    for n in names:
+        if n in sheets:
+            draft.scout_progress.setdefault(n, 1)
+    settled = sum(1 for n in names if n in draft.scout_progress)
+    timed_out = (draft.scout_started_at
+                 and (time.monotonic() - draft.scout_started_at
+                      >= _SCOUTING_TIMEOUT_S))
+    if settled >= draft.scout_total or timed_out:
         draft.scout_ready_sent = True
         try:
             _sync_ui.send_set_scout_ready(True)
@@ -4027,9 +4058,11 @@ def _lobby_handle_input(vw, vh):
                     _sync_ui.send_start_draft()
                     return
                 if kind == "exit":
+                    # v3.0.4: full reset on EXIT so re-entering BEGIN
+                    # DRAFT lands in a clean state.
                     _sync_ui.disconnect_if_active()
                     _lobby_reset_pool()
-                    draft.phase = DraftPhase.IDLE
+                    draft.reset()
                     return
                 if kind == "go_solo":
                     # Phase 5 solo fallback: disconnect from the synced
@@ -4206,9 +4239,15 @@ def _board_handle_input(vw, vh):
             if kind == "start_draft":
                 _sync_ui.send_start_draft()
             elif kind == "exit":
+                # v3.0.4: full state wipe on EXIT so a subsequent BEGIN
+                # DRAFT starts clean (no stale board, no carried-over
+                # archetype pending, no half-fetched scout sheets, etc.).
+                # Without this, the next session would inherit the old
+                # board.picks / board.bans and the engine would still
+                # think those champions are locked.
                 _sync_ui.disconnect_if_active()
                 _lobby_reset_pool()
-                draft.phase = DraftPhase.IDLE
+                draft.reset()
             elif kind == "undo":
                 # Synced: host-only on the server side; route and let mirror
                 # update the board on broadcast.
@@ -4220,12 +4259,11 @@ def _board_handle_input(vw, vh):
                     draft.board_pool_search = ""
                     _board_recompute()
             elif kind == "new":
+                # v3.0.4: same full reset as EXIT — DONE-screen NEW DRAFT
+                # should be indistinguishable from a fresh launch.
                 _sync_ui.disconnect_if_active()
-                draft.board = None
-                draft.board_rec = None
-                draft.board_pool_scroll = 0
-                draft.board_pool_search = ""
-                draft.phase = DraftPhase.IDLE
+                _lobby_reset_pool()
+                draft.reset()
             elif kind == "clear_search":
                 draft.board_pool_search = ""
                 draft.board_pool_scroll = 0
