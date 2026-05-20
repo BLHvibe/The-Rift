@@ -3,9 +3,23 @@
 # Run from the_rift/ directory:
 #   pyinstaller the_rift.spec --noconfirm
 
+import importlib
 import os
 
 HERE = os.path.dirname(os.path.abspath(SPEC))
+
+
+def _maybe(name):
+    """Include the module name iff it's importable in the build env.
+    Lets us mark `pygame` as an optional bundle — when it isn't installed
+    (e.g. on Python versions without a prebuilt wheel), PyInstaller skips
+    it and `ui/audio.py` degrades to silent no-ops at runtime."""
+    try:
+        importlib.import_module(name)
+        return [name]
+    except Exception:
+        return []
+
 
 a = Analysis(
     [os.path.join(HERE, 'main.py')],
@@ -44,7 +58,6 @@ a = Analysis(
         'data.inhouse_tracker',
         'data.draft_engine',
         'data.draft_board',
-        'data.draft_lcu',
         'data.champion_icons',
         'data.splash_art',
         'data.patch_ticker',
@@ -66,8 +79,15 @@ a = Analysis(
         'ui.feed',
         'ui.sidebar',
         'ui.effects',
-        'ui.cyber',
+        'ui.lol_theme',
+        'ui.audio',
         'ui.board_rail',
+        # Draft Tool v3 — pygame.mixer cue wrapper (ui/audio.py).
+        # Optional: when pygame isn't installed (no prebuilt wheel for the
+        # current Python), the audio module silently no-ops at runtime.
+        # WAVs sit in assets/sounds/ which is bundled via `datas` above.
+        *_maybe('pygame'),
+        *_maybe('pygame.mixer'),
     ],
     hookspath=[],
     hooksconfig={},

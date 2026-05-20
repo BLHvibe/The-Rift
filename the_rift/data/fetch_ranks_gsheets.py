@@ -640,7 +640,17 @@ def fetch_scouting_matches(puuid, routing, region, api_key, count=100):
 
 
 def analyze_player(matches):
-    """Full statistical analysis of a player's match history."""
+    """Full statistical analysis of a player's match history.
+
+    Phase 2 rewrite: preserves per-champion chronological win/loss `results`
+    list (last ~100 ranked+draft games, oldest→newest) so the draft engine's
+    `recency_weighted_wr` can weight recent ranked form alongside customs.
+
+    `matches` arrives from `fetch_scouting_matches` in NEWEST-FIRST order
+    (that's how Riot's match-IDs endpoint returns them). We append in iter
+    order then reverse when emitting so the persisted `results` is oldest→
+    newest, matching the customs `results` convention.
+    """
     if not matches:
         return None
     total = len(matches)
@@ -648,7 +658,9 @@ def analyze_player(matches):
 
     champ_stats = defaultdict(lambda: {
         "games": 0, "wins": 0, "kills": 0, "deaths": 0,
-        "assists": 0, "cs_min": 0, "damage": 0, "gold": 0})
+        "assists": 0, "cs_min": 0, "damage": 0, "gold": 0,
+        "results": [],   # newest-first during iteration; reversed at emit
+    })
     for m in matches:
         c = champ_stats[m["champion"]]
         c["games"] += 1
@@ -659,6 +671,7 @@ def analyze_player(matches):
         c["cs_min"] += m["cs_min"]
         c["damage"] += m["damage"]
         c["gold"] += m["gold"]
+        c["results"].append(1 if m["win"] else 0)
 
     champ_list = []
     for name, s in champ_stats.items():
@@ -673,6 +686,10 @@ def analyze_player(matches):
             "avg_cs_min": round(s["cs_min"] / g, 1),
             "avg_damage": round(s["damage"] / g),
             "avg_gold": round(s["gold"] / g),
+            # Phase 2: chronological win/loss list, oldest→newest, capped at
+            # ~100 ranked+draft games. The engine reads this from the scout
+            # sheet (column M) via reader._parse_scouting_sheet.
+            "results": list(reversed(s["results"])),
         })
     champ_list.sort(key=lambda x: x["games"], reverse=True)
 
@@ -903,9 +920,15 @@ def write_scouting_sheet(spreadsheet, player_name, rank_str, lp, analysis, ranki
         "textFormat": {"bold": True, "fontSize": 14, "foregroundColor": GOLD_TEXT},
         "horizontalAlignment": "CENTER"}))
 
+    # Phase 2: header now includes a 13th column "Results" at M containing
+    # the chronological win/loss list (oldest→newest, comma-separated). The
+    # `pad` lambda pads to 12; a 13-element list is returned unchanged, so M
+    # sits outside the A:L styled range as plain text. Reader parses M into
+    # the engine's `results` field; older sheets without column M fall back
+    # to empty `results` and the engine uses aggregate WR as today.
     rows.append(pad(["Champion", "Games", "Wins", "Losses", "Win Rate",
                      "KDA", "Avg Kills", "Avg Deaths", "Avg Assists",
-                     "CS/min", "Avg Damage", "Avg Gold"]))
+                     "CS/min", "Avg Damage", "Avg Gold", "Results"]))
     fmts.append((f"A{rn()}:L{rn()}", {
         "backgroundColor": HEADER,
         "textFormat": {"bold": True, "fontSize": 10, "foregroundColor": WHITE},
@@ -913,10 +936,11 @@ def write_scouting_sheet(spreadsheet, player_name, rank_str, lp, analysis, ranki
 
     for i, c in enumerate(a["champ_list"]):
         bg_c = L_BLUE if i % 2 == 0 else {"red": 1, "green": 1, "blue": 1}
+        results_str = ",".join(str(r) for r in (c.get("results") or []))
         rows.append(pad([c["name"], c["games"], c["wins"], c["losses"],
                          f"{c['wr']}%", c["kda"], c["avg_kills"], c["avg_deaths"],
                          c["avg_assists"], c["avg_cs_min"], f"{c['avg_damage']:,}",
-                         f"{c['avg_gold']:,}"]))
+                         f"{c['avg_gold']:,}", results_str]))
         fmts.append((f"A{rn()}", {"backgroundColor": bg_c,
                                    "textFormat": {"bold": True, "fontSize": 11}}))
         fmts.append((f"B{rn()}:L{rn()}", {"backgroundColor": bg_c,

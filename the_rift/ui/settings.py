@@ -63,21 +63,22 @@ _pfp_det = {
 class SettingsState:
     def __init__(self):
         cfg = load_config()
-        self.api_key    = cfg.get("api_key",    "")
-        self.sheet_url  = cfg.get("sheet_url",  "")
-        self.region     = cfg.get("region",     "na1")
-        self.routing    = cfg.get("routing",    "americas")
-        self.creds_path = cfg.get("creds_path", "credentials.json")
-        self.calm_mode  = bool(cfg.get("calm_mode", False))
+        self.api_key       = cfg.get("api_key",    "")
+        self.sheet_url     = cfg.get("sheet_url",  "")
+        self.region        = cfg.get("region",     "na1")
+        self.routing       = cfg.get("routing",    "americas")
+        self.creds_path    = cfg.get("creds_path", "credentials.json")
+        # Phase 5 — Draft Board UI cues (pygame.mixer wrapper). Mute toggle.
+        self.audio_enabled = bool(cfg.get("audio_enabled", True))
 
     def save(self):
         cfg = load_config()
-        cfg["api_key"]    = self.api_key
-        cfg["sheet_url"]  = self.sheet_url
-        cfg["region"]     = self.region
-        cfg["routing"]    = self.routing
-        cfg["creds_path"] = self.creds_path
-        cfg["calm_mode"]  = self.calm_mode
+        cfg["api_key"]       = self.api_key
+        cfg["sheet_url"]     = self.sheet_url
+        cfg["region"]        = self.region
+        cfg["routing"]       = self.routing
+        cfg["creds_path"]    = self.creds_path
+        cfg["audio_enabled"] = self.audio_enabled
         save_config(cfg)
 
 settings = SettingsState()
@@ -251,17 +252,17 @@ def _build_settings_window(sb_w, vw, vh):
         _section_label("DRAFT BOARD")
         with dpg.group():
             dpg.add_text(
-                "CALM MODE — freeze the cyberpunk ambient motion on the Draft "
-                "Board (scanlines, grid drift, breathing glow, flicker, "
-                "marching borders). Pick/lock animations still play.",
+                "AUDIO — six short UI cues fire as the draft progresses: pick "
+                "lock, ban, your-turn chime, archetype stinger, pivot alert, "
+                "and a draft-complete flourish. Uncheck to mute.",
                 color=C["txt_dim"][:3], wrap=560)
             dpg.add_spacer(height=8)
-            cm = dpg.add_checkbox(tag="set_calm_mode",
-                                  label="  Enable CALM MODE",
-                                  default_value=settings.calm_mode,
-                                  callback=_apply_calm_mode)
+            am = dpg.add_checkbox(tag="set_audio_enabled",
+                                  label="  Enable audio cues",
+                                  default_value=settings.audio_enabled,
+                                  callback=_apply_audio_enabled)
             if "raj_sb_14" in _F:
-                dpg.bind_item_font(cm, _F["raj_sb_14"])
+                dpg.bind_item_font(am, _F["raj_sb_14"])
 
         dpg.add_spacer(height=28)
         dpg.add_separator()
@@ -318,14 +319,15 @@ def _test_connection():
     test_sheets_connection(on_done=_done, on_error=_err)
 
 
-def _apply_calm_mode():
-    """CALM MODE toggled — persist and apply to the live Draft Board now."""
-    calm = bool(dpg.get_value("set_calm_mode")) if dpg.does_item_exist("set_calm_mode") else False
-    settings.calm_mode = calm
+def _apply_audio_enabled():
+    """Audio toggle changed — persist and apply to the live audio module."""
+    enabled = (bool(dpg.get_value("set_audio_enabled"))
+               if dpg.does_item_exist("set_audio_enabled") else True)
+    settings.audio_enabled = enabled
     settings.save()
     try:
-        from ui import cyber
-        cyber.set_motion(not calm)
+        from ui import audio as _audio
+        _audio.set_enabled(enabled)
     except Exception:
         pass
 
@@ -336,8 +338,8 @@ def _save_settings():
     settings.region     = dpg.get_value("set_region")
     settings.routing    = dpg.get_value("set_routing")
     settings.creds_path = dpg.get_value("set_creds_path")
-    if dpg.does_item_exist("set_calm_mode"):
-        settings.calm_mode = bool(dpg.get_value("set_calm_mode"))
+    if dpg.does_item_exist("set_audio_enabled"):
+        settings.audio_enabled = bool(dpg.get_value("set_audio_enabled"))
     try:
         settings.save()
         dpg.configure_item("set_save_status", default_value="✓  Settings saved.")

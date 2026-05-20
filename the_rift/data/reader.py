@@ -71,6 +71,12 @@ class LiveData:
             cname = c.get("name") or c.get("champ")
             if not cname:
                 continue
+            # Phase 2: chronological per-champion win/loss list now lives in
+            # column M of the scout sheet. If present (sheet regenerated since
+            # the rewrite), the engine recency-weights ranked WR. Older sheets
+            # fall back to results=None and the engine uses aggregate WR only.
+            raw_results = c.get("results")
+            results = raw_results if (isinstance(raw_results, list) and raw_results) else None
             out.append({
                 "champ":   cname,
                 "games":   c.get("games", 0),
@@ -82,9 +88,7 @@ class LiveData:
                 "deaths":  c.get("deaths", 0),
                 "assists": c.get("assists", 0),
                 "damage":  c.get("damage", ""),
-                # No per-game chronology in the scout sheet — recency-weight WR
-                # falls back to all-time posterior for these.
-                "results": None,
+                "results": results,
                 "roles":   {},
             })
         return out
@@ -1503,6 +1507,12 @@ def _parse_scouting_sheet(values):
             i += 1; continue
 
         # ── Full champion pool ────────────────────────────────────────────
+        # Phase 2: column M (index 12) holds the chronological win/loss
+        # `Results` string (e.g. "1,0,1,1,0,..." oldest→newest, capped at
+        # ~100 ranked+draft games). Parsed into `results: [1,0,1,...]` so
+        # the engine's recency_weighted_wr can weight recent ranked form.
+        # Older sheets without column M fall back to results=[] gracefully —
+        # the engine then uses aggregate WR only on the scout-pool path.
         if cell == "FULL CHAMPION POOL":
             i += 1
             if i < len(values) and _cell(values[i], 0) == "Champion":
@@ -1512,6 +1522,13 @@ def _parse_scouting_sheet(values):
                 c0 = _cell(r, 0)
                 if not c0 or _is_section(c0):
                     break
+                raw_results = _cell(r, 12)
+                results_list: list = []
+                if raw_results:
+                    for tok in str(raw_results).split(","):
+                        tok = tok.strip()
+                        if tok in ("0", "1"):
+                            results_list.append(int(tok))
                 result["champ_pool"].append({
                     "name":    c0,
                     "games":   _cell(r, 1), "wins":    _cell(r, 2),
@@ -1520,6 +1537,7 @@ def _parse_scouting_sheet(values):
                     "deaths":  _cell(r, 7), "assists": _cell(r, 8),
                     "cs_min":  _cell(r, 9), "damage":  _cell(r,10),
                     "gold":    _cell(r,11),
+                    "results": results_list,
                 })
                 i += 1
             continue

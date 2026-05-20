@@ -20,22 +20,19 @@ _DEFAULTS = {
     "routing":   "americas",
     "players":   [],
     "last_run":  {},
-    # Draft Board v2.7 — when True, CALM MODE freezes ambient cyberpunk motion
-    # (scanlines, grid drift, breathing pulses, flicker, marching dashes).
-    # State-change animations (typewriter, slide-in, ripple) are unaffected.
-    "calm_mode": False,
-    # Draft Board v2.8 — Synced multiplayer draft session config. The URL is the
-    # FastAPI websocket server (see ../../server/). The other fields are the last
-    # values the user submitted in the Join Room dialog, kept so a re-join is
-    # one click.
+    # Draft Tool Rewrite (Phase 5) — when False, mutes pygame.mixer cues
+    # (pick lock, ban, your-turn, archetype stinger, pivot alert, draft end).
+    "audio_enabled": True,
+    # Display name shown on the synced draft lobby & in chat. Auto-populated
+    # from the player's first connect; user-editable in Settings.
+    "display_name": "",
+    # Draft Tool Rewrite (Phase 1) — Synced multiplayer draft session config.
+    # `url` is the Fly.io-hosted FastAPI websocket server (see ../../server/).
+    # No room codes, no passwords — single global room. Pairing is automatic:
+    # first BEGIN DRAFT click claims BLUE, second claims RED, others SPEC.
+    # Sides swap freely in the lobby until both READY.
     "sync": {
-        # ngrok-tunneled draft-sync server. The tunnel forwards to the local
-        # FastAPI server (`server/main.py`) running on the host PC. ngrok
-        # transparently upgrades the HTTPS path to WebSocket for /ws/<room>.
-        "url": "wss://wife-reason-unseeing.ngrok-free.dev",
-        "last_room": "",
-        "last_name": "",
-        "last_slot": "spectator",
+        "url": "wss://the-rift-draft-sync.fly.dev",
     },
 }
 
@@ -90,6 +87,26 @@ def load_config():
             changed = True
         if changed:
             save_config(cfg)
+
+    # v3 migration — drop stale `sync` config left over from v2.x (ngrok URL,
+    # room codes, slot assignments). The v3 protocol is a single global room
+    # on Fly.io with auto-side-assignment, so any of those legacy fields
+    # blocks the connection.
+    sync_cfg = cfg.get("sync") or {}
+    needs_sync_migration = False
+    cur_url = (sync_cfg.get("url") or "").lower()
+    if (("ngrok" in cur_url)
+            or ("the-rift-draft.fly.dev" in cur_url and "-sync" not in cur_url)
+            or not cur_url):
+        sync_cfg["url"] = _DEFAULTS["sync"]["url"]
+        needs_sync_migration = True
+    for stale_key in ("last_room", "last_name", "last_slot"):
+        if stale_key in sync_cfg:
+            del sync_cfg[stale_key]
+            needs_sync_migration = True
+    if needs_sync_migration:
+        cfg["sync"] = sync_cfg
+        save_config(cfg)
     return cfg
 
 def save_config(cfg):

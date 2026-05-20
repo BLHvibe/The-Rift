@@ -659,6 +659,15 @@ def main():
     _load_all_textures()
     setup_theme()
     _FONTS = setup_fonts()
+    # Phase 5 — bring the pygame.mixer cue wrapper up and gate it on the
+    # saved audio_enabled flag. Init is best-effort; no audio device or
+    # missing files don't break startup.
+    try:
+        from ui import audio as _audio
+        from data.config import load_config as _load_cfg
+        _audio.set_enabled(bool(_load_cfg().get("audio_enabled", True)))
+    except Exception:
+        pass
     # Bind Rajdhani as the application-default font so ALL widgets — including
     # add_text/add_button/add_input_text calls that never had an explicit
     # bind_item_font — render in our theme typeface instead of DPG's pixelated

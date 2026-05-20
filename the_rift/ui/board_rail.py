@@ -9,13 +9,12 @@ win-probability gauge happens only when the board actually changes, not per
 frame.
 
 Text is drawn through a `txt` callback (pass ui.draft._txt) so this module
-needs no font registry and stays import-cycle free. Shapes use ui.cyber.
+needs no font registry and stays import-cycle free. Shapes use ui.lol_theme.
 """
 import math
 import time
 import dearpygui.dearpygui as dpg
-from theme import C
-from ui import cyber
+from ui import lol_theme
 
 try:
     from data import draft_engine as _eng
@@ -89,26 +88,28 @@ def _refresh_engine(b, inhouse, primary, scout=None):
 # Small drawing helpers
 # ---------------------------------------------------------------------------
 def _panel(dl, x, y, w, h, title, txt, accent=None):
-    """Corner-cut rail panel with a bracketed mono title. Returns the inner
-    content top-y."""
-    accent = accent or C["cy"][:3]
-    cyber.draw_cut_rect(dl, x, y, x + w, y + h, cut=9,
-                        fill=(*C["panel_dk"][:3], 225),
-                        color=(*C["cy_dk"][:3], 200), thickness=1)
-    cyber.draw_bracket_label(dl, x + 10, y + 7, title,
-                             (*accent, 235), 12, txt, font_key="mono_12",
-                             bracket_color=(*accent, 200), char_w=0.6)
+    """Rounded rail panel with a gold title. Returns the inner content top-y."""
+    accent = accent or lol_theme.LOL["gold_lt"][:3]
+    lol_theme.draw_navy_panel(
+        dl, x, y, x + w, y + h,
+        fill=lol_theme._alpha(lol_theme.LOL["navy_deep"], 225),
+        border_color=lol_theme.LOL["gold_rule"],
+        border_thickness=1, rounding=6)
+    txt(dl, x + 10, y + 7, title, (*accent, 235), 12, "raj_sb_12")
     return y + 28
 
 
 def _bar(dl, x, y, w, h, frac, col, bg=None):
     frac = max(0.0, min(1.0, frac))
     if bg is None:
-        bg = (*C["bg"][:3], 150)
-    cyber.draw_cut_rect(dl, x, y, x + w, y + h, cut=3, fill=bg, color=None)
+        bg = lol_theme._alpha(lol_theme.LOL["navy_deep"], 150)
+    dpg.draw_rectangle((x, y), (x + w, y + h),
+                       fill=bg, color=(0, 0, 0, 0),
+                       rounding=2, parent=dl)
     if frac > 0:
-        cyber.draw_cut_rect(dl, x, y, x + max(2, int(w * frac)), y + h,
-                            cut=3, fill=(*col[:3], 230), color=None)
+        dpg.draw_rectangle((x, y), (x + max(2, int(w * frac)), y + h),
+                           fill=(*col[:3], 230), color=(0, 0, 0, 0),
+                           rounding=2, parent=dl)
 
 
 def _poly(cx, cy, r, n, rot=-math.pi / 2):
@@ -126,17 +127,21 @@ def _w_winprob(dl, x, y, w, h, b, txt):
     bar_h = 22
     bx, bw = x + 12, w - 24
     split = int(bw * wp)
-    cyber.draw_cut_rect(dl, bx, bar_y, bx + split, bar_y + bar_h, cut=4,
-                        fill=(*C["cy"][:3], 230), color=None)
-    cyber.draw_cut_rect(dl, bx + split, bar_y, bx + bw, bar_y + bar_h, cut=4,
-                        fill=(*C["mg"][:3], 230), color=None)
-    cyber.draw_cut_rect(dl, bx, bar_y, bx + bw, bar_y + bar_h, cut=4,
-                        fill=None, color=(*C["cy_dk"][:3], 200), thickness=1)
+    dpg.draw_rectangle((bx, bar_y), (bx + split, bar_y + bar_h),
+                       fill=(*lol_theme.LOL["blue_side"][:3], 230),
+                       color=(0, 0, 0, 0), rounding=3, parent=dl)
+    dpg.draw_rectangle((bx + split, bar_y), (bx + bw, bar_y + bar_h),
+                       fill=(*lol_theme.LOL["red_side"][:3], 230),
+                       color=(0, 0, 0, 0), rounding=3, parent=dl)
+    dpg.draw_rectangle((bx, bar_y), (bx + bw, bar_y + bar_h),
+                       fill=(0, 0, 0, 0),
+                       color=lol_theme._alpha(lol_theme.LOL["gold_rule"], 200),
+                       thickness=1, rounding=3, parent=dl)
     txt(dl, bx, bar_y + bar_h + 6, f"BLUE {wp*100:4.1f}%",
-        (*C["cy_lt"][:3], 240), 13, "mono_12")
+        (*lol_theme.LOL["blue_side"][:3], 240), 13, "raj_sb_12")
     rs = f"{(1-wp)*100:4.1f}% RED"
     txt(dl, bx + bw - len(rs) * 8, bar_y + bar_h + 6, rs,
-        (*C["mg_lt"][:3], 240), 13, "mono_12")
+        (*lol_theme.LOL["red_side"][:3], 240), 13, "raj_sb_12")
     # Sparkline of recent samples
     hist = _cache["history"][-16:]
     sp_y = bar_y + bar_h + 28
@@ -148,25 +153,26 @@ def _w_winprob(dl, x, y, w, h, b, txt):
                for i in range(n)]
         for i in range(n - 1):
             dpg.draw_line(pts[i], pts[i + 1],
-                          color=(*C["cy_lt"][:3], 200), thickness=2,
-                          parent=dl)
+                          color=(*lol_theme.LOL["gold_lt"][:3], 200),
+                          thickness=2, parent=dl)
         dpg.draw_line((bx, sp_y + sp_h * 0.5),
                       (bx + bw, sp_y + sp_h * 0.5),
-                      color=(*C["cy_dk"][:3], 110), thickness=1, parent=dl)
+                      color=(*lol_theme.LOL["gold_rule"][:3], 130),
+                      thickness=1, parent=dl)
 
 
 # ---------------------------------------------------------------------------
 # § 3 #3 — recommendation explanation (score-breakdown bars)
 # ---------------------------------------------------------------------------
-# (factor key, label, bar color) — the real per-suggestion "why".
+# (factor key, label, bar color key in lol_theme.LOL) — the real per-suggestion "why".
 _WHY_ROWS = (
-    ("comfort",    "COMFORT",  "cy_lt"),
-    ("counter",    "COUNTER",  "term_g"),
-    ("lane",       "LANE",     "term_g"),
-    ("contested",  "CONTEST",  "amb"),
-    ("blind_safe", "SAFE",     "cy"),
-    ("flex",       "FLEX",     "cy"),
-    ("steer",      "FIT",      "cy"),
+    ("comfort",    "COMFORT",  "gold_lt"),
+    ("counter",    "COUNTER",  "win"),
+    ("lane",       "LANE",     "win"),
+    ("contested",  "CONTEST",  "warning"),
+    ("blind_safe", "SAFE",     "blue_side"),
+    ("flex",       "FLEX",     "blue_side"),
+    ("steer",      "FIT",      "blue_side"),
 )
 
 
@@ -182,19 +188,21 @@ def _w_breakdown(dl, x, y, w, h, rec, txt):
         f = {}
     if not f:
         # bans (and any pre-action state) have no per-pick factor breakdown
-        msg = ("ban phase - see ban reason"
+        msg = ("ban phase — see ban reason"
                if (rec.get("kind") == "ban") else "no suggestion yet")
-        txt(dl, x + 12, cy0 + 8, msg, (*C["txt_dim"][:3], 200), 12, "mono_12")
+        txt(dl, x + 12, cy0 + 8, msg,
+            (*lol_theme.LOL["txt_dim"][:3], 210), 12, "raj_sb_12")
         return
     if champ:
-        txt(dl, x + 12, cy0, champ[:16], (*C["cy_lt"][:3], 235),
-            13, "mono_12")
+        txt(dl, x + 12, cy0, champ[:16],
+            (*lol_theme.LOL["gold_lt"][:3], 235), 13, "raj_sb_12")
         cy0 += 18
     avail = (y + h) - cy0 - 6
     rh = max(13, min(19, avail // len(_WHY_ROWS)))
     ry = cy0 + 2
     lab_w = 64
-    for key, lbl, col in _WHY_ROWS:
+    for key, lbl, col_key in _WHY_ROWS:
+        col = lol_theme.LOL[col_key]
         try:
             v = max(0.0, min(1.0, float(f.get(key, 0.0))))
         except (TypeError, ValueError):
@@ -202,30 +210,37 @@ def _w_breakdown(dl, x, y, w, h, rec, txt):
         # LANE: 0.5 == even lane; show deviation from even both ways.
         if key == "lane":
             cmid = x + 12 + lab_w + (w - 24 - lab_w - 34) // 2
-            txt(dl, x + 12, ry, lbl, (*C[col][:3], 215), 11, "mono_11")
+            txt(dl, x + 12, ry, lbl, (*col[:3], 215), 11, "raj_sb_11")
             half = (w - 24 - lab_w - 34) // 2
             adv = v - 0.5
             bx = x + 12 + lab_w
-            cyber.draw_cut_rect(dl, bx, ry + 1, bx + half * 2, ry + rh - 5,
-                                cut=3, fill=(*C["bg"][:3], 150), color=None)
+            dpg.draw_rectangle((bx, ry + 1), (bx + half * 2, ry + rh - 5),
+                               fill=lol_theme._alpha(
+                                   lol_theme.LOL["navy_deep"], 150),
+                               color=(0, 0, 0, 0),
+                               rounding=2, parent=dl)
             if adv >= 0:
-                cyber.draw_cut_rect(dl, cmid, ry + 1,
-                                    cmid + int(half * adv * 2), ry + rh - 5,
-                                    cut=3, fill=(*C["term_g"][:3], 230),
-                                    color=None)
+                dpg.draw_rectangle((cmid, ry + 1),
+                                   (cmid + int(half * adv * 2), ry + rh - 5),
+                                   fill=(*lol_theme.LOL["win"][:3], 230),
+                                   color=(0, 0, 0, 0),
+                                   rounding=2, parent=dl)
             else:
-                cyber.draw_cut_rect(dl, cmid + int(half * adv * 2), ry + 1,
-                                    cmid, ry + rh - 5, cut=3,
-                                    fill=(*C["mg_lt"][:3], 230), color=None)
+                dpg.draw_rectangle((cmid + int(half * adv * 2), ry + 1),
+                                   (cmid, ry + rh - 5),
+                                   fill=(*lol_theme.LOL["red_side"][:3], 230),
+                                   color=(0, 0, 0, 0),
+                                   rounding=2, parent=dl)
             dpg.draw_line((cmid, ry), (cmid, ry + rh - 4),
-                          color=(*C["txt2"][:3], 200), thickness=1, parent=dl)
+                          color=(*lol_theme.LOL["txt_dim"][:3], 200),
+                          thickness=1, parent=dl)
         else:
-            txt(dl, x + 12, ry, lbl, (*C[col][:3], 215), 11, "mono_11")
+            txt(dl, x + 12, ry, lbl, (*col[:3], 215), 11, "raj_sb_11")
             _bar(dl, x + 12 + lab_w, ry + 1, w - 24 - lab_w - 34, rh - 6,
-                 v, C[col])
+                 v, col)
         vs = f"{v:.2f}"
         txt(dl, x + w - 12 - len(vs) * 7, ry, vs,
-            (*C["txt"][:3], 220), 11, "mono_11")
+            (*lol_theme.LOL["txt"][:3], 220), 11, "raj_sb_11")
         ry += rh
 
 
@@ -242,8 +257,10 @@ _AXIS_ABBR = {
 def _w_radar(dl, x, y, w, h, b, txt):
     cy0 = _panel(dl, x, y, w, h, "TEAM STRENGTH", txt)
     # Legend in the panel header row
-    txt(dl, x + w - 98, y + 7, "BLUE", (*C["cy_lt"][:3], 235), 11, "mono_11")
-    txt(dl, x + w - 50, y + 7, "RED", (*C["mg_lt"][:3], 235), 11, "mono_11")
+    txt(dl, x + w - 98, y + 7, "BLUE",
+        (*lol_theme.LOL["blue_side"][:3], 235), 11, "raj_sb_11")
+    txt(dl, x + w - 50, y + 7, "RED",
+        (*lol_theme.LOL["red_side"][:3], 235), 11, "raj_sb_11")
     if _eng is None or not hasattr(_eng, "_team_vector"):
         return
     axes = list(getattr(_eng, "_AXES", ()))
@@ -264,19 +281,22 @@ def _w_radar(dl, x, y, w, h, b, txt):
     amax = {ax: max(1.0, bv.get(ax, 0.0), rv.get(ax, 0.0)) for ax in axes}
     for ring in (0.5, 1.0):
         dpg.draw_polygon(_poly(cx, ccy, r * ring, n), fill=(0, 0, 0, 0),
-                         color=(*C["cy_dk"][:3], 130), thickness=1,
-                         parent=dl)
+                         color=(*lol_theme.LOL["gold_rule"][:3], 130),
+                         thickness=1, parent=dl)
     for i, ax in enumerate(axes):
         ang = -math.pi / 2 + i * 2 * math.pi / n
         ex, ey = cx + r * math.cos(ang), ccy + r * math.sin(ang)
         dpg.draw_line((cx, ccy), (ex, ey),
-                      color=(*C["cy_dk"][:3], 90), thickness=1, parent=dl)
+                      color=(*lol_theme.LOL["gold_rule"][:3], 90),
+                      thickness=1, parent=dl)
         lab = _AXIS_ABBR.get(ax, ax[:5].upper())
         lx = cx + (r + 13) * math.cos(ang) - len(lab) * 3
         ly = ccy + (r + 13) * math.sin(ang) - 6
         lx = max(x + 4, min(x + w - len(lab) * 6 - 4, lx))
-        txt(dl, lx, ly, lab, (*C["txt2"][:3], 215), 10, "mono_11")
-    for vec, col in ((bv, C["cy_lt"]), (rv, C["mg_lt"])):
+        txt(dl, lx, ly, lab,
+            (*lol_theme.LOL["txt_dim"][:3], 215), 10, "raj_sb_11")
+    for vec, col in ((bv, lol_theme.LOL["blue_side"]),
+                     (rv, lol_theme.LOL["red_side"])):
         pts = []
         for i, ax in enumerate(axes):
             f = max(0.05, vec.get(ax, 0.0) / amax[ax])
@@ -312,14 +332,15 @@ def _w_coverage(dl, x, y, w, h, b, txt):
         a0 = -math.pi / 2 + i * 2 * math.pi / seg
         a1 = -math.pi / 2 + (i + 1) * 2 * math.pi / seg
         on = (i / seg) < frac
-        col = C["term_g"][:3] if on else C["cy_dk"][:3]
+        col = (lol_theme.LOL["win"][:3] if on
+               else lol_theme.LOL["gold_rule"][:3])
         dpg.draw_line((cx + r * math.cos(a0), ccy + r * math.sin(a0)),
                       (cx + r * math.cos(a1), ccy + r * math.sin(a1)),
                       color=(*col, 235 if on else 150), thickness=6,
                       parent=dl)
     ps = f"{int(round(frac*100))}%"
     txt(dl, cx - len(ps) * 6, ccy - 10, ps,
-        (*C["term_g"][:3], 245), 18, "mono_18")
+        (*lol_theme.LOL["win"][:3], 245), 18, "raj_sb_18")
 
 
 # ---------------------------------------------------------------------------
@@ -345,26 +366,31 @@ def _w_damage(dl, x, y, w, h, b, txt):
     by = cy0 + 8
     bh = 22
     if tot <= 0:
-        cyber.draw_cut_rect(dl, bx, by, bx + bw, by + bh, cut=4,
-                            fill=(*C["bg"][:3], 150), color=None)
+        dpg.draw_rectangle((bx, by), (bx + bw, by + bh),
+                           fill=lol_theme._alpha(lol_theme.LOL["navy_deep"], 150),
+                           color=(0, 0, 0, 0), rounding=3, parent=dl)
         txt(dl, bx + 6, by + 3, "no picks yet",
-            (*C["txt_dim"][:3], 200), 12, "mono_12")
+            (*lol_theme.LOL["txt_dim"][:3], 200), 12, "raj_sb_12")
         return
-    segs = ((ap, C["mg_lt"], "AP"), (ad, C["amb"], "AD"),
-            (tr, C["scan_gy"], "TR"))
+    # AP = magenta-ish, AD = amber, TRUE = light gray
+    segs = ((ap, (180, 130, 220, 255), "AP"),
+            (ad, lol_theme.LOL["warning"], "AD"),
+            (tr, (200, 200, 210, 255), "TR"))
     cxp = bx
     for val, col, lbl in segs:
         sw = int(bw * (val / tot))
         if sw <= 0:
             continue
-        cyber.draw_cut_rect(dl, cxp, by, cxp + sw, by + bh, cut=3,
-                            fill=(*col[:3], 230), color=None)
+        dpg.draw_rectangle((cxp, by), (cxp + sw, by + bh),
+                           fill=(*col[:3], 230), color=(0, 0, 0, 0),
+                           rounding=2, parent=dl)
         if sw > 26:
-            txt(dl, cxp + 5, by + 3, lbl, (*C["bg"][:3], 235), 12, "mono_12")
+            txt(dl, cxp + 5, by + 3, lbl,
+                (*lol_theme.LOL["navy_deep"][:3], 235), 12, "raj_sb_12")
         cxp += sw
     txt(dl, bx, by + bh + 8,
         f"AP {int(ap)}  AD {int(ad)}  TRUE {int(tr)}",
-        (*C["txt"][:3], 220), 12, "mono_12")
+        (*lol_theme.LOL["txt"][:3], 220), 12, "raj_sb_12")
 
 
 # ---------------------------------------------------------------------------
@@ -391,15 +417,17 @@ def _w_contested(dl, x, y, w, h, b, rec, txt):
     for ch, st in rows:
         if ry + 20 > y + h - 4:
             break
-        scol = (C["mg"][:3] if st == "BANNED" else
-                C["amb"][:3] if st == "PICKED" else C["term_g"][:3])
-        txt(dl, x + 12, ry, ch[:12], (*C["txt"][:3], 230), 13, "raj_sb_14")
+        scol = (lol_theme.LOL["red_side"][:3] if st == "BANNED" else
+                lol_theme.LOL["warning"][:3] if st == "PICKED"
+                else lol_theme.LOL["win"][:3])
+        txt(dl, x + 12, ry, ch[:12],
+            (*lol_theme.LOL["txt"][:3], 230), 13, "raj_sb_14")
         txt(dl, x + w - 12 - len(st) * 8, ry, st,
-            (*scol, 230), 11, "mono_11")
+            (*scol, 230), 11, "raj_sb_11")
         ry += 21
     if not rows:
         txt(dl, x + 12, cy0 + 8, "no contested picks",
-            (*C["txt_dim"][:3], 200), 12, "mono_12")
+            (*lol_theme.LOL["txt_dim"][:3], 200), 12, "raj_sb_12")
 
 
 # ---------------------------------------------------------------------------
@@ -410,7 +438,7 @@ def _w_synergy(dl, x, y, w, h, b, txt):
     picks = [c for c in b.locked_picks(b.our_side) if c]
     if _eng is None or len(picks) < 2:
         txt(dl, x + 12, cy0 + 8, "need 2+ picks",
-            (*C["txt_dim"][:3], 200), 12, "mono_12")
+            (*lol_theme.LOL["txt_dim"][:3], 200), 12, "raj_sb_12")
         return
     syn = getattr(_eng, "SYNERGIES", {}) or {}
     anti = getattr(_eng, "ANTI_SYNERGIES", {}) or {}
@@ -431,21 +459,21 @@ def _w_synergy(dl, x, y, w, h, b, txt):
             an = anti.get((a, c), anti.get((c, a), 0.0))
             if s:
                 dpg.draw_line(node[i], node[j],
-                              color=(*C["term_g"][:3],
+                              color=(*lol_theme.LOL["win"][:3],
                                      min(235, 90 + int(s * 320))),
                               thickness=max(1, min(5, 1 + s * 8)),
                               parent=dl)
             elif an:
                 dpg.draw_line(node[i], node[j],
-                              color=(*C["mg_lt"][:3], 200),
+                              color=(*lol_theme.LOL["red_side"][:3], 200),
                               thickness=2, parent=dl)
     for i, (nx, ny_) in enumerate(node):
         dpg.draw_polygon(_poly(nx, ny_, 11, 6),
-                         fill=(*C["cy_dk"][:3], 230),
-                         color=(*C["cy_lt"][:3], 235), thickness=2,
-                         parent=dl)
+                         fill=lol_theme._alpha(lol_theme.LOL["gold_dk"], 230),
+                         color=(*lol_theme.LOL["gold"][:3], 235),
+                         thickness=2, parent=dl)
         txt(dl, nx - 10, ny_ - 7, picks[i][:3].upper(),
-            (*C["cy_lt"][:3], 240), 11, "mono_11")
+            (*lol_theme.LOL["gold_lt"][:3], 240), 11, "raj_sb_11")
 
 
 # ---------------------------------------------------------------------------
@@ -475,15 +503,17 @@ def _w_predictor(dl, x, y, w, h, b, txt):
     ry = cy0 + 6
     if not rows:
         txt(dl, x + 12, ry, "enemy threats covered",
-            (*C["term_g"][:3], 215), 12, "mono_12")
+            (*lol_theme.LOL["win"][:3], 215), 12, "raj_sb_12")
         return
     for e, ans in rows:
         if ry + 20 > y + h - 4:
             break
-        txt(dl, x + 12, ry, e[:8], (*C["mg_lt"][:3], 230), 13, "raj_sb_14")
-        txt(dl, x + 12 + 76, ry, "→", (*C["txt2"][:3], 210), 13, "mono_12")
+        txt(dl, x + 12, ry, e[:8],
+            (*lol_theme.LOL["red_side"][:3], 230), 13, "raj_sb_14")
+        txt(dl, x + 12 + 76, ry, "→",
+            (*lol_theme.LOL["txt_dim"][:3], 210), 13, "raj_sb_12")
         txt(dl, x + 12 + 98, ry, ans[:9],
-            (*C["term_g"][:3], 235), 13, "raj_sb_14")
+            (*lol_theme.LOL["win"][:3], 235), 13, "raj_sb_14")
         ry += 22
 
 
@@ -515,9 +545,11 @@ def draw_rail(dl, x, y, w, h, b, rec, txt, inhouse, primary, scout=None):
         try:
             fn(dl, x, cur, w, ph, *args, txt)
         except Exception:
-            cyber.draw_cut_rect(dl, x, cur, x + w, cur + ph, cut=9,
-                                fill=(*C["panel_dk"][:3], 220),
-                                color=(*C["mg_dk"][:3], 180), thickness=1)
+            lol_theme.draw_navy_panel(
+                dl, x, cur, x + w, cur + ph,
+                fill=lol_theme._alpha(lol_theme.LOL["navy_deep"], 220),
+                border_color=lol_theme.LOL["red_side_dk"],
+                border_thickness=1, rounding=6)
         cur += ph + gap
 
 
@@ -525,9 +557,11 @@ def draw_rail(dl, x, y, w, h, b, rec, txt, inhouse, primary, scout=None):
 # § 3 #12 — draft narrative log (bottom terminal strip)
 # ---------------------------------------------------------------------------
 def draw_narrative(dl, x, y, w, h, b, txt):
-    cyber.draw_cut_rect(dl, x, y, x + w, y + h, cut=6,
-                        fill=(*C["panel_dk"][:3], 225),
-                        color=(*C["cy_dk"][:3], 190), thickness=1)
+    lol_theme.draw_navy_panel(
+        dl, x, y, x + w, y + h,
+        fill=lol_theme._alpha(lol_theme.LOL["navy_deep"], 225),
+        border_color=lol_theme.LOL["gold_rule"],
+        border_thickness=1, rounding=4)
     parts = []
     try:
         for hentry in list(b._history)[-7:]:
@@ -537,8 +571,8 @@ def draw_narrative(dl, x, y, w, h, b, txt):
     except Exception:
         parts = []
     line = "  ·  ".join(parts) if parts else "draft start — awaiting first action"
-    txt(dl, x + 12, y + (h - 16) // 2, ("> " + line)[:max(8, (w - 24) // 8)],
-        (*C["term_g"][:3], 225), 13, "mono_12")
+    txt(dl, x + 12, y + (h - 16) // 2, ("› " + line)[:max(8, (w - 24) // 8)],
+        (*lol_theme.LOL["gold_lt"][:3], 225), 13, "raj_sb_12")
 
 
 # ---------------------------------------------------------------------------
@@ -552,13 +586,16 @@ def draw_action_queue(dl, x, y, w, b, txt, seq):
     except Exception:
         nxt = []
     cxp = x
-    txt(dl, cxp, y, "QUEUE", (*C["cy"][:3], 200), 12, "mono_12")
+    txt(dl, cxp, y, "QUEUE",
+        (*lol_theme.LOL["gold_rule"][:3], 220), 12, "raj_sb_12")
     cxp += 56
     for a in nxt:
-        col = C["cy_lt"][:3] if a.side == "BLUE" else C["mg_lt"][:3]
+        col = (lol_theme.LOL["blue_side"][:3] if a.side == "BLUE"
+               else lol_theme.LOL["red_side"][:3])
         lbl = f"{'B' if a.side=='BLUE' else 'R'}-{a.kind[:4].upper()}"
         cw = len(lbl) * 8 + 14
-        cyber.draw_cut_rect(dl, cxp, y - 3, cxp + cw, y + 17, cut=4,
-                            fill=(*col, 36), color=(*col, 170), thickness=1)
-        txt(dl, cxp + 7, y, lbl, (*col, 235), 12, "mono_12")
+        dpg.draw_rectangle((cxp, y - 3), (cxp + cw, y + 17),
+                           fill=(*col, 36), color=(*col, 170),
+                           thickness=1, rounding=3, parent=dl)
+        txt(dl, cxp + 7, y, lbl, (*col, 235), 12, "raj_sb_12")
         cxp += cw + 6

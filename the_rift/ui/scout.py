@@ -466,7 +466,13 @@ def _rw_role_breakdown(r):
 
 
 def _rw_full_champ_pool(r):
-    """Full champion pool — proper fixed-width table columns."""
+    """Full champion pool — proper fixed-width table columns.
+
+    Phase 2: a RECENT column renders the last 10 ranked/draft games per champ
+    as colored dots (gold = win, dim red = loss). Driven by the chronology
+    list added to scout sheets in this rewrite. Sheets that pre-date the
+    chronology emit (`results` empty) render an em-dash in the RECENT column.
+    """
     pool = r.get("champ_pool_full", [])
     if not pool:
         _rw_top_champs(r)
@@ -475,9 +481,9 @@ def _rw_full_champ_pool(r):
     _rw_label("CHAMPION POOL")
     dpg.add_spacer(height=4)
 
-    # Fixed-width columns: CHAMPION | G | W-L | W/R | KDA | DMG
-    hdrs   = ["CHAMPION",  "G",   "W-L",  "W/R",  "KDA",  "DMG"]
-    widths = [140,          44,    68,     60,     60,     80]
+    # Fixed-width columns: CHAMPION | G | W-L | W/R | KDA | DMG | RECENT
+    hdrs   = ["CHAMPION",  "G",   "W-L",  "W/R",  "KDA",  "DMG",  "RECENT"]
+    widths = [140,          44,    68,     60,     60,     80,     108]
     row_h  = len(pool) * 22 + 36
     with dpg.child_window(height=min(280, row_h),
                           border=True, no_scroll_with_mouse=False):
@@ -498,6 +504,7 @@ def _rw_full_champ_pool(r):
                 wl  = f"{ch.get('wins','')}–{ch.get('losses','')}"
                 vals = [ch.get("name",""), str(ch.get("games","")), wl,
                         f"{wr_str}%", str(ch.get("kda","")), str(ch.get("damage",""))]
+                results = ch.get("results") or []
                 with dpg.table_row():
                     for i2, v in enumerate(vals):
                         col = C["gold_lt"][:3] if i2 == 0 \
@@ -505,6 +512,20 @@ def _rw_full_champ_pool(r):
                             else C["txt"][:3]
                         t = dpg.add_text(str(v)[:16], color=col)
                         if "raj_r_16" in _F: dpg.bind_item_font(t, _F["raj_r_16"])
+                    # RECENT column: last 10 results as dots, oldest→newest
+                    # (left→right). Em-dash placeholder when chronology is
+                    # absent (legacy scout sheets).
+                    if results:
+                        with dpg.group(horizontal=True):
+                            for win in results[-10:]:
+                                dot_col = C["win"][:3] if win else C["loss"][:3]
+                                dt = dpg.add_text("●", color=dot_col)
+                                if "raj_r_16" in _F:
+                                    dpg.bind_item_font(dt, _F["raj_r_16"])
+                    else:
+                        dt = dpg.add_text("—", color=C["txt_dim"][:3])
+                        if "raj_r_16" in _F:
+                            dpg.bind_item_font(dt, _F["raj_r_16"])
     dpg.add_spacer(height=8)
     dpg.add_separator()
 

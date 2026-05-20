@@ -28,22 +28,15 @@ C = {
     "flash":       (13,  27,  42, 255),
 
     # -----------------------------------------------------------------------
-    # Cyberpunk command-deck accents (v2.7 Draft Board revamp).
-    # Gold above is demoted to "ceremonial" use (mastheads / non-board tabs).
-    # Cyan = blue side, magenta = red side, on the Draft Board.
+    # LoL client palette (Draft Tool rewrite, Phase 3+).
+    # Used by ui/lol_theme.py for the new draft-tool surface. The rest of the
+    # app keeps using the original gold/platinum keys above — this is purely
+    # additive so non-draft surfaces don't change at all.
     # -----------------------------------------------------------------------
-    "cy_lt":       (120, 230, 255, 255),   # electric cyan — hi-light edges, blue-side accent
-    "cy":          (60,  195, 235, 255),   # cyan body — chip fills, dividers, gridlines
-    "cy_dk":       (20,   90, 130, 255),   # cyan shadow / dim borders
-    "mg_lt":       (255, 110, 220, 255),   # hot magenta — DANGER / opponent callouts
-    "mg":          (220,  70, 175, 255),   # magenta body — red-side accent
-    "mg_dk":       (110,  30,  90, 255),   # magenta shadow / dim borders
-    "amb":         (255, 175,  60, 255),   # hot amber — warning / decision required
-    "term_g":      (80,  255, 160, 255),   # terminal green — OK / SAFE / NOMINAL
-    "alert_r":     (255,  65,  80, 255),   # alert red — hard error / contested ban
-    "scan_gy":     (180, 200, 220, 255),   # scanline tint (drawn at very low alpha)
-    "panel_dk":    (8,    12,  22, 255),   # deeper panel background
-    "grid_a":      (40,   80, 110, 255),   # grid-cell line color (cool dim)
+    "navy_deep":   (10,  20,  40,  255),   # #0a1428 — deepest background
+    "navy_mid":    (12,  28,  55,  255),   # mid background panel
+    "gold_rule":   (120,  90,  40,  255),  # #785a28 — thin rules
+    "gold_lt2":    (205, 190, 145, 255),   # #cdbe91 — text highlight on splash
 }
 
 # Direction C — rank badge backgrounds

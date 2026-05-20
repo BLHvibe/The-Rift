@@ -279,71 +279,136 @@ def synergy_score(champs: Sequence[str]) -> float:
 # Your champ counters enemy. Strength in [0.1, 0.5].
 # ============================================================================
 
+# Phase 2 rewrite: values rescaled from the old 0.10-0.50 range to a wider
+# 0.30-0.90 range so hard counters dominate scoring at counter-pick slots.
+# Tiers:
+#   0.30-0.40   soft tilt (counters but doesn't decide lane on its own)
+#   0.45-0.55   solid counter (notable advantage)
+#   0.60-0.75   hard counter (you should pick this if the slot allows)
+#   0.80-0.90   devastating (perma-banned / unplayable matchup)
+#
+# Linear stretch used on legacy entries: new = 0.30 + (old - 0.10) * 1.5.
+# `counter_value` / `blind_safety` normalization in draft_board.py is bumped
+# in lockstep so `cv` and `bs` still land in 0..1.
 COUNTERS: Dict[Tuple[str, str], float] = {
-    # Anti-mobility / suppression / point-click vs Yasuo/Yone
-    ("Malzahar", "Yasuo"): 0.45, ("Malzahar", "Yone"): 0.40, ("Malzahar", "Kassadin"): 0.35,
-    ("Annie", "Yasuo"): 0.35, ("Annie", "Yone"): 0.30,
-    ("Pantheon", "Yasuo"): 0.30, ("Renekton", "Yasuo"): 0.30,
+    # Anti-mobility / suppression / point-click vs Yasuo/Yone/Kassadin
+    ("Malzahar", "Yasuo"): 0.85, ("Malzahar", "Yone"): 0.75, ("Malzahar", "Kassadin"): 0.70,
+    ("Annie", "Yasuo"): 0.70, ("Annie", "Yone"): 0.60,
+    ("Pantheon", "Yasuo"): 0.60, ("Renekton", "Yasuo"): 0.60,
     # Anti-assassin / shields / point-click CC
-    ("Galio", "Zed"): 0.30, ("Galio", "Akali"): 0.30, ("Galio", "LeBlanc"): 0.30,
-    ("Galio", "Diana"): 0.25, ("Galio", "Katarina"): 0.30,
-    ("Lissandra", "Zed"): 0.35, ("Lissandra", "Akali"): 0.30, ("Lissandra", "Yasuo"): 0.25,
-    ("Diana", "Zed"): 0.25, ("Diana", "Yasuo"): 0.25,
-    ("Kassadin", "Xerath"): 0.40, ("Kassadin", "Vel'Koz"): 0.40, ("Kassadin", "Lux"): 0.35,
-    ("Kassadin", "Anivia"): 0.30, ("Kassadin", "Cassiopeia"): 0.25,
+    ("Galio", "Zed"): 0.60, ("Galio", "Akali"): 0.60, ("Galio", "LeBlanc"): 0.60,
+    ("Galio", "Diana"): 0.55, ("Galio", "Katarina"): 0.60,
+    ("Lissandra", "Zed"): 0.70, ("Lissandra", "Akali"): 0.60, ("Lissandra", "Yasuo"): 0.55,
+    ("Diana", "Zed"): 0.55, ("Diana", "Yasuo"): 0.55,
+    ("Kassadin", "Xerath"): 0.75, ("Kassadin", "Vel'Koz"): 0.75, ("Kassadin", "Lux"): 0.70,
+    ("Kassadin", "Anivia"): 0.60, ("Kassadin", "Cassiopeia"): 0.55,
     # Anti-tank (true damage / %hp)
-    ("Vayne", "Cho'Gath"): 0.40, ("Vayne", "Skarner"): 0.30, ("Vayne", "Malphite"): 0.30,
-    ("Vayne", "Ornn"): 0.30, ("Vayne", "Sion"): 0.30,
-    ("Fiora", "Cho'Gath"): 0.45, ("Fiora", "Sion"): 0.40, ("Fiora", "Ornn"): 0.40,
-    ("Fiora", "Tahm Kench"): 0.30, ("Fiora", "Dr. Mundo"): 0.30,
-    ("Kayle", "Garen"): 0.25, ("Kayle", "Nasus"): 0.30,
-    ("Kog'Maw", "Cho'Gath"): 0.45, ("Kog'Maw", "Sion"): 0.40, ("Kog'Maw", "Malphite"): 0.35,
-    ("Olaf", "Vladimir"): 0.30, ("Olaf", "Fiora"): 0.30, ("Olaf", "Tryndamere"): 0.35,
-    ("Trundle", "Cho'Gath"): 0.40, ("Trundle", "Sion"): 0.40, ("Trundle", "Ornn"): 0.40,
+    ("Vayne", "Cho'Gath"): 0.75, ("Vayne", "Skarner"): 0.60, ("Vayne", "Malphite"): 0.60,
+    ("Vayne", "Ornn"): 0.60, ("Vayne", "Sion"): 0.60,
+    ("Fiora", "Cho'Gath"): 0.85, ("Fiora", "Sion"): 0.75, ("Fiora", "Ornn"): 0.75,
+    ("Fiora", "Tahm Kench"): 0.60, ("Fiora", "Dr. Mundo"): 0.60,
+    ("Kayle", "Garen"): 0.55, ("Kayle", "Nasus"): 0.60,
+    ("Kog'Maw", "Cho'Gath"): 0.85, ("Kog'Maw", "Sion"): 0.75, ("Kog'Maw", "Malphite"): 0.70,
+    ("Olaf", "Vladimir"): 0.60, ("Olaf", "Fiora"): 0.60, ("Olaf", "Tryndamere"): 0.70,
+    ("Trundle", "Cho'Gath"): 0.75, ("Trundle", "Sion"): 0.75, ("Trundle", "Ornn"): 0.75,
     # Anti-ranged top
-    ("Jax", "Quinn"): 0.30, ("Jax", "Teemo"): 0.30, ("Jax", "Jayce"): 0.25,
-    ("Jax", "Gnar"): 0.25, ("Jax", "Vayne"): 0.25, ("Jax", "Kennen"): 0.25,
-    ("Irelia", "Lux"): 0.25, ("Irelia", "Karma"): 0.25,
+    ("Jax", "Quinn"): 0.60, ("Jax", "Teemo"): 0.60, ("Jax", "Jayce"): 0.55,
+    ("Jax", "Gnar"): 0.55, ("Jax", "Vayne"): 0.55, ("Jax", "Kennen"): 0.55,
+    ("Irelia", "Lux"): 0.55, ("Irelia", "Karma"): 0.55,
     # Anti-juggernaut (kite + ranged)
-    ("Quinn", "Darius"): 0.40, ("Quinn", "Sett"): 0.35, ("Quinn", "Garen"): 0.40,
-    ("Quinn", "Aatrox"): 0.30, ("Quinn", "Mordekaiser"): 0.30,
-    ("Vayne", "Darius"): 0.35, ("Vayne", "Mordekaiser"): 0.30, ("Vayne", "Aatrox"): 0.25,
-    ("Gnar", "Darius"): 0.30, ("Gnar", "Aatrox"): 0.25, ("Gnar", "Sett"): 0.25,
-    ("Jayce", "Darius"): 0.30, ("Jayce", "Sett"): 0.25, ("Jayce", "Aatrox"): 0.25,
-    ("Teemo", "Darius"): 0.40, ("Teemo", "Garen"): 0.35,
+    ("Quinn", "Darius"): 0.75, ("Quinn", "Sett"): 0.70, ("Quinn", "Garen"): 0.75,
+    ("Quinn", "Aatrox"): 0.60, ("Quinn", "Mordekaiser"): 0.60,
+    ("Vayne", "Darius"): 0.70, ("Vayne", "Mordekaiser"): 0.60, ("Vayne", "Aatrox"): 0.55,
+    ("Gnar", "Darius"): 0.60, ("Gnar", "Aatrox"): 0.55, ("Gnar", "Sett"): 0.55,
+    ("Jayce", "Darius"): 0.60, ("Jayce", "Sett"): 0.55, ("Jayce", "Aatrox"): 0.55,
+    ("Teemo", "Darius"): 0.75, ("Teemo", "Garen"): 0.70,
     # Anti-immobile carry (assassins on backline)
-    ("Zed", "Karthus"): 0.35, ("Zed", "Veigar"): 0.30, ("Zed", "Annie"): 0.30,
-    ("Zed", "Xerath"): 0.30, ("Zed", "Anivia"): 0.30, ("Zed", "Orianna"): 0.25,
-    ("Talon", "Karthus"): 0.30, ("Talon", "Veigar"): 0.30, ("Talon", "Lux"): 0.30,
-    ("Kha'Zix", "Kog'Maw"): 0.35, ("Kha'Zix", "Jinx"): 0.25, ("Kha'Zix", "Karthus"): 0.30,
-    ("Rengar", "Kog'Maw"): 0.30, ("Rengar", "Jinx"): 0.25,
-    ("Akali", "Karthus"): 0.25, ("Akali", "Veigar"): 0.25,
+    ("Zed", "Karthus"): 0.70, ("Zed", "Veigar"): 0.60, ("Zed", "Annie"): 0.60,
+    ("Zed", "Xerath"): 0.60, ("Zed", "Anivia"): 0.60, ("Zed", "Orianna"): 0.55,
+    ("Talon", "Karthus"): 0.60, ("Talon", "Veigar"): 0.60, ("Talon", "Lux"): 0.60,
+    ("Kha'Zix", "Kog'Maw"): 0.70, ("Kha'Zix", "Jinx"): 0.55, ("Kha'Zix", "Karthus"): 0.60,
+    ("Rengar", "Kog'Maw"): 0.60, ("Rengar", "Jinx"): 0.55,
+    ("Akali", "Karthus"): 0.55, ("Akali", "Veigar"): 0.55,
     # Anti-AD lane bullies
-    ("Vladimir", "Darius"): 0.30, ("Vladimir", "Renekton"): 0.30, ("Vladimir", "Riven"): 0.25,
-    ("Cassiopeia", "Riven"): 0.25, ("Cassiopeia", "Yasuo"): 0.25,
+    ("Vladimir", "Darius"): 0.60, ("Vladimir", "Renekton"): 0.60, ("Vladimir", "Riven"): 0.55,
+    ("Cassiopeia", "Riven"): 0.55, ("Cassiopeia", "Yasuo"): 0.55,
     # Jungle counter-picks
-    ("Rammus", "Master Yi"): 0.45, ("Rammus", "Tryndamere"): 0.35, ("Rammus", "Yasuo"): 0.30,
-    ("Rammus", "Vayne"): 0.30, ("Rammus", "Jax"): 0.25,
-    ("Nocturne", "Karthus"): 0.30, ("Nocturne", "Anivia"): 0.25,
+    ("Rammus", "Master Yi"): 0.85, ("Rammus", "Tryndamere"): 0.70, ("Rammus", "Yasuo"): 0.60,
+    ("Rammus", "Vayne"): 0.60, ("Rammus", "Jax"): 0.55,
+    ("Nocturne", "Karthus"): 0.60, ("Nocturne", "Anivia"): 0.55,
     # Anti-engage / disengage
-    ("Janna", "Malphite"): 0.30, ("Janna", "Hecarim"): 0.25, ("Janna", "Alistar"): 0.25,
-    ("Anivia", "Sejuani"): 0.20, ("Anivia", "Hecarim"): 0.20,
-    ("Tahm Kench", "Zed"): 0.30, ("Tahm Kench", "Akali"): 0.25, ("Tahm Kench", "Kha'Zix"): 0.25,
+    ("Janna", "Malphite"): 0.60, ("Janna", "Hecarim"): 0.55, ("Janna", "Alistar"): 0.55,
+    ("Anivia", "Sejuani"): 0.45, ("Anivia", "Hecarim"): 0.45,
+    ("Tahm Kench", "Zed"): 0.60, ("Tahm Kench", "Akali"): 0.55, ("Tahm Kench", "Kha'Zix"): 0.55,
     # Anti-poke
-    ("Galio", "Xerath"): 0.35, ("Galio", "Vel'Koz"): 0.30, ("Galio", "Varus"): 0.25,
-    ("Sivir", "Xerath"): 0.25, ("Sivir", "Varus"): 0.25,
+    ("Galio", "Xerath"): 0.70, ("Galio", "Vel'Koz"): 0.60, ("Galio", "Varus"): 0.55,
+    ("Sivir", "Xerath"): 0.55, ("Sivir", "Varus"): 0.55,
     # ADC-on-ADC
-    ("Draven", "Kog'Maw"): 0.30, ("Draven", "Vayne"): 0.30, ("Draven", "Aphelios"): 0.25,
-    ("Caitlyn", "Vayne"): 0.30, ("Caitlyn", "Kalista"): 0.25,
-    ("Lucian", "Kog'Maw"): 0.25, ("Lucian", "Jinx"): 0.25,
+    ("Draven", "Kog'Maw"): 0.60, ("Draven", "Vayne"): 0.60, ("Draven", "Aphelios"): 0.55,
+    ("Caitlyn", "Vayne"): 0.60, ("Caitlyn", "Kalista"): 0.55,
+    ("Lucian", "Kog'Maw"): 0.55, ("Lucian", "Jinx"): 0.55,
     # Anti-hypercarry support
-    ("Pyke", "Soraka"): 0.30, ("Pyke", "Yuumi"): 0.25, ("Pyke", "Janna"): 0.20,
+    ("Pyke", "Soraka"): 0.60, ("Pyke", "Yuumi"): 0.55, ("Pyke", "Janna"): 0.45,
     # Wide-purpose
-    ("Mordekaiser", "Tryndamere"): 0.40, ("Mordekaiser", "Fiora"): 0.35,
-    ("Mordekaiser", "Vladimir"): 0.30,
-    ("Camille", "Vayne"): 0.25, ("Camille", "Kog'Maw"): 0.30, ("Camille", "Jinx"): 0.25,
-    ("Wukong", "Yasuo"): 0.25,
-    ("Garen", "Katarina"): 0.30, ("Garen", "Akali"): 0.25,
+    ("Mordekaiser", "Tryndamere"): 0.75, ("Mordekaiser", "Fiora"): 0.70,
+    ("Mordekaiser", "Vladimir"): 0.60,
+    ("Camille", "Vayne"): 0.55, ("Camille", "Kog'Maw"): 0.60, ("Camille", "Jinx"): 0.55,
+    ("Wukong", "Yasuo"): 0.55,
+    ("Garen", "Katarina"): 0.60, ("Garen", "Akali"): 0.55,
+
+    # ─── 2025/2026 meta additions (Phase 2 expansion) ──────────────────────
+    # Ambessa — bruiser with mobility + MR shred. Hard counters are ranged
+    # poke tops and CC that ignores her dash. Counters squishy duelists.
+    ("Quinn", "Ambessa"): 0.70, ("Vayne", "Ambessa"): 0.60, ("Teemo", "Ambessa"): 0.65,
+    ("Pantheon", "Ambessa"): 0.55, ("Renekton", "Ambessa"): 0.55,
+    ("Ambessa", "Yasuo"): 0.60, ("Ambessa", "Riven"): 0.55, ("Ambessa", "Fiora"): 0.55,
+    # Mel — reflects projectiles. Countered by point-click + bursty assassins
+    # without projectile primary. Counters skill-shot mages.
+    ("Annie", "Mel"): 0.65, ("Ahri", "Mel"): 0.55, ("Talon", "Mel"): 0.60,
+    ("Zed", "Mel"): 0.55, ("Fizz", "Mel"): 0.55,
+    ("Mel", "Karthus"): 0.65, ("Mel", "Lux"): 0.60, ("Mel", "Xerath"): 0.65,
+    ("Mel", "Vel'Koz"): 0.60,
+    # Aurora — kite mage with self-peel. Countered by gap-closers + early CC.
+    # Counters tanks (innate %hp damage), juggernauts that can't reach her.
+    ("Camille", "Aurora"): 0.60, ("Yone", "Aurora"): 0.55, ("Malphite", "Aurora"): 0.60,
+    ("Pantheon", "Aurora"): 0.55,
+    ("Aurora", "Cho'Gath"): 0.65, ("Aurora", "Sion"): 0.60, ("Aurora", "Ornn"): 0.55,
+    ("Aurora", "Darius"): 0.55,
+    # Hwei — heavy zone control mid. Countered by mobile assassins, counters
+    # the immobile mage class.
+    ("Akali", "Hwei"): 0.60, ("Sylas", "Hwei"): 0.55, ("LeBlanc", "Hwei"): 0.60,
+    ("Talon", "Hwei"): 0.55,
+    ("Hwei", "Karthus"): 0.60, ("Hwei", "Veigar"): 0.55,
+    # Smolder — late-game ADC. Countered by lane bullies. Counters most ADCs late.
+    ("Draven", "Smolder"): 0.65, ("Caitlyn", "Smolder"): 0.55, ("Lucian", "Smolder"): 0.60,
+    ("Smolder", "Vayne"): 0.55,
+    # K'Sante — disruptor tank. Countered by true damage + sustain bruisers.
+    ("Fiora", "K'Sante"): 0.70, ("Vayne", "K'Sante"): 0.60, ("Cassiopeia", "K'Sante"): 0.55,
+    ("K'Sante", "Yone"): 0.55, ("K'Sante", "Yasuo"): 0.60, ("K'Sante", "Riven"): 0.55,
+    # Briar — frenzy jungle bruiser. Countered by anti-heal / CC.
+    ("Rammus", "Briar"): 0.65, ("Trundle", "Briar"): 0.55, ("Tahm Kench", "Briar"): 0.55,
+    ("Olaf", "Briar"): 0.55,
+    # Naafiri — pack-of-dogs assassin. Countered by point-click CC, big AOE.
+    # Counters squishy single-target mages.
+    ("Galio", "Naafiri"): 0.60, ("Lissandra", "Naafiri"): 0.55, ("Annie", "Naafiri"): 0.55,
+    ("Naafiri", "Yasuo"): 0.55, ("Naafiri", "Zed"): 0.55, ("Naafiri", "Akali"): 0.55,
+    # Bel'Veth — late-scaling jungler that snowballs early. Countered by tanky
+    # jungles that can survive her tail-whip burst.
+    ("Vi", "Bel'Veth"): 0.55, ("Lee Sin", "Bel'Veth"): 0.55, ("Rammus", "Bel'Veth"): 0.60,
+    ("Bel'Veth", "Sett"): 0.55, ("Bel'Veth", "Aatrox"): 0.55, ("Bel'Veth", "Tryndamere"): 0.60,
+    # Sylas — ult-stealer. Counters teams with one big ult; countered by
+    # point-click burst.
+    ("Annie", "Sylas"): 0.55, ("Pantheon", "Sylas"): 0.55,
+    ("Sylas", "Galio"): 0.60, ("Sylas", "Karthus"): 0.60, ("Sylas", "Malphite"): 0.55,
+    # Renata Glasc — anti-engage support, reverses target on death.
+    ("Renata Glasc", "Yasuo"): 0.55, ("Renata Glasc", "Master Yi"): 0.55,
+    ("Pyke", "Renata Glasc"): 0.55, ("Blitzcrank", "Renata Glasc"): 0.55,
+    # Senna — scaling sup/bot, anti-heal innate. Countered by hard engage.
+    ("Senna", "Soraka"): 0.55, ("Senna", "Yuumi"): 0.60,
+    ("Pyke", "Senna"): 0.55, ("Blitzcrank", "Senna"): 0.55,
+    # Akshan — revive support ADC. Counters channel ults; countered by burst.
+    ("Akshan", "Karthus"): 0.65, ("Akshan", "Yasuo"): 0.55,
+    ("Ahri", "Akshan"): 0.55, ("Diana", "Akshan"): 0.55,
 }
 
 
@@ -388,7 +453,11 @@ def _champ_vector(champ: str) -> Dict[str, float]:
     return v
 
 
-# Each archetype: target identity vector (what the team should look like) + metadata.
+# Each archetype: target identity vector (what the team should look like) +
+# metadata. Phase 2: added `game_plan` (3-sentence concrete actions) and
+# `auto_pref` (slight tilt for archetypes the engine should prefer all else
+# equal — currently Teamfight gets +5% because front-to-back is the most
+# popular and reliable composition in modern competitive play).
 ARCHETYPES: Dict[str, Dict[str, Any]] = {
     "Teamfight": {
         "label": "Teamfight  (AoE + Engage)",
@@ -396,6 +465,12 @@ ARCHETYPES: Dict[str, Dict[str, Any]] = {
         "conflict_axes": {"mobility": 0.0},   # over-mobile = doesn't group
         "win_condition": "Group at 4 items, force 5v5 around objectives",
         "spike": "mid-game (3 items)",
+        "auto_pref": 1.05,
+        "game_plan": (
+            "Group 5 around Dragon/Baron at 3 items. Frontline absorbs engage "
+            "while your AoE casts a fight-winning ult. Avoid scattered fights "
+            "before the frontline is online — your win condition is the 5v5."
+        ),
     },
     "Pick": {
         "label": "Pick  (Catch + Burst)",
@@ -403,6 +478,12 @@ ARCHETYPES: Dict[str, Dict[str, Any]] = {
         "conflict_axes": {"scaling": 0.0},
         "win_condition": "Catch isolated targets, snowball mid-game off picks",
         "spike": "mid-game (level 11)",
+        "auto_pref": 1.00,
+        "game_plan": (
+            "Ward deep, then hunt isolated targets across the map. After every "
+            "pick, contest the next neutral objective 5v4. Don't engage 5v5 — "
+            "force the enemy to step alone."
+        ),
     },
     "Split Push": {
         "label": "Split Push  (1-3-1)",
@@ -410,6 +491,12 @@ ARCHETYPES: Dict[str, Dict[str, Any]] = {
         "conflict_axes": {"engage": 0.5},
         "win_condition": "Apply side-lane pressure, force 4v4 ± duelist",
         "spike": "mid-game with TP/teleport timings",
+        "auto_pref": 1.00,
+        "game_plan": (
+            "Send your duelist top, group 4 mid. Force the enemy to choose: "
+            "send 2 to stop your splitter (you win mid 4v3), or let them "
+            "siege (your duelist takes a tower). Track enemy TPs religiously."
+        ),
     },
     "Poke / Siege": {
         "label": "Poke / Siege  (Range + Zone)",
@@ -417,6 +504,12 @@ ARCHETYPES: Dict[str, Dict[str, Any]] = {
         "conflict_axes": {"engage": 0.0, "burst": 0.0},
         "win_condition": "Whittle HP at objectives, break tower before they engage",
         "spike": "mid-game with poke items (Manamune/Liandry)",
+        "auto_pref": 1.00,
+        "game_plan": (
+            "Stand at max range and poke before each objective takedown. "
+            "Once 2+ enemies are sub-50%, force tower / dragon. Never let "
+            "them flank you — vision deep, fall back if poke isn't connecting."
+        ),
     },
     "Protect the Carry": {
         "label": "Protect the Carry  (Shield/Peel)",
@@ -424,6 +517,12 @@ ARCHETYPES: Dict[str, Dict[str, Any]] = {
         "conflict_axes": {"burst": 0.0},
         "win_condition": "Survive to late, hypercarry wins 5v5 with peel",
         "spike": "late-game (4 items on carry)",
+        "auto_pref": 1.00,
+        "game_plan": (
+            "Farm safely until your carry hits 4 items. Every fight, the team "
+            "stacks on the carry — shields, peel, frontline soak. Never "
+            "split off; protect the win condition at all costs."
+        ),
     },
     "Dive": {
         "label": "Dive  (Hard Engage + Collapse)",
@@ -431,6 +530,12 @@ ARCHETYPES: Dict[str, Dict[str, Any]] = {
         "conflict_axes": {"scaling": 0.0, "range": 0.5},
         "win_condition": "Collapse on backline before they can position",
         "spike": "early-to-mid game (level 6-11)",
+        "auto_pref": 1.00,
+        "game_plan": (
+            "Press the early game hard — your spike is level 6-11. Force "
+            "fights before enemy carries hit 2 items. Engage tank flanks "
+            "behind enemy frontline, burst collapses on the squishies."
+        ),
     },
     "Scaling": {
         "label": "Scaling  (Late-game win)",
@@ -438,6 +543,12 @@ ARCHETYPES: Dict[str, Dict[str, Any]] = {
         "conflict_axes": {"engage": 0.5, "burst": 0.0},
         "win_condition": "Survive lane, scale to 4 items, win every 5v5 after 25min",
         "spike": "late-game (35+ min)",
+        "auto_pref": 1.00,
+        "game_plan": (
+            "Play safe in lane — losing 0/2/0 with CS is fine. Group only "
+            "when forced, give up early objectives if the trade is unfair. "
+            "After 25 minutes you out-stat every comp; force fights then."
+        ),
     },
 }
 
@@ -604,6 +715,8 @@ def champion_comfort(
     form: Optional[str] = None,
     inhouse: bool = False,
     results=None,
+    recency_half_life: float = 18.0,
+    recency_weight: float = 0.65,
 ) -> float:
     """
     Composite 0..1 comfort score for a player on a champion.
@@ -615,17 +728,25 @@ def champion_comfort(
       - Role match bonus
       - Form modifier (HOT/COLD)
       - Inhouse data weighting (own-team data > general ranked)
+      - Optional recency weighting (when `results` chronology is provided)
+
+    Phase 2: `recency_half_life` is parameterised so the scout-pool path can
+    use a slightly longer half-life (24 games) than customs (18 games),
+    reflecting ranked being a lower-stakes/slower-changing signal. The
+    `recency_weight` likewise lets the caller decide how dominant recent form
+    is — customs uses 0.65 (default), scout-pool callers pass ~0.55.
     """
     if games <= 0:
         return 0.0
     wr_post = shrink_wr_from_pct(wr_pct, games)
-    # Recency: when per-game customs results are available, let recent form
-    # dominate (shrunk by its own recency-weighted effective N) while the
-    # all-time posterior stays as an anchor.
-    rec_wr, eff_n = recency_weighted_wr(results) if results else (None, 0.0)
+    # Recency: when per-game results are available, let recent form dominate
+    # (shrunk by its own recency-weighted effective N) while the all-time
+    # posterior stays as an anchor.
+    rec_wr, eff_n = (recency_weighted_wr(results, half_life=recency_half_life)
+                     if results else (None, 0.0))
     if rec_wr is not None and eff_n > 0:
         rec_post = shrink_wr(rec_wr * eff_n, eff_n)
-        wr_eff = 0.65 * rec_post + 0.35 * wr_post
+        wr_eff = recency_weight * rec_post + (1.0 - recency_weight) * wr_post
     else:
         wr_eff = wr_post
     sample  = math.log(1.0 + games) / math.log(1.0 + 30.0)  # 0..~1 over 30 games
@@ -784,11 +905,155 @@ def scout_pool_champs(p: Dict[str, Any],
         g = parse_float(ch.get("games", 0))
         if g < min_games:
             continue
+        # Phase 2: pass scout-pool `results` chronology + ranked half-life.
         out[cname] = _SCOUT_CHAMPS_WEIGHT * champion_comfort(
             g, parse_wr(ch.get("wr", "50%")),
             parse_float(ch.get("kda"), 1.5), role_match=True,
-            form=p.get("form"), inhouse=False, results=None)
+            form=p.get("form"), inhouse=False,
+            results=ch.get("results"),
+            recency_half_life=24.0, recency_weight=0.55)
     return out
+
+
+# ============================================================================
+# Off-role + pool-depth + sample-size helpers (Phase 2)
+# ============================================================================
+
+def off_role_severity(
+    player: Dict[str, Any],
+    role: str,
+    inhouse_champs: Dict[str, List[Dict]],
+    primary_roles: Optional[Dict[str, str]] = None,
+    scout_champs: Optional[Dict[str, List[Dict]]] = None,
+) -> float:
+    """
+    0..1 score for how off-role a player is at the given assigned role.
+
+      0.00  on primary role (no penalty)
+      0.20  on primary, but has shown they can also play this role in customs
+      0.45  off-primary but has 2+ customs champs at the role / 8+ games
+      0.65  off-primary, has 1 customs champ at role or a deep ranked pool
+      0.90  off-primary with no real history at this role (severe)
+
+    Used to decay comfort scores so off-role recommendations don't beat
+    on-role demonstrated play. The UI consumes the same signal via
+    `pool_depth(...)` for the team-builder badge.
+    """
+    pname = player.get("name", "")
+    role_norm = ROLE_NORM.get(role, role)
+    primary = primary_roles.get(pname) if primary_roles else None
+    is_primary = bool(primary and primary == role_norm)
+
+    # Count customs champs played AT this role (using per-champ role breakdown).
+    customs_at_role = 0
+    customs_games_at_role = 0.0
+    for ch in (inhouse_champs.get(pname) or []):
+        ch_roles = ch.get("roles") or {}
+        if not isinstance(ch_roles, dict) or not ch_roles:
+            continue
+        g_at_role = parse_float(ch_roles.get(role_norm, 0))
+        if g_at_role >= 3:
+            customs_at_role += 1
+            customs_games_at_role += g_at_role
+
+    # Scout pool is across-role (no role breakdown) — use total breadth as a
+    # mild rescue signal: a player with a deep ranked pool isn't *quite* as
+    # off-role as someone with nothing.
+    scout_pool_size = 0
+    if scout_champs:
+        for ch in (scout_champs.get(pname) or []):
+            if parse_float(ch.get("games", 0)) >= 3:
+                scout_pool_size += 1
+
+    if is_primary:
+        return 0.0
+    # Off-primary tiers
+    if customs_at_role >= 3 and customs_games_at_role >= 15:
+        return 0.20
+    if customs_at_role >= 2 or customs_games_at_role >= 8:
+        return 0.45
+    if customs_at_role >= 1 or scout_pool_size >= 4:
+        return 0.65
+    return 0.90
+
+
+_OFF_ROLE_DECAY = 0.40   # multiplier impact: comfort *= (1 - _OFF_ROLE_DECAY * sev)
+
+
+def sample_confidence(games: float) -> str:
+    """Categorical sample-size confidence for the engine's `factors` dict.
+    The UI's sample-size badge consumes this directly.
+
+      "strong"  ≥30 games
+      "ok"      8-29 games
+      "thin"    <8 games
+    """
+    try:
+        g = float(games)
+    except (TypeError, ValueError):
+        g = 0.0
+    if g >= 30:
+        return "strong"
+    if g >= 8:
+        return "ok"
+    return "thin"
+
+
+def pool_depth(
+    player: Dict[str, Any],
+    role: str,
+    inhouse_champs: Dict[str, List[Dict]],
+    primary_roles: Optional[Dict[str, str]] = None,
+    scout_champs: Optional[Dict[str, List[Dict]]] = None,
+) -> str:
+    """
+    Categorical pool-depth label for the team-builder slot badge.
+
+      "DEEP"      6+ champs at this role between customs + scout-pool
+      "OK"        3-5 champs at this role
+      "SHALLOW"   1-2 champs at this role
+      "OFF-ROLE"  not the player's primary role AND <3 unique champs
+
+    Driven by the same customs role-breakdown the engine uses for comfort
+    scoring. Scout pool acts as a soft rescue (only matters when customs at
+    role is empty but the player has demonstrated ranked breadth).
+    """
+    pname = player.get("name", "")
+    role_norm = ROLE_NORM.get(role, role)
+    primary = primary_roles.get(pname) if primary_roles else None
+    is_primary = bool(primary and primary == role_norm)
+
+    champs_at_role: set = set()
+    for ch in (inhouse_champs.get(pname) or []):
+        cname = ch.get("champ")
+        if not cname:
+            continue
+        ch_roles = ch.get("roles") or {}
+        g_at_role = (parse_float(ch_roles.get(role_norm, 0))
+                     if isinstance(ch_roles, dict) and ch_roles else 0.0)
+        total_g = parse_float(ch.get("games", 0))
+        # Either has explicit role breakdown showing 3+ games, OR has no
+        # breakdown (legacy) but appears in customs with meaningful play —
+        # assume those are on-role (primary or assigned).
+        if g_at_role >= 3 or (not ch_roles and total_g >= 3 and is_primary):
+            champs_at_role.add(cname)
+
+    scout_breadth = 0
+    if scout_champs:
+        for ch in (scout_champs.get(pname) or []):
+            if parse_float(ch.get("games", 0)) >= 3:
+                scout_breadth += 1
+
+    n = len(champs_at_role)
+    if not is_primary and n < 3:
+        return "OFF-ROLE"
+    if n >= 6:
+        return "DEEP"
+    if n >= 3:
+        return "OK"
+    if n >= 1 or scout_breadth >= 5:
+        return "SHALLOW"
+    return "OFF-ROLE"
 
 
 def _player_candidates(
@@ -847,7 +1112,10 @@ def _player_candidates(
                                        inhouse=True, results=ch.get("results"))
 
     # Scout-sheet champion pool (ranked + draft). Per-champ games/wr/kda but
-    # pooled across roles, so role-match falls back to player primary.
+    # pooled across roles, so role-match falls back to player primary. Phase 2:
+    # `results` (chronological win/loss) now flows through from the scout
+    # sheet (column M) when present, so recency-weighted WR applies to recent
+    # ranked form too — not just customs.
     if scout_champs:
         for ch in (scout_champs.get(pname, []) or []):
             cname = ch.get("champ")
@@ -860,7 +1128,8 @@ def _player_candidates(
                 g, parse_wr(ch.get("wr", "50%")),
                 parse_float(ch.get("kda"), 1.5),
                 role_match=role_match, form=form,
-                inhouse=False, results=None)
+                inhouse=False, results=ch.get("results"),
+                recency_half_life=24.0, recency_weight=0.55)
             # Only add if it beats whatever we already have (customs wins ties).
             if score > seen.get(cname, 0.0):
                 seen[cname] = score
@@ -890,6 +1159,16 @@ def _player_candidates(
         for cname in sorted(valid):
             if cname not in seen and len(seen) < 6:
                 seen[cname] = 0.20
+
+    # Phase 2: off-role decay. A TOP main slotted JGL with 4 lifetime games
+    # there shouldn't have their tiny pool ranked alongside a JGL main's deep
+    # pool. Scales all candidate comforts down for off-role assignments;
+    # severity 0 leaves scores untouched, severity 1 cuts by 40%.
+    sev = off_role_severity(p, role, inhouse_champs, primary_roles, scout_champs)
+    if sev > 0.0:
+        decay = max(0.0, 1.0 - _OFF_ROLE_DECAY * sev)
+        if decay < 1.0:
+            seen = {c: s * decay for c, s in seen.items()}
 
     ranked = sorted(seen.items(), key=lambda kv: -kv[1])
     return ranked[:max_candidates]
@@ -1003,8 +1282,14 @@ def recommend_comps(
         comforts = beam["comforts"]
         s        = beam["score"]
 
-        # Viability buckets — anchored to total score
-        total = s["total"]
+        # Viability buckets — anchored to total score. Phase 2: apply the
+        # archetype's `auto_pref` multiplier so meta-favored compositions
+        # (currently Teamfight ×1.05) tilt slightly upward when all else is
+        # roughly equal. Manual archetype selection isn't affected — only
+        # the auto-recommendation order is.
+        raw_total = s["total"]
+        pref = float(arch_data.get("auto_pref", 1.0))
+        total = min(1.0, raw_total * pref)
         if   total >= 0.62: viab = "STRONG"
         elif total >= 0.48: viab = "VIABLE"
         elif total >= 0.32: viab = "WEAK"
@@ -1028,6 +1313,7 @@ def recommend_comps(
             "picks":       picks,
             "win_condition": arch_data.get("win_condition", ""),
             "spike":       arch_data.get("spike", ""),
+            "game_plan":   arch_data.get("game_plan", ""),
             "score_breakdown": {
                 "identity":  round(s["identity"], 2),
                 "synergy":   round(s["synergy"], 2),
@@ -1120,6 +1406,10 @@ def recommend_bans(
         # Scout-sheet champion pool (ranked + draft). Real per-champ games/wr/kda
         # — much stronger threat signal than the name-only top_champs fallback.
         # Discount slightly vs customs since pool is across-role and lower stakes.
+        # Phase 2: when the scout sheet provides per-game `results` chronology
+        # (column M, last ~100 ranked+draft games), blend recency-weighted WR
+        # into the threat so a hot streak on a champion bumps its threat above
+        # a lifetime-aggregate equivalent.
         for ch in (scout_champs.get(pname, []) or []):
             cname = ch.get("champ")
             if not cname:
@@ -1132,6 +1422,14 @@ def recommend_bans(
             wr   = parse_wr(ch.get("wr", "50%"))
             kda  = parse_float(ch.get("kda"), 1.5)
             wr_post = shrink_wr_from_pct(wr, g)
+            # Ranked recency: half-life 24 games (vs 18 for customs) reflects
+            # ranked being a lower-stakes signal that decays slower.
+            results = ch.get("results")
+            if results:
+                rec_wr, eff_n = recency_weighted_wr(results, half_life=24.0)
+                if rec_wr is not None and eff_n > 0:
+                    rec_post = shrink_wr(rec_wr * eff_n, eff_n)
+                    wr_post = 0.55 * rec_post + 0.45 * wr_post
             kda_factor = min(kda / 2.5, 1.6)
             ssz = math.log(1.0 + g) / math.log(11.0)
             ssz = min(ssz * 1.2, 1.4)
