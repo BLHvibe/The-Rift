@@ -258,6 +258,12 @@ class DraftSyncClient:
                 continue
 
             if t == "state":
+                # v3.0.3: refresh _you on every state broadcast so a side
+                # swap (or any presence-affecting change) takes effect
+                # without needing a fresh hello.
+                you = msg.get("you")
+                if isinstance(you, dict):
+                    self._you = you
                 self._apply_snapshot(msg)
                 continue
 

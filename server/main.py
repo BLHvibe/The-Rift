@@ -274,11 +274,19 @@ class DraftState:
             archetype_self = self.archetype.get(viewer_side)
             archetype_enemy = (self.archetype.get(enemy_side)
                                 if self.phase == PHASE_DONE else None)
+        # v3.0.3: our_side is now VIEWER-RELATIVE — each client sees its own
+        # claimed side as `our_side`, not the global default. Spectators
+        # default to BLUE (they don't have a real side, but the BOARD UI
+        # needs *some* anchor; spectator view follows BLUE perspective).
+        if viewer_side in SIDES:
+            viewer_our_side = viewer_side
+        else:
+            viewer_our_side = self.our_side
         return {
             "picks": self.picks,
             "bans": self.bans,
             "pointer": self.pointer,
-            "our_side": self.our_side,
+            "our_side": viewer_our_side,
             "players": self.players,
             "phase": self.phase,
             "started": self.phase in (PHASE_BOARD, PHASE_DONE),
@@ -417,6 +425,10 @@ async def _send_state_personalised(room: Room, cid: int) -> None:
         return
     payload = {
         "type": "state",
+        # v3.0.3: include `you` on every state broadcast so the client can
+        # refresh its `_you` snapshot after a set_side without needing a
+        # fresh `hello`. Fixes the "YOU: BLUE on a RED client" mismatch.
+        "you": {"name": c.name, "side": c.side, "is_host": c.is_host},
         "state": room.state.to_json_for_side(c.side),
         "sides": room.sides_map(),
         "spectators": room.spectators(),

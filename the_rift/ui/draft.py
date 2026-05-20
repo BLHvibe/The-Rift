@@ -926,6 +926,17 @@ _BOARD_TAG_COL = {
     "BAN-P2": (212, 145, 80),
 }
 
+# Viability-tier colors for the TOP CALL viability chip in _draw_board_center.
+# Restored in v3.0.3 — the original dict was deleted during Phase 6 cyber.py
+# cleanup but a single reference at draft.py:3466 was missed, which crashed
+# the board the moment a target_comp surfaced.
+_VIAB_COLORS = {
+    "STRONG":          lol_theme.LOL["win"][:3],
+    "VIABLE":          lol_theme.LOL["gold"][:3],
+    "WEAK":            lol_theme.LOL["warning"][:3],
+    "NOT RECOMMENDED": lol_theme.LOL["loss"][:3],
+}
+
 
 def _draw_glyph(dl, cx, cy, kind, size, color):
     """Tiny vector glyph for tag chips. `size` ~= total span."""
@@ -1976,13 +1987,17 @@ def _maybe_start_scout_prefetch() -> None:
 
 
 def _maybe_send_scout_ready() -> None:
-    """When all 10 sheets are fetched (or known-cached), tell the server
-    we're ready to advance. Sends at most once per SCOUTING entry."""
+    """When all 10 sheets have settled (succeeded OR confirmed-failed),
+    tell the server we're ready to advance. Sends at most once per
+    SCOUTING entry. v3.0.3: failures (v == 0) now count as "done" so a
+    player with no scout sheet doesn't block phase advance forever."""
     if draft.scout_ready_sent:
         return
     if draft.scout_total <= 0:
         return
-    done = sum(1 for v in draft.scout_progress.values() if v >= 1)
+    # Any entry in scout_progress means the callback fired for that name
+    # (success → 1, failure → 0); both are terminal states.
+    done = len(draft.scout_progress)
     if done >= draft.scout_total:
         draft.scout_ready_sent = True
         try:
