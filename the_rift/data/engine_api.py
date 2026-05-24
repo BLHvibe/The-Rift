@@ -147,6 +147,35 @@ def recommend_bans(opposing_players: List[Dict[str, Any]],
     })
 
 
+def _rehydrate_action(raw: Any) -> Any:
+    """Server-side DraftAction is a NamedTuple, which JSON-serializes to a
+    bare list `[idx, side, kind, phase, label]`. The UI expects an object with
+    attribute access (`act.side`, `act.kind`, …). Rebuild the client-side
+    NamedTuple so every call-site keeps working unchanged."""
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        try:
+            from data.draft_board import DraftAction
+            return DraftAction(
+                idx=int(raw.get("idx", 0)),
+                side=str(raw.get("side") or ""),
+                kind=str(raw.get("kind") or ""),
+                phase=int(raw.get("phase", 1)),
+                label=str(raw.get("label") or ""),
+            )
+        except Exception:
+            return raw
+    if isinstance(raw, (list, tuple)) and len(raw) >= 5:
+        try:
+            from data.draft_board import DraftAction
+            return DraftAction(int(raw[0]), str(raw[1]), str(raw[2]),
+                               int(raw[3]), str(raw[4]))
+        except Exception:
+            return raw
+    return raw
+
+
 def recommend_action(state: Dict[str, Any],
                      inhouse_champs: Optional[Dict[str, Any]] = None,
                      primary_roles: Optional[Dict[str, str]] = None,
@@ -154,11 +183,14 @@ def recommend_action(state: Dict[str, Any],
                      forced_arch: Optional[str] = None,
                      scout_champs: Optional[Dict[str, Any]] = None,
                      ) -> Optional[Dict[str, Any]]:
-    return _post("/api/engine/recommend_action", {
+    out = _post("/api/engine/recommend_action", {
         "state": state, "inhouse_champs": inhouse_champs,
         "primary_roles": primary_roles, "n": n,
         "forced_arch": forced_arch, "scout_champs": scout_champs,
     })
+    if isinstance(out, dict) and "action" in out:
+        out["action"] = _rehydrate_action(out["action"])
+    return out
 
 
 def target_archetype(state: Dict[str, Any], side: str,

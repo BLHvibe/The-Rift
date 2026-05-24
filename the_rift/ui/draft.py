@@ -363,6 +363,13 @@ class DraftState:
         self.briefing_data       = None # cached {our_comp, enemy_comp, key_bans}
         self.archetype_hover     = None # archetype card the mouse is over
         self.archetype_pending   = None # archetype locally chosen, awaiting CONFIRM
+        # v4.0.2: cache the (cards, subs) tuple between frames so the
+        # ARCHETYPE screen doesn't re-call _eng.recommend_comps every frame —
+        # that single change drops the screen from network-bound stutter to
+        # smooth 60fps. Invalidated by archetype_cache_sig.
+        self.archetype_cards     = None
+        self.archetype_subs      = None
+        self.archetype_cache_sig = None
         # Phase 4 — pivot alert state (board phase)
         self._pivot_last_sig     = None # signature of last pivot-check input
         self._pivot_alert        = None # cached pivot_check result for banner
@@ -2594,8 +2601,9 @@ def _draw_archetype(dl, vw, vh):
                        fill=lol_theme.LOL["navy_deep"],
                        color=(0, 0, 0, 0), parent=dl)
     # Splash of a featured champion behind the center, dimmed heavily.
-    # The current draft's TOP CALL champion (if any) is a good thematic anchor;
-    # otherwise we just skip the splash and leave navy.
+    # Try board_rec's top suggestion first (existing behavior); fall back to
+    # the hovered or top-archetype's hero champion so the screen always has
+    # a thematic splash backdrop instead of flat navy.
     feature_champ = None
     try:
         rec = draft.board_rec or {}
@@ -2603,6 +2611,24 @@ def _draw_archetype(dl, vw, vh):
         feature_champ = sg.get("champion") or None
     except Exception:
         feature_champ = None
+    if not feature_champ:
+        try:
+            target_cards = draft.archetype_cards or []
+            hovered = draft.archetype_hover or draft.archetype_pending
+            chosen = None
+            if hovered:
+                for c in target_cards:
+                    if c.get("archetype") == hovered:
+                        chosen = c
+                        break
+            if chosen is None and target_cards:
+                chosen = target_cards[0]
+            if chosen:
+                picks = (chosen.get("picks") or [])
+                if picks:
+                    feature_champ = (picks[0] or {}).get("champion")
+        except Exception:
+            pass
     if feature_champ:
         try:
             sp_tex = splash_art.get_texture(feature_champ)
@@ -2637,48 +2663,58 @@ def _draw_archetype(dl, vw, vh):
          (*lol_theme.LOL["txt_dim"][:3], 220), 16, "raj_sb_16")
 
     # ── Compute viability-sorted cards for OUR roster ───────────────
-    cards = []
-    sub_picks_per_card = []
+    # v4.0.2: recompute only when the relevant inputs change (a different
+    # roster, switched sides, etc.). Without this the screen makes one
+    # blocking server call per frame and stutters badly.
+    cards: List[Dict[str, Any]] = []
+    sub_picks_per_card: List[List[Any]] = []
     try:
         if draft.board is not None:
             inhouse = getattr(live, "inhouse_champs", {}) or {}
             primary = getattr(live, "primary_roles", {}) or {}
             players = list(draft.board.players.get(side, []))
-            scout = _scout_champs_for_players(players)
-            cards = _eng.recommend_comps(
-                draft.board.players[side], inhouse, primary,
-                enemy_picks=[], n_results=7, scout_champs=scout) or []
-            for c in cards:
-                sub_picks_per_card.append(
-                    _archetype_subs(c, players, inhouse, primary, scout))
+            roster_sig = tuple((p or {}).get("name", "") for p in players)
+            sig = (side, roster_sig, len(inhouse), len(primary))
+            if (draft.archetype_cards is not None
+                    and draft.archetype_cache_sig == sig):
+                cards = draft.archetype_cards
+                sub_picks_per_card = draft.archetype_subs or []
+            else:
+                scout = _scout_champs_for_players(players)
+                cards = _eng.recommend_comps(
+                    draft.board.players[side], inhouse, primary,
+                    enemy_picks=[], n_results=7, scout_champs=scout) or []
+                sub_picks_per_card = [
+                    _archetype_subs(c, players, inhouse, primary, scout)
+                    for c in cards]
+                draft.archetype_cards = cards
+                draft.archetype_subs = sub_picks_per_card
+                draft.archetype_cache_sig = sig
     except Exception:
-        cards = []
-        sub_picks_per_card = []
+        cards = draft.archetype_cards or []
+        sub_picks_per_card = draft.archetype_subs or []
 
     # ── Circular layout geometry ────────────────────────────────────
     # Center the ring vertically below the header, leaving room for the
     # CONFIRM button at the bottom.
     ring_cx = vw // 2
     ring_cy = (130 + (vh - 110)) // 2
-    # Card size scales modestly with viewport for readability.
-    card_w = 260 if vw >= 1500 else 240
-    card_h = 200 if vw >= 1500 else 190
-    # Ring radius — pick so cards don't overlap horizontally at the closest
-    # angular separation (top + adjacents). With 7 cards, min separation is
-    # 2π/7 ≈ 51.4°; clamp to viewport.
+    # v4.0.2: cards a touch larger and the ring pushed further from center
+    # per user feedback — the previous layout felt cramped at the middle.
+    card_w = 296 if vw >= 1500 else 272
+    card_h = 224 if vw >= 1500 else 210
     n_cards = max(1, len(cards[:7]))
     angular_step = 2 * math.pi / max(n_cards, 1)
-    min_sep_w = card_w + 28
-    # Distance between two card-centers at adjacent angles = 2 R sin(step/2)
-    # Solve for R: R = sep / (2 sin(step/2))
+    # Wider angular separation requirement = larger ring radius.
+    min_sep_w = card_w + 60
     sep_factor = 2.0 * math.sin(angular_step / 2.0)
-    needed_r = min_sep_w / sep_factor if sep_factor > 0.05 else 320.0
+    needed_r = min_sep_w / sep_factor if sep_factor > 0.05 else 380.0
     # Bound by viewport — the card extents at angle 0 (right) would push
     # past the right edge if needed_r + card_w/2 > vw/2 - 32.
     max_r_w = (vw // 2) - card_w // 2 - 32
     max_r_h = (ring_cy - 120) - card_h // 2 - 8
     max_r = min(max_r_w, max_r_h + (card_h // 4))
-    ring_r = max(180.0, min(needed_r, max_r))
+    ring_r = max(220.0, min(needed_r, max_r))
 
     # ── Hover detection BEFORE drawing so card lift / center pulse sync ─
     # (we compute hover for the input handler; the click pick lives there)
