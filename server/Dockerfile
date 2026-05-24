@@ -9,7 +9,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-COPY main.py .
+# Phase 0d — copy every server module (main.py + db.py + api.py), not just main.
+COPY *.py .
 
 ENV PORT=8080
 EXPOSE 8080

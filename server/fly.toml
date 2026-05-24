@@ -32,3 +32,10 @@ primary_region = "iad"   # change to a region near you/your friends
   cpu_kind = "shared"
   cpus = 1
   memory_mb = 256
+
+# Phase 0d — persistent volume for the SQLite match store (server/db.py).
+# Create it once, before the first deploy with this config:
+#   fly volumes create rift_data --region iad --size 1
+[mounts]
+  source = "rift_data"
+  destination = "/data"

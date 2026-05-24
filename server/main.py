@@ -390,6 +390,16 @@ ROOM_LOCK = asyncio.Lock()
 
 app = FastAPI(title="The Rift — Draft Sync")
 
+# Phase 0d — REST data API (match store). Additive: the WebSocket draft path
+# below is untouched, and a fault here can never take down draft multiplayer.
+try:
+    from api import router as _api_router
+    import db as _db
+    _db.init()
+    app.include_router(_api_router)
+except Exception as _api_err:                               # pragma: no cover
+    print(f"[rift] REST data API not loaded: {_api_err}")
+
 
 @app.get("/")
 async def root() -> JSONResponse:

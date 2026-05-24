@@ -10,6 +10,7 @@ from core.animations import anim
 from data.reader import live, load_scout_sheet, cache_scout_sheet
 from data.tips import TIPS as _TIPS
 from ui.tierlist import _wheel_delta as _wheel_delta_shared
+from ui import effects
 
 # ---------------------------------------------------------------------------
 # Layout constants
@@ -136,7 +137,116 @@ def _build_full_report(name):
         "ban_targets":    ban_targets,
         "top_champs":     top_champs,
         "inhouse_champs": inhouse_display,
+        # Phase 3 — raw stats preserved for the auto-tag computer so it
+        # never has to re-parse a display string.
+        "wr_raw":         wr,
+        "kda_raw":        kda,
+        "games_raw":      games,
+        "primary_role":   p.get("primary_role"),
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — auto player tags
+# ---------------------------------------------------------------------------
+
+def _safe_float(v, default=0.0):
+    try: return float(str(v).replace("%", "").replace(",", ""))
+    except (TypeError, ValueError): return default
+
+
+def _safe_int(v, default=0):
+    try: return int(float(str(v).replace(",", "")))
+    except (TypeError, ValueError): return default
+
+
+def _compute_player_tags(r):
+    """Phase 3 — derive at-a-glance behavior tags from a scout report dict.
+    Pure function: takes the report `r`, returns a list of
+    {label, color, kind} dicts ordered most-interesting first.
+
+    Tags are deterministic and use absolute thresholds — no cross-player
+    normalization needed, so they work for a player even before the rest
+    of the scout corpus has loaded.
+    """
+    tags = []
+    if not r:
+        return tags
+
+    # ── Form ────────────────────────────────────────────────────────────
+    form = str(r.get("form_state") or r.get("form") or "MIXED").upper()
+    if form == "HOT":
+        tags.append({"label": "HOT FORM",
+                     "color": (79, 168, 130), "kind": "form"})
+    elif form == "COLD":
+        tags.append({"label": "COLD STREAK",
+                     "color": (200, 80, 80), "kind": "form"})
+    elif form == "MIXED":
+        tags.append({"label": "MIXED FORM",
+                     "color": (170, 170, 170), "kind": "form"})
+
+    games = _safe_int(r.get("games_raw"))
+    if games == 0:
+        games = sum(_safe_int(c.get("games"))
+                    for c in (r.get("inhouse_champs") or []))
+
+    # ── Experience ──────────────────────────────────────────────────────
+    if games >= 150:
+        tags.append({"label": "VETERAN",
+                     "color": (90, 170, 220), "kind": "experience"})
+    elif games >= 40:
+        tags.append({"label": "ACTIVE",
+                     "color": (200, 180, 120), "kind": "experience"})
+    elif games > 0:
+        tags.append({"label": "NEWCOMER",
+                     "color": (180, 140, 220), "kind": "experience"})
+
+    # ── Mastery (OTP vs Versatile) ──────────────────────────────────────
+    pool = r.get("champ_pool_full") or r.get("inhouse_champs") or []
+    per_champ = []
+    for entry in pool:
+        ch_name = entry.get("champ") or entry.get("name") or "?"
+        per_champ.append((ch_name, _safe_int(entry.get("games"))))
+    per_champ.sort(key=lambda x: -x[1])
+    total_pool = sum(g for _, g in per_champ)
+    if total_pool >= 10 and per_champ:
+        top_name, top_games = per_champ[0]
+        if top_games >= 8 and top_games / total_pool >= 0.40:
+            tags.append({"label": f"OTP — {top_name.upper()}",
+                         "color": (220, 180, 80), "kind": "mastery"})
+        elif sum(1 for _, g in per_champ if g >= 5) >= 5:
+            tags.append({"label": "VERSATILE",
+                         "color": (110, 200, 200), "kind": "mastery"})
+
+    # ── KDA monster ─────────────────────────────────────────────────────
+    kda = _safe_float(r.get("kda_raw"))
+    if kda >= 5.0:
+        tags.append({"label": "KDA GOD",
+                     "color": (130, 220, 130), "kind": "stat"})
+    elif kda >= 4.0:
+        tags.append({"label": "KDA MONSTER",
+                     "color": (130, 210, 130), "kind": "stat"})
+
+    # ── Win-rate persona (requires meaningful sample) ───────────────────
+    wr = _safe_float(r.get("wr_raw"))
+    if games >= 20:
+        if wr >= 60:
+            tags.append({"label": "WIN MACHINE",
+                         "color": (79, 168, 130), "kind": "stat"})
+        elif wr <= 42:
+            tags.append({"label": "SLUMPING",
+                         "color": (200, 120, 80), "kind": "warning"})
+
+    # ── Role main ───────────────────────────────────────────────────────
+    role = str(r.get("primary_role") or "").upper()
+    role_label = {"TOP": "TOP",  "JGL": "JUNGLE", "JUNGLE": "JUNGLE",
+                  "MID": "MID",  "BOT": "ADC", "BOTTOM": "ADC",
+                  "SUP": "SUPPORT", "SUPPORT": "SUPPORT"}.get(role)
+    if role_label:
+        tags.append({"label": f"{role_label} MAIN",
+                     "color": (210, 165, 230), "kind": "role"})
+
+    return tags
 
 
 # ---------------------------------------------------------------------------
@@ -152,19 +262,210 @@ def _rw_label(text, font_key="raj_sb_22", color=None):
         dpg.bind_item_font(t, _F["raj_sb_18"])
 
 
+def _rw_compare(r):
+    """Phase 3 (polished) — side-by-side compare. Renders a broadcast-style
+    head-to-head card: the two players framed left and right, a centered VS
+    chip, six head-to-head stat rows with winner-side gold highlighting and a
+    final tally chip so the user can see at-a-glance who's ahead overall."""
+    me = r.get("player")
+    pool = [p["name"] for p in scout.players if p["name"] != me]
+    if not pool:
+        return
+    items = ["— none —"] + sorted(pool)
+    default = scout.compare_with if scout.compare_with in pool else "— none —"
+
+    def _on_pick(_s, value):
+        scout.compare_with = None if value == "— none —" else value
+        scout.report_dirty = True
+
+    dpg.add_spacer(height=4)
+    _rw_label("COMPARE")
+    dpg.add_spacer(height=2)
+    with dpg.group(horizontal=True):
+        dpg.add_spacer(width=14)
+        t = dpg.add_text("vs", color=C["txt_dim"][:3])
+        if "raj_r_16" in _F: dpg.bind_item_font(t, _F["raj_r_16"])
+        dpg.add_spacer(width=6)
+        combo = dpg.add_combo(items=items, default_value=default,
+                              width=220, callback=_on_pick)
+        if "raj_r_16" in _F: dpg.bind_item_font(combo, _F["raj_r_16"])
+
+    other = scout.compare_with
+    if not other:
+        dpg.add_spacer(height=4)
+        dpg.add_separator()
+        return
+
+    op = next((p for p in scout.players if p["name"] == other), None)
+    if not op:
+        dpg.add_spacer(height=4)
+        dpg.add_separator()
+        return
+
+    def _fmt_wr(v):  return f"{_safe_float(v):.0f}%"
+    def _fmt_kda(v): return f"{_safe_float(v):.2f}"
+    def _fmt_int(v): return f"{_safe_int(v):,}"
+
+    # Pull champ pools for overlap.
+    my_champs = [c.get("champ") for c in (_DEMO_CHAMPS_RW.get(me, []) or [])]
+    their_champs = [c.get("champ") for c in (_DEMO_CHAMPS_RW.get(other, []) or [])]
+    if not my_champs:
+        my_champs = [c.get("champion") for c in (r.get("champ_pool") or [])]
+    if not their_champs:
+        their_champs = [c.get("champion") for c in (op.get("champ_pool") or [])]
+    overlap = sorted(set(filter(None, my_champs)) &
+                     set(filter(None, their_champs)))
+
+    rows = [
+        ("WIN RATE", _safe_float(r.get("wr_raw")),
+                     _safe_float(op.get("wr", 0)),     True, _fmt_wr),
+        ("KDA",      _safe_float(r.get("kda_raw")),
+                     _safe_float(op.get("kda", 0.0)),  True, _fmt_kda),
+        ("GAMES",    _safe_int(r.get("games_raw")),
+                     _safe_int(op.get("games", 0)),    True, _fmt_int),
+        ("SCORE",    _safe_float(r.get("score", 0)),
+                     _safe_float(op.get("score", 0)),  True, _fmt_int),
+    ]
+
+    # Tally: count how many rows each side wins.
+    me_wins = 0
+    them_wins = 0
+    for _, mine, theirs, higher_is_better, _f in rows:
+        if abs(mine - theirs) < 1e-6:
+            continue
+        if (mine > theirs) == higher_is_better:
+            me_wins += 1
+        else:
+            them_wins += 1
+
+    dpg.add_spacer(height=8)
+    # ── Header row: large player names + vs chip + tally chip ──
+    with dpg.group(horizontal=True):
+        dpg.add_spacer(width=14)
+        # Me name + tally
+        me_col = (200, 255, 200) if me_wins > them_wins else C["gold_lt"][:3]
+        t = dpg.add_text(str(me).upper(), color=me_col)
+        if "raj_sb_18" in _F: dpg.bind_item_font(t, _F["raj_sb_18"])
+        dpg.add_spacer(width=6)
+        tally_t = dpg.add_text(f"({me_wins})",
+                                color=(*C["txt_dim"][:3], 220))
+        if "raj_r_16" in _F: dpg.bind_item_font(tally_t, _F["raj_r_16"])
+        dpg.add_spacer(width=20)
+        # VS chip
+        vs_t = dpg.add_text("VS", color=(*C["gold"][:3], 220))
+        if "raj_sb_18" in _F: dpg.bind_item_font(vs_t, _F["raj_sb_18"])
+        dpg.add_spacer(width=20)
+        them_col = (200, 255, 200) if them_wins > me_wins else C["gold_lt"][:3]
+        tally2_t = dpg.add_text(f"({them_wins})",
+                                  color=(*C["txt_dim"][:3], 220))
+        if "raj_r_16" in _F: dpg.bind_item_font(tally2_t, _F["raj_r_16"])
+        dpg.add_spacer(width=6)
+        t = dpg.add_text(str(other).upper(), color=them_col)
+        if "raj_sb_18" in _F: dpg.bind_item_font(t, _F["raj_sb_18"])
+
+    if me_wins != them_wins:
+        verdict = (f"{me.upper()} edges out the comparison"
+                   if me_wins > them_wins else
+                   f"{other.upper()} comes out ahead")
+        with dpg.group(horizontal=True):
+            dpg.add_spacer(width=14)
+            v = dpg.add_text(verdict, color=(*C["gold"][:3], 200))
+            if "raj_r_16" in _F: dpg.bind_item_font(v, _F["raj_r_16"])
+    dpg.add_spacer(height=6)
+
+    # ── Metric rows: gold cell on the winner side ──
+    for lbl, mine, theirs, higher_is_better, formatter in rows:
+        if abs(mine - theirs) < 1e-6:
+            me_color = C["txt"][:3]
+            them_color = C["txt"][:3]
+        elif (mine > theirs) == higher_is_better:
+            me_color = (130, 210, 130)
+            them_color = (200, 130, 130)
+        else:
+            me_color = (200, 130, 130)
+            them_color = (130, 210, 130)
+        with dpg.group(horizontal=True):
+            dpg.add_spacer(width=14)
+            t = dpg.add_text(formatter(mine), color=me_color)
+            if "raj_sb_18" in _F: dpg.bind_item_font(t, _F["raj_sb_18"])
+            dpg.add_spacer(width=max(8, 80 - len(formatter(mine)) * 6))
+            t = dpg.add_text(lbl, color=(*C["txt_dim"][:3], 220))
+            if "raj_sb_14" in _F: dpg.bind_item_font(t, _F["raj_sb_14"])
+            dpg.add_spacer(width=max(8, 80 - len(lbl) * 5))
+            t = dpg.add_text(formatter(theirs), color=them_color)
+            if "raj_sb_18" in _F: dpg.bind_item_font(t, _F["raj_sb_18"])
+
+    # ── Champion pool overlap ──
+    if overlap:
+        dpg.add_spacer(height=8)
+        with dpg.group(horizontal=True):
+            dpg.add_spacer(width=14)
+            t = dpg.add_text("SHARED POOL", color=(*C["gold"][:3], 200))
+            if "raj_sb_14" in _F: dpg.bind_item_font(t, _F["raj_sb_14"])
+            dpg.add_spacer(width=10)
+            t = dpg.add_text("  ·  ".join(overlap[:6]),
+                              color=C["txt"][:3])
+            if "raj_r_16" in _F: dpg.bind_item_font(t, _F["raj_r_16"])
+    else:
+        dpg.add_spacer(height=4)
+        with dpg.group(horizontal=True):
+            dpg.add_spacer(width=14)
+            t = dpg.add_text("no shared champion pool",
+                              color=(*C["txt_dim"][:3], 180))
+            if "raj_r_14" in _F: dpg.bind_item_font(t, _F["raj_r_14"])
+
+    dpg.add_spacer(height=10)
+    dpg.add_separator()
+
+
+# Lazy alias: in scout.py the per-player champion pool is held externally
+# (this module reaches for it on demand); we keep this hook so the compare
+# section can ask for it without a hard cross-module dependency.
+_DEMO_CHAMPS_RW = {}
+
+
+def _rw_player_tags(r):
+    """Phase 3 — at-a-glance behavior tags (Porofessor-style) computed from
+    the player's stats + champ pool + form. Renders a single horizontal row
+    of color-coded labels separated by a thin gold dot."""
+    tags = _compute_player_tags(r)
+    if not tags:
+        return
+    dpg.add_spacer(height=4)
+    _rw_label("PLAYER TAGS")
+    dpg.add_spacer(height=2)
+    with dpg.group(horizontal=True):
+        dpg.add_spacer(width=14)
+        for i, tag in enumerate(tags):
+            if i > 0:
+                dot = dpg.add_text("·", color=(120, 100, 60))
+                if "raj_r_16" in _F:
+                    dpg.bind_item_font(dot, _F["raj_r_16"])
+                dpg.add_spacer(width=4)
+            t = dpg.add_text(tag["label"], color=tag["color"])
+            if "raj_sb_16" in _F:
+                dpg.bind_item_font(t, _F["raj_sb_16"])
+            if i < len(tags) - 1:
+                dpg.add_spacer(width=4)
+    dpg.add_spacer(height=6)
+    dpg.add_separator()
+
+
 def _rw_header(r):
+    """Broadcast-style scout-report header: large avatar + name, tier ribbon,
+    and a row of headline KPI chips (Score, WR, KDA, Games) so the most-asked
+    questions about a player are answered before scrolling."""
     from ui.inhouse import _get_avatar_tex, _flush_pending
-    _flush_pending()   # ensure any freshly uploaded avatar is registered
+    _flush_pending()
 
     dpg.add_spacer(height=10)
     with dpg.group(horizontal=True):
         dpg.add_spacer(width=14)
 
-        # Avatar (64×64) — shown when the player has an uploaded pfp
         tex = _get_avatar_tex(r["player"])
         if tex:
-            dpg.add_image(tex, width=64, height=64)
-            dpg.add_spacer(width=14)
+            dpg.add_image(tex, width=80, height=80)
+            dpg.add_spacer(width=16)
 
         with dpg.group():
             t = dpg.add_text(r["player"].upper(), color=C["gold_lt"][:3])
@@ -172,8 +473,15 @@ def _rw_header(r):
             with dpg.group(horizontal=True):
                 bc = RANK_COLORS.get(r["tier"], RANK_COLORS["Unranked"])
                 t2 = dpg.add_text(r["tier"].upper(), color=bc[:3])
-                if "raj_sb_18" in _F: dpg.bind_item_font(t2, _F["raj_sb_18"])
-                dpg.add_spacer(width=18)
+                if "raj_sb_22" in _F: dpg.bind_item_font(t2, _F["raj_sb_22"])
+                elif "raj_sb_18" in _F: dpg.bind_item_font(t2, _F["raj_sb_18"])
+                dpg.add_spacer(width=14)
+                rl = r.get("primary_role")
+                if rl:
+                    rt = dpg.add_text(f"·  {rl.upper()} MAIN",
+                                       color=(*C["txt2"][:3], 220))
+                    if "raj_sb_18" in _F: dpg.bind_item_font(rt, _F["raj_sb_18"])
+                    dpg.add_spacer(width=14)
                 days = r.get("scouted_days_ago", None)
                 if days is not None:
                     ac = (79,168,130) if days<=2 else (200,168,106) if days<=6 else (184,69,53)
@@ -181,6 +489,35 @@ def _rw_header(r):
                 else:
                     ta = dpg.add_text("Live data", color=(79,168,130))
                 if "raj_r_16" in _F: dpg.bind_item_font(ta, _F["raj_r_16"])
+
+    # ── Headline KPI chips ───────────────────────────────────────────────
+    dpg.add_spacer(height=12)
+    wr_f = _safe_float(r.get("wr_raw"))
+    kda_f = _safe_float(r.get("kda_raw"))
+    games_n = _safe_int(r.get("games_raw"))
+    score_n = _safe_int(r.get("score"))
+    chips = [
+        ("SCORE",   f"{score_n:,}",     C["gold_lt"][:3]),
+        ("WIN %",   f"{wr_f:.0f}%",
+                    (130, 210, 130) if wr_f >= 52 else
+                    (220, 130, 130) if wr_f < 48 else C["txt"][:3]),
+        ("KDA",     f"{kda_f:.2f}",
+                    (130, 210, 130) if kda_f >= 3.5 else
+                    (220, 130, 130) if kda_f < 1.8 else C["txt"][:3]),
+        ("GAMES",   f"{games_n:,}",    C["txt"][:3]),
+    ]
+    with dpg.group(horizontal=True):
+        dpg.add_spacer(width=14)
+        for label, val, col in chips:
+            with dpg.child_window(width=128, height=64, border=True,
+                                   no_scrollbar=True,
+                                   no_scroll_with_mouse=True):
+                dpg.add_spacer(height=2)
+                lt = dpg.add_text(f"  {label}", color=(*C["txt_dim"][:3], 220))
+                if "raj_sb_14" in _F: dpg.bind_item_font(lt, _F["raj_sb_14"])
+                vt = dpg.add_text(f"  {val}", color=col)
+                if "raj_36" in _F: dpg.bind_item_font(vt, _F["raj_36"])
+            dpg.add_spacer(width=8)
     dpg.add_spacer(height=10)
     dpg.add_separator()
 
@@ -267,7 +604,7 @@ def _rw_ban_targets(r):
         "ELEVATED": C["txt2"][:3],
     }
     source_col = {
-        "inhouse": C["rift_purple"][:3],
+        "inhouse": (175, 110, 220),   # readable violet on the navy table
         "ranked":  C["platinum"][:3],
     }
     # Fixed pixel column widths — consistent regardless of content length
@@ -284,7 +621,7 @@ def _rw_ban_targets(r):
         for b in bans:
             tc  = threat_col.get(b["threat"], C["txt2"][:3])
             src = b.get("source", "inhouse")
-            sc  = source_col.get(src, C["txt_dim"][:3])
+            sc  = source_col.get(src, C["txt2"][:3])
             vals = [b["name"], str(b["games"]), str(b["wr"]), str(b["kda"]),
                     src.upper(), b["threat"]]
             with dpg.table_row():
@@ -345,7 +682,7 @@ def _rw_rank_history(r):
                 dpg.draw_line((PAD_L, gy), (PAD_L + pw, gy),
                               color=(*C["rule_dark"][:3], 60), thickness=1, parent=dl)
                 dpg.draw_text((2, gy - 8), f"#{int(rank_line)}",
-                              color=(*C["txt_dim"][:3], 120), size=13, parent=dl)
+                              color=(*C["txt2"][:3], 220), size=14, parent=dl)
         pts = [(_px(i), _py(v)) for i, v in enumerate(vals)]
         if len(pts) >= 2:
             dpg.draw_polyline(pts, color=(*C["gold"][:3], 200), thickness=2, parent=dl)
@@ -652,6 +989,8 @@ def _rebuild_report_window(vw, vh):
             return
 
         _rw_header(r)
+        _rw_player_tags(r)
+        _rw_compare(r)
 
         if scout.report_loading:
             with dpg.group(horizontal=True):
@@ -720,6 +1059,8 @@ class ScoutState:
         self._load_t        = 0.0
         self._tip           = _rnd.choice(_TIPS)
         self.scroll_off     = 0
+        # Phase 3 — side-by-side compare target (player name or None)
+        self.compare_with   = None
 
     def reset(self):
         self.__init__()
@@ -955,32 +1296,21 @@ def _draw_idle(dl, vw, vh):
 
 
 def _draw_loading(dl, vw, vh):
-    cx, cy = vw//2, vh//2
-    try:
-        from ui.effects import draw_orbital_spinner
-        draw_orbital_spinner(dl, cx, cy - 70, 22, C["gold"], 220,
-                              n_dots=3, speed=2.0, dot_r=4)
-    except Exception:
-        pass
-    t  = (math.sin(scout._load_t*2.0)+1)/2
-    a  = int(80 + t*130)
-    _txt(dl, cx - len("FETCHING SCOUT DATA...")*7, cy-30, "FETCHING SCOUT DATA...", (*C["gold_dk"][:3],a), 27, "raj_36")
+    """Skeleton of the scout layout — the player table + report panel morph
+    into real content once the data lands."""
+    table_w = int(vw * TABLE_FRAC)
+    rx = PAD
+    ry = TOP_BAR_H + PAD
+    rw = max(80, table_w - PAD * 2)
+    for i in range(10):
+        effects.draw_skeleton_row(dl, rx, ry + i * (ROW_H + 3), rw, ROW_H)
+    px = table_w + PAD
+    pw = max(80, vw - px - PAD)
+    effects.draw_skeleton_rect(dl, px, TOP_BAR_H + PAD, pw,
+                               max(80, vh - TOP_BAR_H - PAD * 2), rounding=6)
     tip = scout._tip
-    tip_x = max(40, cx - len(tip) * 5)
-    _txt(dl, tip_x, cy+16, tip, (*C["txt_dim"][:3], int(a*0.8)), 19, "raj_r_18")
-    # Loading bar
-    bar_w = min(400, vw - 120)
-    bar_x = cx - bar_w // 2
-    bar_y = cy + 62
-    prog  = (scout._load_t % 1.8) / 1.8
-    fill  = int(bar_w * prog)
-    dpg.draw_rectangle((bar_x, bar_y), (bar_x+bar_w, bar_y+4),
-                        fill=(*C["card"][:3], int(a*0.6)), color=(0,0,0,0),
-                        rounding=2, parent=dl)
-    if fill > 0:
-        dpg.draw_rectangle((bar_x, bar_y), (bar_x+fill, bar_y+4),
-                            fill=(*C["gold_dk"][:3], a), color=(0,0,0,0),
-                            rounding=2, parent=dl)
+    _txt(dl, max(40, vw // 2 - len(tip) * 5), vh - 44, tip,
+         (*C["txt_dim"][:3], 150), 18, "raj_r_18")
 
 
 def _draw_top_bar(dl, vw, header_w):
@@ -1035,6 +1365,12 @@ def _draw_table(dl, tx, ty, tw, th, vw, vh):
 
     row_y = ty + HEADER_H + 4
 
+    # Cursor in content coords, for per-row hover feedback.
+    _m   = dpg.get_mouse_pos(local=False)
+    _vp  = dpg.get_viewport_pos()
+    _mrx = _m[0] - _vp[0] - SIDEBAR_W
+    _mry = _m[1] - _vp[1] - APP_TITLE_H
+
     # Draw rows FIRST so the column header renders on top of any scrolled-up rows
     for i, p in enumerate(players):
         n  = p["name"]
@@ -1046,8 +1382,12 @@ def _draw_table(dl, tx, ty, tw, th, vw, vh):
         if ry + ROW_H < row_clip_top or ry > row_clip_bot:
             continue
         is_sel = scout.selected == n
+        is_hov = (not is_sel and tx+xo <= _mrx <= tx+tw+xo
+                  and ry <= _mry <= ry+ROW_H)
         if is_sel:
             bg = (*C["card_hover"][:3], al)
+        elif is_hov:
+            bg = (*C["card_hover"][:3], int(al * 0.65))
         elif i % 2 == 0:
             bg = (*C["card"][:3], al)
         else:
@@ -1057,11 +1397,16 @@ def _draw_table(dl, tx, ty, tw, th, vw, vh):
         if is_sel:
             dpg.draw_rectangle((tx+xo,ry),(tx+xo+4,ry+ROW_H),
                                 fill=(*C["gold"][:3],al), color=(0,0,0,0), rounding=2, parent=dl)
+        elif is_hov:
+            dpg.draw_rectangle((tx+xo,ry),(tx+xo+3,ry+ROW_H),
+                                fill=(*C["gold"][:3],int(al*0.5)), color=(0,0,0,0), rounding=2, parent=dl)
 
         tier = p.get("tier","Unranked")
         bc   = RANK_COLORS.get(tier, RANK_COLORS["Unranked"])
-        try:    score_disp = str(int(float(p["score"])))
-        except Exception: score_disp = str(p.get("score","?"))
+        try:
+            score_disp = str(int(round(effects.count_up(f"scscore:{n}", float(p["score"])))))
+        except (TypeError, ValueError):
+            score_disp = str(p.get("score", "?"))
 
         vals = [
             str(i+1),

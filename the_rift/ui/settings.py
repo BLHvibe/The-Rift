@@ -70,6 +70,10 @@ class SettingsState:
         self.creds_path    = cfg.get("creds_path", "credentials.json")
         # Phase 5 — Draft Board UI cues (pygame.mixer wrapper). Mute toggle.
         self.audio_enabled = bool(cfg.get("audio_enabled", True))
+        # Phase 3 — master volume scaler (0.0-1.0).
+        self.audio_volume  = float(cfg.get("audio_volume", 1.0))
+        # Phase 0a — global animation-intensity multiplier (0.0-1.0).
+        self.anim_intensity = float(cfg.get("anim_intensity", 1.0))
 
     def save(self):
         cfg = load_config()
@@ -79,6 +83,8 @@ class SettingsState:
         cfg["routing"]       = self.routing
         cfg["creds_path"]    = self.creds_path
         cfg["audio_enabled"] = self.audio_enabled
+        cfg["audio_volume"]  = self.audio_volume
+        cfg["anim_intensity"] = self.anim_intensity
         save_config(cfg)
 
 settings = SettingsState()
@@ -110,14 +116,19 @@ def draw_settings(dl, vw, vh, fonts=None):
                   color=C["rule_dark"], thickness=1, parent=dl)
     _txt(dl, PAD, 12, "SETTINGS", (*C["gold"][:3],220), 22, "cinzel_22")
 
-    # Settings form lives in a DPG window overlay for native input widgets
+    # Settings form lives in a DPG window overlay for native input widgets.
+    # Add a left inset so the content doesn't hug the sidebar (looked misplaced).
+    LEFT_INSET = 32
     vp_w = dpg.get_viewport_width()
     sb_w = vp_w - vw   # actual current sidebar pixel width
+    win_x = sb_w + LEFT_INSET
+    win_w = max(360, vw - LEFT_INSET)
     if not dpg.does_item_exist(_SETTINGS_WIN):
-        _build_settings_window(sb_w, vw, vh)
+        _build_settings_window(win_x, win_w, vh)
     else:
         # Reposition if viewport or sidebar width changed
-        dpg.configure_item(_SETTINGS_WIN, pos=(sb_w, TOP_BAR_H), width=vw, height=vh-TOP_BAR_H)
+        dpg.configure_item(_SETTINGS_WIN, pos=(win_x, TOP_BAR_H),
+                           width=win_w, height=vh-TOP_BAR_H)
 
 
 def _build_settings_window(sb_w, vw, vh):
@@ -264,6 +275,121 @@ def _build_settings_window(sb_w, vw, vh):
             if "raj_sb_14" in _F:
                 dpg.bind_item_font(am, _F["raj_sb_14"])
 
+            # Phase 3 — master volume scaler
+            dpg.add_spacer(height=10)
+            dpg.add_text("MASTER VOLUME — scales every cue from quiet (0) "
+                         "to full (1).",
+                         color=C["txt_dim"][:3], wrap=560)
+            dpg.add_spacer(height=4)
+            with dpg.group(horizontal=True):
+                vsld = dpg.add_slider_float(
+                    tag="set_audio_volume",
+                    default_value=settings.audio_volume,
+                    min_value=0.0, max_value=1.0, format="%.2f",
+                    width=300, callback=_apply_audio_volume)
+                if "raj_r_16" in _F:
+                    dpg.bind_item_font(vsld, _F["raj_r_16"])
+                dpg.add_spacer(width=14)
+                vlbl = dpg.add_text(f"{int(settings.audio_volume * 100)}%",
+                                    tag="set_audio_volume_label",
+                                    color=C["gold_lt"][:3])
+                if "raj_sb_16" in _F:
+                    dpg.bind_item_font(vlbl, _F["raj_sb_16"])
+
+        dpg.add_spacer(height=28)
+        dpg.add_separator()
+        dpg.add_spacer(height=20)
+
+        # ── Interface ─────────────────────────────────────────────────────
+        _section_label("INTERFACE")
+        with dpg.group():
+            dpg.add_text(
+                "ANIMATION — how much ambient and persistent motion the app "
+                "shows. Lower it for a calmer, snappier feel; 0 turns ambient "
+                "motion off entirely.",
+                color=C["txt_dim"][:3], wrap=560)
+            dpg.add_spacer(height=8)
+            with dpg.group(horizontal=True):
+                sld = dpg.add_slider_float(
+                    tag="set_anim_intensity",
+                    default_value=settings.anim_intensity,
+                    min_value=0.0, max_value=1.0, format="%.2f",
+                    width=300, callback=_apply_anim_intensity)
+                if "raj_r_16" in _F:
+                    dpg.bind_item_font(sld, _F["raj_r_16"])
+                dpg.add_spacer(width=14)
+                il = dpg.add_text(tag="set_anim_intensity_lbl",
+                                  default_value=_intensity_label(settings.anim_intensity),
+                                  color=C["gold_lt"][:3])
+                if "raj_sb_16" in _F:
+                    dpg.bind_item_font(il, _F["raj_sb_16"])
+
+        dpg.add_spacer(height=28)
+        dpg.add_separator()
+        dpg.add_spacer(height=20)
+
+        # ── Data API (Phase 1) ────────────────────────────────────────────
+        _section_label("DATA API")
+        with dpg.group():
+            dpg.add_text(
+                "Match data mirrors into a SQLite store on the Fly server so "
+                "the engine and future surfaces can read it directly. New "
+                "inhouse logs go up automatically; use BACKFILL to push every "
+                "row of _InhouseGameLog into the DB (idempotent — safe to "
+                "re-run). BACK UP TO SHEET writes a faithful DB snapshot to "
+                "_RiftDB_* tabs as a human-readable recovery source. REPAIR "
+                "MATCH HISTORY scans the server for matches with fewer than "
+                "10 participants (the role-collision bug) and re-posts the "
+                "full LCU payload — needs the League client running.",
+                color=C["txt_dim"][:3], wrap=560)
+            dpg.add_spacer(height=10)
+            with dpg.group(horizontal=True):
+                bf_btn = dpg.add_button(label="BACKFILL FROM SHEET",
+                                        callback=_backfill_db, width=200, height=28)
+                if "raj_sb_14" in _F: dpg.bind_item_font(bf_btn, _F["raj_sb_14"])
+                dpg.add_spacer(width=12)
+                mr_btn = dpg.add_button(label="BACK UP TO SHEET",
+                                        callback=_mirror_db, width=180, height=28)
+                if "raj_sb_14" in _F: dpg.bind_item_font(mr_btn, _F["raj_sb_14"])
+                dpg.add_spacer(width=12)
+                rp_btn = dpg.add_button(label="REPAIR MATCH HISTORY",
+                                        callback=_repair_matches, width=220, height=28)
+                if "raj_sb_14" in _F: dpg.bind_item_font(rp_btn, _F["raj_sb_14"])
+            dpg.add_spacer(height=6)
+            dpg.add_text(tag="set_dataapi_status", default_value="",
+                         color=C["txt_dim"][:3])
+
+        dpg.add_spacer(height=28)
+        dpg.add_separator()
+        dpg.add_spacer(height=20)
+
+        # ── Draft Engine (Phase 2) ────────────────────────────────────────
+        _section_label("DRAFT ENGINE")
+        with dpg.group():
+            dpg.add_text(
+                "Server-side engine — counters / synergies / champion strength "
+                "are blended from DB data via Bayesian shrinkage and fall back "
+                "to the hand-authored priors when sample is small. Refresh "
+                "rebuilds the blended tables; backtest replays every logged "
+                "match and reports the engine's hit-rate.",
+                color=C["txt_dim"][:3], wrap=560)
+            dpg.add_spacer(height=10)
+            with dpg.group(horizontal=True):
+                info_btn = dpg.add_button(label="ENGINE INFO",
+                                          callback=_engine_info, width=140, height=28)
+                if "raj_sb_14" in _F: dpg.bind_item_font(info_btn, _F["raj_sb_14"])
+                dpg.add_spacer(width=10)
+                rs_btn = dpg.add_button(label="REFRESH SIGNALS",
+                                        callback=_engine_refresh, width=170, height=28)
+                if "raj_sb_14" in _F: dpg.bind_item_font(rs_btn, _F["raj_sb_14"])
+                dpg.add_spacer(width=10)
+                bt_btn = dpg.add_button(label="RUN BACKTEST",
+                                        callback=_engine_backtest, width=150, height=28)
+                if "raj_sb_14" in _F: dpg.bind_item_font(bt_btn, _F["raj_sb_14"])
+            dpg.add_spacer(height=6)
+            dpg.add_text(tag="set_engine_status", default_value="",
+                         color=C["txt_dim"][:3], wrap=560)
+
         dpg.add_spacer(height=28)
         dpg.add_separator()
         dpg.add_spacer(height=20)
@@ -319,6 +445,23 @@ def _test_connection():
     test_sheets_connection(on_done=_done, on_error=_err)
 
 
+def _apply_audio_volume():
+    """Phase 3 — master volume slider moved. Live-applies + persists."""
+    if not dpg.does_item_exist("set_audio_volume"):
+        return
+    v = float(dpg.get_value("set_audio_volume"))
+    settings.audio_volume = max(0.0, min(1.0, v))
+    if dpg.does_item_exist("set_audio_volume_label"):
+        dpg.set_value("set_audio_volume_label",
+                      f"{int(settings.audio_volume * 100)}%")
+    try:
+        from ui import audio as _audio
+        _audio.set_volume(settings.audio_volume)
+    except Exception:
+        pass
+    settings.save()
+
+
 def _apply_audio_enabled():
     """Audio toggle changed — persist and apply to the live audio module."""
     enabled = (bool(dpg.get_value("set_audio_enabled"))
@@ -332,6 +475,35 @@ def _apply_audio_enabled():
         pass
 
 
+def _intensity_label(v):
+    """Human-readable label for an animation-intensity value."""
+    if v <= 0.01:
+        return "Off"
+    if v < 0.34:
+        return "Subtle"
+    if v < 0.67:
+        return "Balanced"
+    if v < 0.99:
+        return "Lively"
+    return "Full"
+
+
+def _apply_anim_intensity():
+    """Animation-intensity slider changed — persist and apply live."""
+    v = (float(dpg.get_value("set_anim_intensity"))
+         if dpg.does_item_exist("set_anim_intensity") else 1.0)
+    settings.anim_intensity = v
+    settings.save()
+    if dpg.does_item_exist("set_anim_intensity_lbl"):
+        dpg.configure_item("set_anim_intensity_lbl",
+                           default_value=_intensity_label(v))
+    try:
+        from core.animations import anim
+        anim.set_intensity(v)
+    except Exception:
+        pass
+
+
 def _save_settings():
     settings.api_key    = dpg.get_value("set_api_key")
     settings.sheet_url  = dpg.get_value("set_sheet_url")
@@ -340,6 +512,8 @@ def _save_settings():
     settings.creds_path = dpg.get_value("set_creds_path")
     if dpg.does_item_exist("set_audio_enabled"):
         settings.audio_enabled = bool(dpg.get_value("set_audio_enabled"))
+    if dpg.does_item_exist("set_anim_intensity"):
+        settings.anim_intensity = float(dpg.get_value("set_anim_intensity"))
     try:
         settings.save()
         dpg.configure_item("set_save_status", default_value="✓  Settings saved.")
@@ -529,6 +703,243 @@ def _save_icon():
                                default_value=f"✗  {msg[:80]}")
 
     upload_player_avatar(name, path, on_done=_done, on_error=_err)
+
+
+def _engine_info():
+    """Pull /api/engine/info on a background thread and show key counts."""
+    if dpg.does_item_exist("set_engine_status"):
+        dpg.configure_item("set_engine_status",
+                           default_value="⟳  Querying engine…",
+                           color=C["txt_dim"][:3])
+
+    def _bg():
+        try:
+            from data import engine_api
+            info = engine_api.info()
+            if not info:
+                _set_engine_status("✗  Engine unreachable.", C["loss"])
+                return
+            s = info.get("signals", {})
+            msg = (f"✓  engine={info.get('engine','?')}  "
+                   f"counters={s.get('counter_keys',0)}  "
+                   f"synergies={s.get('synergy_keys',0)}  "
+                   f"strength={s.get('strength_keys',0)}  "
+                   f"k={s.get('shrinkage_k','?')}  "
+                   f"refreshed={s.get('last_refresh','never')}")
+            _set_engine_status(msg, C["win"])
+        except Exception as e:
+            _set_engine_status(f"✗  {str(e)[:80]}", C["loss"])
+
+    threading.Thread(target=_bg, daemon=True, name="engine_info").start()
+
+
+def _engine_refresh():
+    """Force a rebuild of the blended signal tables."""
+    if dpg.does_item_exist("set_engine_status"):
+        dpg.configure_item("set_engine_status",
+                           default_value="⟳  Rebuilding signal tables…",
+                           color=C["txt_dim"][:3])
+
+    def _bg():
+        try:
+            from data import engine_api
+            r = engine_api.refresh_signals()
+            if r and r.get("ok"):
+                msg = (f"✓  refreshed at {r.get('at','?')}  "
+                       f"counters={r.get('counter_keys',0)}  "
+                       f"synergies={r.get('synergy_keys',0)}  "
+                       f"strength={r.get('strength_keys',0)}")
+                _set_engine_status(msg, C["win"])
+            else:
+                _set_engine_status("✗  refresh failed.", C["loss"])
+        except Exception as e:
+            _set_engine_status(f"✗  {str(e)[:80]}", C["loss"])
+
+    threading.Thread(target=_bg, daemon=True, name="engine_refresh").start()
+
+
+def _engine_backtest():
+    """Replay every logged match through the engine and show the hit-rate."""
+    if dpg.does_item_exist("set_engine_status"):
+        dpg.configure_item("set_engine_status",
+                           default_value="⟳  Running backtest…",
+                           color=C["txt_dim"][:3])
+
+    def _bg():
+        try:
+            from data import engine_api
+            r = engine_api.backtest_run()
+            if not r:
+                _set_engine_status("✗  Backtest unreachable.", C["loss"])
+                return
+            s = r.get("summary", {})
+            acc = s.get("accuracy", 0.0)
+            msg = (f"✓  {s.get('correct',0)}/{s.get('matches',0)} "
+                   f"({acc*100:.1f}% accuracy)  "
+                   f"skipped={s.get('skipped',0)}  "
+                   f"at={s.get('at','?')}")
+            color = C["win"] if acc >= 0.5 else C["gold_dk"]
+            _set_engine_status(msg, color)
+        except Exception as e:
+            _set_engine_status(f"✗  {str(e)[:80]}", C["loss"])
+
+    threading.Thread(target=_bg, daemon=True, name="engine_backtest").start()
+
+
+def _set_engine_status(msg, color):
+    if dpg.does_item_exist("set_engine_status"):
+        dpg.configure_item("set_engine_status",
+                           default_value=msg, color=color[:3])
+
+
+def _backfill_db():
+    """Push every row of _InhouseGameLog into the REST API store."""
+    if dpg.does_item_exist("set_dataapi_status"):
+        dpg.configure_item("set_dataapi_status",
+                           default_value="⟳  Reading sheet & posting…",
+                           color=C["txt_dim"][:3])
+
+    def _prog(msg):
+        if dpg.does_item_exist("set_dataapi_status"):
+            dpg.configure_item("set_dataapi_status",
+                               default_value=f"⟳  {msg}",
+                               color=C["txt_dim"][:3])
+
+    def _done(counts):
+        if dpg.does_item_exist("set_dataapi_status"):
+            ok = counts.get("ingested", 0)
+            bad = counts.get("failed", 0)
+            n  = counts.get("games_found", 0)
+            msg = f"✓  {ok} of {n} games ingested" + (
+                  f" ({bad} failed)" if bad else "")
+            dpg.configure_item("set_dataapi_status",
+                               default_value=msg, color=C["win"][:3])
+        # Invalidate cached match/records data so the freshly ingested rows
+        # show up in HISTORY / RIVALS / RECORDS on next view.
+        try:
+            from data.reader import live, load_match_history, load_records
+            with live._lock:
+                live.match_history = []
+                live.match_history_loaded = False
+                live.match_history_error = None
+                live.records = {}
+                live.records_loaded = False
+                live.records_error = None
+                live.rivalries = {}
+                live.rivalries_loaded = {}
+                live.rivalries_error = None
+            if counts.get("ingested", 0):
+                load_match_history()
+                load_records()
+        except Exception:
+            pass
+
+    def _err(msg):
+        if dpg.does_item_exist("set_dataapi_status"):
+            dpg.configure_item("set_dataapi_status",
+                               default_value=f"✗  {str(msg)[:80]}",
+                               color=C["loss"][:3])
+
+    try:
+        from data.sheet_mirror import backfill_from_sheets
+        backfill_from_sheets(on_progress=_prog, on_done=_done, on_error=_err)
+    except Exception as e:
+        _err(str(e))
+
+
+def _mirror_db():
+    """Pull /api/export and rewrite the _RiftDB_* mirror tabs."""
+    if dpg.does_item_exist("set_dataapi_status"):
+        dpg.configure_item("set_dataapi_status",
+                           default_value="⟳  Pulling export & writing sheets…",
+                           color=C["txt_dim"][:3])
+
+    def _prog(msg):
+        if dpg.does_item_exist("set_dataapi_status"):
+            dpg.configure_item("set_dataapi_status",
+                               default_value=f"⟳  {msg}",
+                               color=C["txt_dim"][:3])
+
+    def _done(counts):
+        if dpg.does_item_exist("set_dataapi_status"):
+            msg = (f"✓  Backed up {counts.get('matches',0)} matches, "
+                   f"{counts.get('participants',0)} participants, "
+                   f"{counts.get('drafts',0)} drafts")
+            dpg.configure_item("set_dataapi_status",
+                               default_value=msg, color=C["win"][:3])
+
+    def _err(msg):
+        if dpg.does_item_exist("set_dataapi_status"):
+            dpg.configure_item("set_dataapi_status",
+                               default_value=f"✗  {str(msg)[:80]}",
+                               color=C["loss"][:3])
+
+    try:
+        from data.sheet_mirror import full_refresh
+        full_refresh(on_progress=_prog, on_done=_done, on_error=_err)
+    except Exception as e:
+        _err(str(e))
+
+
+def _repair_matches():
+    """Walk every server-side match, re-fetch any with <10 participants from
+    the local LCU, and post the full payload back. Needs the League client
+    running. Idempotent and safe to re-run."""
+    if dpg.does_item_exist("set_dataapi_status"):
+        dpg.configure_item("set_dataapi_status",
+                           default_value="⟳  Scanning matches…",
+                           color=C["txt_dim"][:3])
+
+    def _prog(msg):
+        if dpg.does_item_exist("set_dataapi_status"):
+            dpg.configure_item("set_dataapi_status",
+                               default_value=f"⟳  {msg}",
+                               color=C["txt_dim"][:3])
+
+    def _done(counts):
+        if dpg.does_item_exist("set_dataapi_status"):
+            chk = counts.get("checked", 0)
+            rep = counts.get("repaired", 0)
+            sk  = counts.get("skipped", 0)
+            fl  = counts.get("failed", 0)
+            msg = (f"✓  Checked {chk}, repaired {rep}"
+                   + (f", skipped {sk}" if sk else "")
+                   + (f", failed {fl}" if fl else ""))
+            dpg.configure_item("set_dataapi_status",
+                               default_value=msg, color=C["win"][:3])
+        # Invalidate cached views so the user sees the freshly repaired
+        # participants when they next open HISTORY / RIVALS / RECORDS.
+        try:
+            from data.reader import live, load_match_history, load_records
+            with live._lock:
+                live.match_history = []
+                live.match_history_loaded = False
+                live.match_history_error = None
+                live.records = {}
+                live.records_loaded = False
+                live.records_error = None
+                live.rivalries = {}
+                live.rivalries_loaded = {}
+                live.rivalries_error = None
+            # Kick off a fresh fetch in the background so the data is warm.
+            if rep:
+                load_match_history()
+                load_records()
+        except Exception:
+            pass
+
+    def _err(msg):
+        if dpg.does_item_exist("set_dataapi_status"):
+            dpg.configure_item("set_dataapi_status",
+                               default_value=f"✗  {str(msg)[:80]}",
+                               color=C["loss"][:3])
+
+    try:
+        from data.reader import repair_match_participants
+        repair_match_participants(on_progress=_prog,
+                                  on_done=_done, on_error=_err)
+    except Exception as e:
+        _err(str(e))
 
 
 def _sync_all_avatars():

@@ -82,6 +82,34 @@ a = Analysis(
         'ui.lol_theme',
         'ui.audio',
         'ui.board_rail',
+        # Phase 0a / 0b — polish toolkit + design tokens.
+        'ui.toast',
+        'ui.tokens',
+        'ui.fmt',
+        # Phase 4 + 5 + 6 — new surfaces / overlays.
+        'ui.home',
+        'ui.profile',
+        'ui.wrapped',
+        'ui.hotkeys',
+        # Phase 5c — share-card renderer (PIL-based).
+        'data.share_cards',
+        # Phase 0d / Phase 2 / Phase 1 — REST + engine clients + sheet mirror.
+        'data.rift_api',
+        'data.engine_api',
+        'data.sheet_mirror',
+        # Phase 1 — modularized fetch-ranks package.
+        'data.fetch_ranks',
+        'data.fetch_ranks.constants',
+        'data.fetch_ranks.sheets',
+        'data.fetch_ranks.scoring',
+        'data.fetch_ranks.riot',
+        'data.fetch_ranks.tier_analytics',
+        'data.fetch_ranks.rankings',
+        'data.fetch_ranks.scouting',
+        'data.fetch_ranks.inhouse',
+        'data.fetch_ranks.activity',
+        'data.fetch_ranks.draft',
+        'data.fetch_ranks.cli',
         # Draft Tool v3 — pygame.mixer cue wrapper (ui/audio.py).
         # Optional: when pygame isn't installed (no prebuilt wheel for the
         # current Python), the audio module silently no-ops at runtime.

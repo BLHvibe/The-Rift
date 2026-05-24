@@ -7,6 +7,7 @@ import math, time, threading, os, random
 import dearpygui.dearpygui as dpg
 from theme import C
 from core.animations import anim
+from ui import effects, toast
 from data.config import load_config, save_config
 from data.reader import write_tier_list
 from data.tips import TIPS
@@ -135,8 +136,7 @@ class TierListState:
         self.bounce      = {}          # name > scale factor (0.8>1.0 on drop)
         self.scroll_off  = 0           # pool scroll offset in px
         self._pool_h     = 0           # measured pool height for scroll clamping
-        self.submit_status = ""        # "" | "Submitting…" | "✓ Submitted" | "✗ Error: ..."
-        self.submit_flash  = 0.0       # monotonic time of last status set (fades after 4s)
+        self.submitting    = False     # True while a submit is in flight
         self.rater_name    = _load_rater_name()   # persisted "Rating as:" identity
 
     def place(self, name, tier):
@@ -166,8 +166,7 @@ class TierListState:
         self.bounce      = {}
         self.scroll_off  = 0
         self._pool_h     = 0
-        self.submit_status = ""
-        self.submit_flash  = 0.0
+        self.submitting    = False
         self.rater_name    = _load_rater_name()
 
 
@@ -426,6 +425,15 @@ def _txt(dl, x, y, text, color, size, font_key=None):
     return tag
 
 
+def _card_hovered(x, y, w, h):
+    """True when the cursor is over the rect (content-area-relative coords)."""
+    m  = dpg.get_mouse_pos(local=False)
+    vp = dpg.get_viewport_pos()
+    rx = m[0] - vp[0] - 68
+    ry = m[1] - vp[1] - 52
+    return x <= rx <= x + w and y <= ry <= y + h
+
+
 # ---------------------------------------------------------------------------
 # Main draw
 # ---------------------------------------------------------------------------
@@ -499,12 +507,6 @@ def _draw_top_bar(dl, vw):
                         rounding=4, parent=dl)
     _txt(dl, sbx+14, sby+8, "SUBMIT LIST", (*C["gold_lt"][:3],230), 17, "raj_sb_16")
 
-    # Submit status flash
-    status = tl.submit_status
-    if status and (time.monotonic() - tl.submit_flash) < 5.0:
-        st_col = C["win"] if status.startswith("✓") else C["loss"] if status.startswith("✗") else C["txt_dim"]
-        _txt(dl, sbx - 320, sby+8, status, (*st_col[:3],220), 17, "raj_r_16")
-
     if dpg.is_mouse_button_clicked(0):
         mouse = dpg.get_mouse_pos(local=False)
         vp    = dpg.get_viewport_pos()
@@ -551,6 +553,41 @@ def _draw_rater_bar(dl, vw, rater_y, rater_h):
     if status:
         st_col = C["loss"] if status.startswith("✗") else C["txt_dim"]
         _txt(dl, bx + bw + 14, by + 6, status[:70], (*st_col[:3], 200), 16, "raj_r_16")
+
+    # Phase 3 — LEAGUE PULSE: rotating insight from cross-rater meta.
+    # Lazy-load on first draw; cached on `live` so subsequent draws are cheap.
+    from data.reader import live as _live, load_tier_meta as _ltm
+    if (not _live.tier_meta_loaded and not _live._tier_meta_inflight
+            and not _live.tier_meta_error):
+        _ltm()
+    pulse_x = vw - PAD - 380
+    if pulse_x > bx + bw + 200:
+        _txt(dl, pulse_x, ty - 1, "LEAGUE PULSE",
+             (*C["gold"][:3], 200), 12, "raj_sb_14")
+        if _live.tier_meta_loaded and (_live.tier_hot_takes or _live.tier_consensus):
+            # Pick one of: top hot take, or most-controversial consensus pick.
+            import time as _t
+            tick = int(_t.monotonic() / 6) % 2
+            line = ""
+            if tick == 0 and _live.tier_hot_takes:
+                ht = _live.tier_hot_takes[0]
+                line = f"{ht['rater']} rates {ht['player']} as {ht['rated']} (group avg {ht['avg']})"
+            elif _live.tier_consensus:
+                top = sorted(_live.tier_consensus, key=lambda x: -x.get("std", 0))[0]
+                line = f"Most controversial: {top['name']} — {top.get('verdict','')}"
+            elif _live.tier_hot_takes:
+                ht = _live.tier_hot_takes[0]
+                line = f"{ht['rater']} rates {ht['player']} as {ht['rated']} (group avg {ht['avg']})"
+            if line:
+                _txt(dl, pulse_x + 110, ty, line[:78],
+                     (*C["txt_dim"][:3], 220), 14, "raj_r_14")
+        elif _live._tier_meta_inflight:
+            _txt(dl, pulse_x + 110, ty, "loading…",
+                 (*C["txt_dim"][:3], 160), 14, "raj_r_14")
+        else:
+            _txt(dl, pulse_x + 110, ty,
+                 "run fetch_ranks to populate cross-rater meta",
+                 (*C["txt_dim"][:3], 140), 13, "raj_r_14")
 
     if not busy and dpg.is_mouse_button_clicked(0):
         mouse = dpg.get_mouse_pos(local=False)
@@ -659,8 +696,13 @@ def _draw_card(dl, cx, cy, name, ghost=False, scale=1.0, dragging=False):
                             fill=(0,0,0,0), color=(*C["rule_dark"][:3],120),
                             rounding=4, parent=dl)
         return
+    hov = (not dragging and tl.drag_name is None
+           and _card_hovered(cx, cy, CARD_W, CARD_H))
+    amt = effects.hover_amt(f"tlcard:{name}", hov)
+    if amt > 0.01:
+        effects.draw_hover_glow(dl, ox, oy, ox+w, oy+h, C["gold"], amt, rounding=4)
     fill_col = (*C["card_hover"][:3],230) if dragging else (*C["card"][:3],220)
-    border   = (*C["gold"][:3],220)       if dragging else (*C["rule_dark"][:3],180)
+    border   = (*C["gold"][:3],220) if (dragging or hov) else (*C["rule_dark"][:3],180)
     dpg.draw_rectangle((ox,oy),(ox+w,oy+h), fill=fill_col, color=border,
                         rounding=4, parent=dl)
     fs = max(16, int(20*scale))
@@ -674,8 +716,15 @@ def _draw_pool_card(dl, cx, cy, name, ghost=False):
                             fill=(0,0,0,0), color=(*C["rule_dark"][:3],100),
                             rounding=4, parent=dl)
         return
+    hov = (tl.drag_name is None
+           and _card_hovered(cx, cy, POOL_CARD_W, POOL_CARD_H))
+    amt = effects.hover_amt(f"tlpool:{name}", hov)
+    if amt > 0.01:
+        effects.draw_hover_glow(dl, cx, cy, cx+POOL_CARD_W, cy+POOL_CARD_H,
+                                C["gold"], amt, rounding=4)
+    border = (*C["gold"][:3],220) if hov else (*C["rule_dark"][:3],160)
     dpg.draw_rectangle((cx,cy),(cx+POOL_CARD_W,cy+POOL_CARD_H),
-                        fill=(*C["card"][:3],210), color=(*C["rule_dark"][:3],160),
+                        fill=(*C["card"][:3],210), color=border,
                         rounding=4, parent=dl)
     _txt(dl, cx+8, cy+POOL_CARD_H//2-10, name, (*C["txt"][:3],220), 21, "raj_20")
 
@@ -777,33 +826,38 @@ def _detect_identity_bg():
 # ---------------------------------------------------------------------------
 
 def _do_submit():
-    """Validate and submit the tier list directly — no confirmation dialog."""
-    # Guard: already submitting
-    if tl.submit_status == "Submitting…":
+    """Validate and submit the tier list — feedback via the toast stack."""
+    if tl.submitting:
         return
-
-    # Validation
     if not tl.rater_name:
-        tl.submit_status = "⚠  Detect your identity from the LoL client first."
-        tl.submit_flash  = time.monotonic()
+        toast.push("Detect your identity from the LoL client first.",
+                   kind="warn", title="Can't submit")
         return
-
     placed = sum(len(v) for v in tl.placements.values())
     if placed == 0:
-        tl.submit_status = "⚠  Place at least one player before submitting."
-        tl.submit_flash  = time.monotonic()
+        toast.push("Place at least one player before submitting.",
+                   kind="warn", title="Can't submit")
         return
-
     name = tl.rater_name
-    tl.submit_status = "Submitting…"
-    tl.submit_flash  = time.monotonic()
+    tl.submitting = True
 
     def _done():
-        tl.submit_status = f"✓  Submitted as {name}"
-        tl.submit_flash  = time.monotonic()
+        tl.submitting = False
+        toast.push(f"Tier list submitted as {name}.",
+                   kind="success", title="Submitted")
+        # Drop a TIER_LIST activity event so the feed reflects something other
+        # than inhouse log events. Best-effort — never block the success toast.
+        try:
+            from data.reader import write_activity_event
+            placed_count = sum(len(v) for v in (tl.placements or {}).values())
+            write_activity_event(
+                "TIER_LIST", name,
+                f"submitted tier-list ratings — {placed_count} placed")
+        except Exception:
+            pass
 
     def _err(msg):
-        tl.submit_status = f"✗  Error: {msg[:60]}"
-        tl.submit_flash  = time.monotonic()
+        tl.submitting = False
+        toast.push(str(msg)[:90], kind="error", title="Submit failed")
 
     write_tier_list(tl.placements, name, on_done=_done, on_error=_err)

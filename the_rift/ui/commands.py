@@ -16,6 +16,74 @@ _CMD_WIN = "commands_overlay_win"
 # ---------------------------------------------------------------------------
 # State
 # ---------------------------------------------------------------------------
+_freshness = {"stats": None, "loading": False, "error": None, "last_check": 0.0}
+
+
+def _refresh_stats(async_call=True):
+    """Phase 3 — pull /api/stats and refresh the DATA FRESHNESS display."""
+    import threading, time as _t
+    if _freshness["loading"]:
+        return
+    _freshness["loading"] = True
+    _freshness["last_check"] = _t.monotonic()
+    def _bg():
+        try:
+            from data import rift_api
+            s = rift_api.get_stats() or {}
+            _freshness["stats"] = s
+            _freshness["error"] = None
+        except Exception as e:
+            _freshness["error"] = str(e)
+        finally:
+            _freshness["loading"] = False
+            _refresh_freshness_text()
+    if async_call:
+        threading.Thread(target=_bg, daemon=True, name="cmd_freshness").start()
+    else:
+        _bg()
+
+
+def _fmt_ingest(ts):
+    """ISO timestamp → 'just now' / 'Xm ago' / 'Xh ago' / 'May 1, 12:00'."""
+    if not ts: return "never"
+    try:
+        import datetime as _dt
+        s = str(ts).replace("Z", "+00:00")
+        d = _dt.datetime.fromisoformat(s)
+        now = _dt.datetime.now(d.tzinfo) if d.tzinfo else _dt.datetime.now()
+        delta = (now - d).total_seconds()
+        if delta < 60:        return "just now"
+        if delta < 3600:      return f"{int(delta//60)}m ago"
+        if delta < 86400:     return f"{int(delta//3600)}h ago"
+        return d.strftime("%b %d, %H:%M")
+    except Exception:
+        return str(ts)
+
+
+def _refresh_freshness_text():
+    """Repaint the DATA FRESHNESS labels. Safe to call from main thread."""
+    if not dpg.does_item_exist("freshness_summary"):
+        return
+    s = _freshness["stats"] or {}
+    err = _freshness["error"]
+    if _freshness["loading"]:
+        text = "  syncing…"
+        col = C["gold_dk"][:3]
+    elif err:
+        text = f"  could not reach API: {err[:80]}"
+        col = C["loss"][:3]
+    elif s:
+        text = (f"  matches: {s.get('matches', 0)}    "
+                f"participants: {s.get('participants', 0)}    "
+                f"last ingest: {_fmt_ingest(s.get('last_ingest'))}\n"
+                f"  db: {s.get('db_path', '?')}")
+        col = C["txt"][:3]
+    else:
+        text = "  not loaded — press REFRESH STATS"
+        col = C["txt_dim"][:3]
+    dpg.configure_item("freshness_summary", default_value=text, color=col)
+
+
 class CommandsState:
     def __init__(self):
         self._log_q    = queue.SimpleQueue()
@@ -54,7 +122,7 @@ cmds = CommandsState()
 TOP_BAR_H = 52
 PAD       = 20
 BTN_W     = 260
-BTN_H     = 44
+BTN_H     = 32   # compressed from 44 so all commands fit without scrolling
 
 
 def _txt(dl, x, y, text, color, size, font_key=None):
@@ -85,13 +153,18 @@ def draw_commands(dl, vw, vh, fonts=None):
                   color=C["rule_dark"], thickness=1, parent=dl)
     _txt(dl, PAD, 12, "ADMIN / COMMANDS", (*C["gold"][:3],220), 22, "cinzel_22")
 
-    # Overlay window: position relative to actual sidebar width, not hardcoded 68
+    # Overlay window: position relative to actual sidebar width, not hardcoded 68.
+    # Left inset keeps the content from hugging the sidebar (looked misplaced).
+    LEFT_INSET = 32
     vp_w = dpg.get_viewport_width()
     sb_w = vp_w - vw   # actual current sidebar pixel width
+    win_x = sb_w + LEFT_INSET
+    win_w = max(360, vw - LEFT_INSET)
     if not dpg.does_item_exist(_CMD_WIN):
-        _build_commands_window(sb_w, vw, vh)
+        _build_commands_window(win_x, win_w, vh)
     else:
-        dpg.configure_item(_CMD_WIN, pos=(sb_w, TOP_BAR_H), width=vw, height=vh-TOP_BAR_H)
+        dpg.configure_item(_CMD_WIN, pos=(win_x, TOP_BAR_H),
+                           width=win_w, height=vh-TOP_BAR_H)
 
     # Flush pending log lines into console widget (main thread only)
     if changed and dpg.does_item_exist("cmd_console"):
@@ -116,65 +189,55 @@ def _build_commands_window(sb_w, vw, vh):
                 _section_hdr("DATA COMMANDS")
 
                 _cmd_button(">  FETCH RANKS",
-                            "Fetch latest ranks from Google Sheets + Riot API.",
-                            _run_fetch_ranks)
-                dpg.add_text(tag="ts_fetch_ranks", default_value="",
-                             color=C["txt_dim"][:3])
-                if "raj_r_18" in _F:
-                    dpg.bind_item_font(dpg.last_item(), _F["raj_r_18"])
-                dpg.add_spacer(height=8)
-
+                            "Latest ranks from Google Sheets + Riot API.",
+                            _run_fetch_ranks, status_tag="ts_fetch_ranks")
                 _cmd_button(">  RUN SCOUT",
-                            "Fetch scouting data for all players.",
-                            _run_scout)
-                dpg.add_text(tag="ts_scout", default_value="",
-                             color=C["txt_dim"][:3])
-                if "raj_r_18" in _F:
-                    dpg.bind_item_font(dpg.last_item(), _F["raj_r_18"])
-                dpg.add_spacer(height=8)
-
+                            "Scouting data for all players.",
+                            _run_scout, status_tag="ts_scout")
                 _cmd_button(">  SETUP DRAFT",
                             "Prepare the Draft Tool sheet with current roster.",
-                            _run_setup_draft)
-                dpg.add_text(tag="ts_draft", default_value="",
-                             color=C["txt_dim"][:3])
-                if "raj_r_18" in _F:
-                    dpg.bind_item_font(dpg.last_item(), _F["raj_r_18"])
-                dpg.add_spacer(height=8)
-
+                            _run_setup_draft, status_tag="ts_draft")
                 _cmd_button(">  LOG INHOUSE GAME",
                             "Connect to LCU and log the last custom game.",
-                            _run_inhouse)
-                dpg.add_text(tag="ts_inhouse", default_value="",
-                             color=C["txt_dim"][:3])
-                if "raj_r_18" in _F:
-                    dpg.bind_item_font(dpg.last_item(), _F["raj_r_18"])
-                dpg.add_spacer(height=24)
+                            _run_inhouse, status_tag="ts_inhouse")
 
-                # ── Stop button ───────────────────────────────────────────
+                dpg.add_spacer(height=10)
+                # ── Stop button (no separate tooltip — label is self-explanatory) ──
                 dpg.add_button(label="⬛  STOP PROCESS",
                                callback=_stop_process,
                                width=BTN_W, height=BTN_H)
                 if "raj_sb_16" in _F:
                     dpg.bind_item_font(dpg.last_item(), _F["raj_sb_16"])
-                dpg.add_text("Kill the currently running command.",
-                             color=C["txt_dim"][:3], wrap=BTN_W)
-                if "raj_r_18" in _F:
-                    dpg.bind_item_font(dpg.last_item(), _F["raj_r_18"])
-                dpg.add_spacer(height=10)
+                dpg.add_spacer(height=6)
                 dpg.add_progress_bar(tag="cmd_progress", default_value=0.0,
-                                     width=BTN_W, height=14)
-                dpg.add_spacer(height=14)
+                                     width=BTN_W, height=12)
+                dpg.add_spacer(height=10)
+
+                _section_hdr("DATA FRESHNESS")
+                t = dpg.add_text("not loaded — press REFRESH",
+                                 tag="freshness_summary",
+                                 color=C["txt_dim"][:3], wrap=BTN_W)
+                if "raj_r_18" in _F: dpg.bind_item_font(t, _F["raj_r_18"])
+                dpg.add_spacer(height=4)
+                btn = dpg.add_button(label="↻  REFRESH STATS",
+                                     callback=lambda: _refresh_stats(True),
+                                     width=BTN_W, height=BTN_H)
+                if "raj_sb_16" in _F: dpg.bind_item_font(btn, _F["raj_sb_16"])
+                dpg.add_spacer(height=10)
+                # Kick off an initial fetch in the background so the panel
+                # populates the first time the tab is drawn.
+                if _freshness["stats"] is None and not _freshness["loading"]:
+                    _refresh_stats(True)
 
                 _section_hdr("ROSTER")
                 _cmd_button(">  JOIN TIER LIST",
                             "Register a new player into the tier list.",
                             _open_join_dialog)
-                dpg.add_spacer(height=24)
+                dpg.add_spacer(height=10)
                 _section_hdr("CONSOLE")
                 with dpg.group(horizontal=True):
                     dpg.add_button(label="Clear console", callback=_clear_console,
-                                   width=130, height=30)
+                                   width=130, height=28)
 
             dpg.add_spacer(width=PAD)
 
@@ -195,15 +258,24 @@ def _section_hdr(text):
     dpg.add_spacer(height=8)
 
 
-def _cmd_button(label, tooltip, callback):
+def _cmd_button(label, tooltip, callback, status_tag=None):
+    """Compact command row: button + small description + last-run timestamp.
+    The tooltip text is shown inline below the button (no separate spacer-heavy
+    block) so the whole command list fits on screen without scrolling."""
     btn = dpg.add_button(label=label, callback=callback,
                          width=BTN_W, height=BTN_H)
     if "raj_sb_16" in _F:
         dpg.bind_item_font(btn, _F["raj_sb_16"])
-    t = dpg.add_text(tooltip, color=C["txt_dim"][:3], wrap=BTN_W)
-    if "raj_r_18" in _F:
-        dpg.bind_item_font(t, _F["raj_r_18"])
-    dpg.add_spacer(height=2)
+    with dpg.tooltip(btn):
+        tt = dpg.add_text(tooltip, color=C["txt_dim"][:3], wrap=320)
+        if "raj_r_18" in _F:
+            dpg.bind_item_font(tt, _F["raj_r_18"])
+    if status_tag:
+        st = dpg.add_text(tag=status_tag, default_value="",
+                          color=C["txt_dim"][:3])
+        if "raj_r_18" in _F:
+            dpg.bind_item_font(st, _F["raj_r_18"])
+    dpg.add_spacer(height=4)
 
 
 def _refresh_console():
@@ -277,6 +349,17 @@ def _run_script(label, script_name, extra_args=None):
         cmds.progress = 1.0
         if dpg.does_item_exist("cmd_progress"):
             dpg.set_value("cmd_progress", 1.0)
+        # Emit an activity event so the feed shows something beyond inhouse logs.
+        try:
+            from data.reader import write_activity_event
+            kind = ("SCOUT" if extra_args and "--scout" in extra_args else
+                    "DRAFT" if extra_args and "--setup-draft" in extra_args else
+                    "UPDATE")
+            actor = (load_config().get("display_name") or
+                     load_config().get("admin") or "system")
+            write_activity_event(kind, actor, f"{label.rstrip('…')} complete")
+        except Exception:
+            pass
 
     def _finish_err(msg=""):
         if msg:

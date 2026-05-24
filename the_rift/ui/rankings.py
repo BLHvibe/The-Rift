@@ -11,6 +11,7 @@ from data.tips import TIPS as _TIPS
 from data.config import load_rank_snapshot, save_rank_snapshot
 from core.state import state
 from core.animations import anim, ParticleSystem, Ripple
+from ui import effects
 
 # ---------------------------------------------------------------------------
 # Fixed aesthetic constants (not dependent on screen size)
@@ -42,9 +43,25 @@ DELAY_CHAL_TO_REST= 400
 DELAY_REST_EACH   = 55
 
 # ---------------------------------------------------------------------------
-# Dynamic layout — recomputed every frame from actual content area
+# Dynamic layout — recomputed every frame from actual content area.
+# Seeded with safe defaults for a typical viewport so the reveal-tween
+# callbacks (`_card_center` → `_col_x`) never KeyError when they fire before
+# the user has visited the Rankings tab (e.g. now that HOME is the default).
+# `_compute_layout()` overwrites these on the first real draw.
 # ---------------------------------------------------------------------------
-_L = {}   # populated by _compute_layout() at the top of draw_rankings()
+_DEFAULT_CONTENT_W = 1212   # 1280 - 68 (sidebar)
+_DEFAULT_CONTENT_H = 642    # 720 - 52 (titlebar) - 26 (ticker)
+_DEFAULT_INNER_W   = _DEFAULT_CONTENT_W - OUTER_PAD * 2
+_DEFAULT_COL_W     = (_DEFAULT_INNER_W - COL_GAP * 2) // 3
+_L = {
+    "content_w":  _DEFAULT_CONTENT_W,
+    "content_h":  _DEFAULT_CONTENT_H,
+    "inner_w":    _DEFAULT_INNER_W,
+    "col_w":      _DEFAULT_COL_W,
+    "hero_top":   TOP_PAD,
+    "side_top":   TOP_PAD + SIDE_OFFSET,
+    "podium_bot": TOP_PAD + SIDE_OFFSET + SIDE_H,
+}
 _name_hitboxes = []   # [(x1, y1, x2, y2, player_name), ...] rebuilt each frame
 
 def _compute_layout(content_w, content_h):
@@ -360,6 +377,16 @@ def _txt(dl, x, y, text, color, size, font_key=None):
     return tag
 
 
+def _score_disp(key, raw):
+    """Score as a display string — count-up animated when the value is
+    numeric, so the number climbs into place as a card reveals."""
+    try:
+        target = float(raw)
+    except (TypeError, ValueError):
+        return str(raw)
+    return str(int(round(effects.count_up(f"rkscore:{key}", target))))
+
+
 def _draw_delta(dl, x, y, delta, alpha):
     """Draw a movement indicator: ▲N (green), ▼N (red), – (dim), NEW (gold)."""
     if alpha <= 0:
@@ -422,6 +449,55 @@ def _draw_streak_medallion(dl, x, y, streak, alpha=255, min_streak=3):
     dpg.draw_text((x + 4, y + 1), label,
                   color=(*col, alpha), size=14, parent=dl)
     return pw + 6
+
+
+def _player_results(raw_name, n=8):
+    """Return last `n` W/L results for a player (1=W, 0=L) from live.inhouse,
+    most recent on the right. Empty list when none available."""
+    try:
+        from data.reader import live
+        for p in (live.inhouse or []):
+            if p.get("player") == raw_name:
+                return list(p.get("recent_results") or [])[-n:]
+    except Exception:
+        pass
+    return []
+
+
+def _draw_mini_sparkline(dl, x, y, results, alpha=255, dot_r=3, gap=4):
+    """Phase 3 — tiny W/L sparkline; most recent on the right."""
+    if not results:
+        return
+    win_col = (130, 210, 130)
+    loss_col = (220, 110, 110)
+    for i, r in enumerate(results):
+        col = win_col if r else loss_col
+        cx = x + i * (dot_r * 2 + gap)
+        dpg.draw_circle((cx, y), dot_r, fill=(*col, alpha),
+                        color=(0, 0, 0, 0), parent=dl)
+
+
+def _biggest_climber():
+    """Return (player_name, +delta) for the biggest positive mover since the
+    last rank snapshot, or None when no positive movement exists."""
+    best, best_d = None, 0
+    for name, d in (rankings.deltas or {}).items():
+        if d is None or d <= 0:
+            continue
+        if d > best_d:
+            best, best_d = name, d
+    return (best, best_d) if best else None
+
+
+def _biggest_faller():
+    """Return (player_name, -delta) for the biggest negative mover, or None."""
+    worst, worst_d = None, 0
+    for name, d in (rankings.deltas or {}).items():
+        if d is None or d >= 0:
+            continue
+        if d < worst_d:
+            worst, worst_d = name, d
+    return (worst, worst_d) if worst else None
 
 
 def _name_link(dl, x, y, name_upper, raw_name, color, size, font_key=None):
@@ -512,26 +588,24 @@ def draw_rankings(dl, vw, vh, fonts=None):
 # ---------------------------------------------------------------------------
 
 def _draw_loading(dl, vw, vh):
-    cx, cy = vw // 2, vh // 2
-    t  = (math.sin(rankings._load_t * 2.0) + 1) / 2
-    a  = int(80 + t * 130)
-    dots = "." * (int(rankings._load_t * 2) % 4)
-    label = f"LOADING RANKINGS{dots}"
-    _txt(dl, cx - len(label) * 7, cy - 30, label, (*C["gold_dk"][:3], a), 27, "raj_36")
+    """Skeleton placeholder of the rankings layout — the podium + rows morph
+    into real content once data lands, instead of popping in."""
+    col_w      = _L.get("col_w", 380)
+    hero_top   = _L.get("hero_top", TOP_PAD)
+    side_top   = _L.get("side_top", TOP_PAD + SIDE_OFFSET)
+    podium_bot = _L.get("podium_bot", side_top + SIDE_H)
+    row_w      = _L.get("inner_w", vw - OUTER_PAD * 2)
+    for rank, col in ((2, 0), (1, 1), (3, 2)):
+        x1 = _col_x(col)
+        y1 = hero_top if rank == 1 else side_top
+        h  = HERO_H   if rank == 1 else SIDE_H
+        effects.draw_skeleton_rect(dl, x1, y1, col_w, h, rounding=4)
+    for i in range(7):
+        ry = podium_bot + CHAL_PAD_T + i * (CHAL_H + CHAL_GAP)
+        effects.draw_skeleton_row(dl, OUTER_PAD, ry, row_w, CHAL_H)
     tip = rankings._tip
-    tip_x = max(40, cx - len(tip) * 5)
-    _txt(dl, tip_x, cy + 16, tip, (*C["txt_dim"][:3], int(a * 0.8)), 19, "raj_r_18")
-    # Animated loading bar
-    bar_w = min(400, vw - 120)
-    bar_x = cx - bar_w // 2
-    bar_y = cy + 62
-    prog  = (rankings._load_t % 1.8) / 1.8
-    fill  = int(bar_w * prog)
-    dpg.draw_rectangle((bar_x, bar_y), (bar_x + bar_w, bar_y + 4),
-                        fill=(*C["card"][:3], int(a * 0.5)), color=(0, 0, 0, 0), parent=dl)
-    if fill > 0:
-        dpg.draw_rectangle((bar_x, bar_y), (bar_x + fill, bar_y + 4),
-                            fill=(*C["gold_dk"][:3], a), color=(0, 0, 0, 0), parent=dl)
+    _txt(dl, max(40, vw // 2 - len(tip) * 5), vh - 48, tip,
+         (*C["txt_dim"][:3], 150), 18, "raj_r_18")
 
 
 def _draw_podium_cards(dl):
@@ -549,10 +623,19 @@ def _draw_podium_cards(dl):
         yo  = rankings.card_y_off.get(rank, 0)
         x1  = _col_x(col_idx)
         x2  = x1 + col_w
-        if rank == 1:
-            y1, h = hero_top + yo, HERO_H
-        else:
-            y1, h = side_top + yo, SIDE_H
+        base_y = hero_top if rank == 1 else side_top
+        h      = HERO_H   if rank == 1 else SIDE_H
+        # Gentle hover-lift once the card has fully revealed.
+        lift = 0.0
+        if al >= 200:
+            _mp  = dpg.get_mouse_pos(local=False)
+            _vp  = dpg.get_viewport_pos()
+            _mrx = _mp[0] - _vp[0] - 68
+            _mry = _mp[1] - _vp[1] - 52
+            _hov = (x1 <= _mrx <= x2 and
+                    base_y + yo <= _mry <= base_y + yo + h)
+            lift = effects.hover_lift(f"podium:{rank}", _hov, lift=5.0)
+        y1 = base_y + yo + lift
         y2 = y1 + h
 
         if al <= 0:
@@ -592,7 +675,7 @@ def _draw_podium_cards(dl):
 
         ts     = str(p.get("tier_score", "?"))
         rs     = str(p.get("rank_score", "?"))
-        fs     = str(p.get("final_score", p.get("score", "?")))
+        fs     = _score_disp(p.get("name", ""), p.get("final_score", p.get("score", "?")))
         avg    = str(p.get("avg_tier", ""))
         rating = str(p.get("rating", tier[:1].upper()))
 
@@ -602,7 +685,7 @@ def _draw_podium_cards(dl):
         if rank == 1:
             label_col = (*accent_color[:3], al)
             _txt(dl, x1+20, y1+18, "CHAMPION", label_col, 15, "raj_sb_18")
-            _txt(dl, x1+20, y1+44, "NO.", (*C["txt_dim"][:3], al), 19, "raj_sb_18")
+            _txt(dl, x1+20, y1+44, "NO.", (*C["txt2"][:3], al), 19, "raj_sb_18")
             _txt(dl, x1+78, y1+28, "1", (*C["gold_lt"][:3], al), 90, "raj_72")
             _name_link(dl, x1+20, y1+152, name, raw_name, (*C["gold"][:3], al), 31, "raj_36")
             _txt(dl, x2-150, y1+72, fs,
@@ -611,20 +694,20 @@ def _draw_podium_cards(dl):
             dpg.draw_line((x1+20, y1+192),(x1+col_w-30, y1+192),
                           color=(*C["gold_dk"][:3], al), thickness=1, parent=dl)
             _txt(dl, x1+20, y1+202, f"TIER {ts}  ·  RANK {rs}",
-                 (*C["txt_dim"][:3], al), 15, "raj_r_14")
+                 (*C["txt2"][:3], al), 16, "raj_r_14")
             _avatar_or_hex(dl, x2-70, y1+h-52, 44, raw_name,
                            C["card_hover"], (*C["gold"][:3], al),
                            label=name[:2], alpha=al)
         else:
             label = "RUNNER-UP" if rank == 2 else "THIRD"
             _txt(dl, x1+16, y1+14, label, (*accent_color[:3], al), 16, "raj_sb_16")
-            _txt(dl, x1+16, y1+32, "NO.", (*C["txt_dim"][:3], al), 17, "raj_sb_16")
+            _txt(dl, x1+16, y1+32, "NO.", (*C["txt2"][:3], al), 17, "raj_sb_16")
             _txt(dl, x1+66, y1+18, str(rank), (*C["gold_lt"][:3], al), 68, "raj_56")
             _name_link(dl, x1+16, y1+118, name, raw_name, (*C["txt"][:3], al), 25, "raj_36")
             _txt(dl, x2-120, y1+56, fs,
                  (*C["gold_lt"][:3], al), 31, "raj_36")
             _txt(dl, x1+16, y1+168, f"TIER {ts}  ·  RANK {rs}",
-                 (*C["txt_dim"][:3], al), 15, "raj_r_14")
+                 (*C["txt2"][:3], al), 16, "raj_r_14")
             _badge(dl, x2-38, y1+34, rating, tier, al, r=30)
             _avatar_or_hex(dl, x2-58, y1+h-42, 36, raw_name,
                            C["card_hover"], (*border_col[:3], al),
@@ -661,7 +744,7 @@ def _draw_challenger_rows(dl):
         name   = p.get("name","Unknown").upper()
         tier   = p.get("tier","Unranked")
         avg    = str(p.get("avg_tier", ""))
-        fs     = str(p.get("final_score", p.get("score", "?")))
+        fs     = _score_disp(p.get("name", ""), p.get("final_score", p.get("score", "?")))
         ts     = str(p.get("tier_score", "?"))
         rs     = str(p.get("rank_score", "?"))
         rating = str(p.get("rating", tier[:1].upper()))
@@ -676,7 +759,12 @@ def _draw_challenger_rows(dl):
         _name_link(dl, rx+xo+122, ry+CHAL_H//2-18, name,
                    raw, (*C["txt"][:3], al), 21, "raj_20")
         _txt(dl, rx+xo+122, ry+CHAL_H//2+6, f"AVG TIER {avg}  ·  RANK {rs}",
-             (*C["txt_dim"][:3], al), 15, "raj_r_14")
+             (*C["txt2"][:3], al), 15, "raj_r_14")
+        # Phase 3 — mini sparkline (last 8 W/L) sits between name and score.
+        spark_x = rx + xo + row_w - 280
+        _draw_mini_sparkline(dl, spark_x, ry + CHAL_H//2 + 2,
+                             _player_results(raw, n=8), alpha=al,
+                             dot_r=4, gap=5)
         _txt(dl, rx+xo+row_w-110, ry+CHAL_H//2-14, fs,
              (*C["gold"][:3], al), 23, "raj_24")
         _badge(dl, rx+xo+row_w-152, ry+CHAL_H//2, rating, tier, al, r=24)
@@ -692,7 +780,24 @@ def _draw_rest_rows(dl):
     section_y = podium_bot + CHAL_PAD_T + chal_h + SECTION_GAP
 
     _txt(dl, rx, section_y - 22, "FULL STANDINGS",
-         (*C["txt_dim"][:3], 180), 17, "raj_sb_16")
+         (*C["gold"][:3], 240), 19, "raj_sb_20")
+
+    # Phase 3 — "on the rise / falling" callouts (right of section title).
+    climber = _biggest_climber()
+    faller  = _biggest_faller()
+    callout_x = rx + 200
+    if climber:
+        nm, d = climber
+        lbl = f"ON THE RISE  ·  {nm.upper()}  +{d}"
+        _txt(dl, callout_x, section_y - 22, lbl,
+             (130, 210, 130, 220), 16, "raj_sb_16")
+        callout_x += int(len(lbl) * 9) + 24
+    if faller:
+        nm, d = faller
+        lbl = f"FALLING  ·  {nm.upper()}  {d}"
+        _txt(dl, callout_x, section_y - 22, lbl,
+             (220, 130, 130, 200), 16, "raj_sb_16")
+
     dpg.draw_line((rx, section_y - 4),(rx + row_w, section_y - 4),
                   color=C["rule_dark"], thickness=1, parent=dl)
 
@@ -722,7 +827,7 @@ def _draw_rest_rows(dl):
         dpg.draw_rectangle((rx+xo, ry),(rx+xo+3, ry+ROW_H),
                            fill=(*_tc[:3], int(al * 0.75)),
                            color=(0,0,0,0), rounding=1, parent=dl)
-        fs     = str(p.get("final_score", p.get("score", "?")))
+        fs     = _score_disp(p.get("name", ""), p.get("final_score", p.get("score", "?")))
         rating = str(p.get("rating", tier[:1].upper()))
 
         raw2 = p.get("name", "")
@@ -736,6 +841,11 @@ def _draw_rest_rows(dl):
         name_w = int(len(name) * 17 * 0.58)
         _draw_delta(dl, rx+xo+96+name_w+10, ry+ROW_H//2-8,
                     rankings.deltas.get(raw2), al)
+        # Phase 3 — mini sparkline (last 8 W/L) sits left of the score column.
+        spark_x = rx + xo + row_w - 240
+        _draw_mini_sparkline(dl, spark_x, ry + ROW_H//2 - 3,
+                             _player_results(raw2, n=8), alpha=al,
+                             dot_r=3, gap=4)
         _txt(dl, rx+xo+row_w-90, ry+ROW_H//2-11, fs,
              (*C["gold"][:3], al), 17, "raj_18")
         _badge(dl, rx+xo+row_w-118, ry+ROW_H//2, rating, tier, al, r=20)

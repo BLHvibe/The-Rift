@@ -24,10 +24,15 @@ from ui.tierlist import draw_tierlist, register_wheel_handler
 from ui.settings import draw_settings, close_settings_window
 from ui.commands import draw_commands
 from ui.feed import draw_feed
+from ui.home import draw_home
+from ui import profile as profile_panel
+from ui import wrapped as wrapped_overlay
+from ui import hotkeys as hotkey_overlay
+from ui import audio, effects, toast
 from data.reader import live, load_live_data, check_for_update
 from data import patch_ticker
 
-__version__ = "3.0.4"   # bump this on each release
+__version__ = "4.0.0"   # bump this on each release
 
 WIN_W, WIN_H = 1280, 800
 TITLE_H      = 52    # titlebar height
@@ -213,20 +218,43 @@ def _draw_titlebar(dl, w):
     t = dpg.draw_text((18, h//2-14), "THE RIFT", color=C["rift_purple"], size=29, parent=dl)
     if "cinzel_28" in _FONTS:
         dpg.bind_item_font(t, _FONTS["cinzel_28"])
-    # Close button
-    m = 8
-    dpg.draw_rectangle((w-h+m, m),(w-m, h-m),
-                        fill=(0,0,0,0), color=C["rule_dark"], rounding=4, parent=dl)
-    cx, cy = w - h//2, h//2
-    dpg.draw_line((cx-9, cy-9),(cx+9, cy+9), color=C["txt2"], thickness=2, parent=dl)
-    dpg.draw_line((cx+9, cy-9),(cx-9, cy+9), color=C["txt2"], thickness=2, parent=dl)
-    # Fullscreen button
-    fx = w - h*2 + m
-    dpg.draw_rectangle((fx, m),(fx+h-m*2, h-m),
-                        fill=(0,0,0,0), color=C["rule_dark"], rounding=4, parent=dl)
-    fcx = fx + (h-m*2)//2
+
+    m  = 8
+    cy = h // 2
+    # Mouse in titlebar-local coords, for window-button hover feedback.
+    mouse  = dpg.get_mouse_pos(local=False)
+    vp     = dpg.get_viewport_pos()
+    rx, ry = mouse[0] - vp[0], mouse[1] - vp[1]
+
+    # Close button — gentle red wash on hover.
+    cl_x1, cl_x2 = w - h + m, w - m
+    cl_hov = (cl_x1 <= rx <= cl_x2 and m <= ry <= h - m)
+    cl_amt = effects.hover_amt("tb_close", cl_hov)
+    if cl_amt > 0.01:
+        dpg.draw_rectangle((cl_x1, m), (cl_x2, h - m),
+                           fill=(200, 70, 70, int(cl_amt * 150)),
+                           color=(0, 0, 0, 0), rounding=4, parent=dl)
+    dpg.draw_rectangle((cl_x1, m), (cl_x2, h - m),
+                       fill=(0,0,0,0), color=C["rule_dark"], rounding=4, parent=dl)
+    ccx    = w - h // 2
+    cl_col = C["gold_lt"] if cl_hov else C["txt2"]
+    dpg.draw_line((ccx-9, cy-9),(ccx+9, cy+9), color=cl_col, thickness=2, parent=dl)
+    dpg.draw_line((ccx+9, cy-9),(ccx-9, cy+9), color=cl_col, thickness=2, parent=dl)
+
+    # Fullscreen button — gold wash on hover.
+    fx1, fx2 = w - h*2 + m, w - h*2 + m + (h - m*2)
+    fs_hov = (fx1 <= rx <= fx2 and m <= ry <= h - m)
+    fs_amt = effects.hover_amt("tb_fs", fs_hov)
+    if fs_amt > 0.01:
+        dpg.draw_rectangle((fx1, m), (fx2, h - m),
+                           fill=(*C["gold"][:3], int(fs_amt * 60)),
+                           color=(0, 0, 0, 0), rounding=4, parent=dl)
+    dpg.draw_rectangle((fx1, m), (fx2, h - m),
+                       fill=(0,0,0,0), color=C["rule_dark"], rounding=4, parent=dl)
+    fcx    = fx1 + (h - m*2) // 2
+    fs_col = C["gold_lt"] if fs_hov else C["txt2"]
     dpg.draw_rectangle((fcx-9, cy-9),(fcx+9, cy+9),
-                        fill=(0,0,0,0), color=C["txt2"], thickness=1.5, parent=dl)
+                        fill=(0,0,0,0), color=fs_col, thickness=1.5, parent=dl)
 
 # ---------------------------------------------------------------------------
 # Splash state machine
@@ -627,7 +655,9 @@ def _draw_ticker(dl, vw):
 # Content routing
 # ---------------------------------------------------------------------------
 def _draw_content(dl, w, h):
-    if state.active_tab == "rankings":
+    if state.active_tab == "home":
+        draw_home(dl, w, h, _FONTS)
+    elif state.active_tab == "rankings":
         draw_rankings(dl, w, h, _FONTS)
     elif state.active_tab == "draft":
         draw_draft(dl, w, h, _FONTS)
@@ -648,6 +678,35 @@ def _draw_content(dl, w, h):
         dpg.draw_rectangle((0,0),(w,h), fill=C["bg"], color=(0,0,0,0), parent=dl)
 
 # ---------------------------------------------------------------------------
+# Tab-change transition — a soft fade-in veil over the content area so tabs
+# never hard-cut. Scales with anim.intensity (instant when motion is off).
+# ---------------------------------------------------------------------------
+_tab_xfade    = {"last": None, "t0": 0.0}
+_TAB_XFADE_MS = 190
+
+def _draw_tab_transition(dl, w, h):
+    cur = state.active_tab
+    if _tab_xfade["last"] != cur:
+        if _tab_xfade["last"] is not None:
+            try:
+                audio.play_tab()
+            except Exception:
+                pass
+        _tab_xfade["last"] = cur
+        _tab_xfade["t0"]   = time.monotonic()
+    if anim.intensity <= 0.01:
+        return
+    elapsed = (time.monotonic() - _tab_xfade["t0"]) * 1000.0
+    if elapsed >= _TAB_XFADE_MS:
+        return
+    a = int(205 * (1.0 - elapsed / _TAB_XFADE_MS))
+    if a <= 2:
+        return
+    dpg.draw_rectangle((0, 0), (w, h),
+                       fill=(*C["bg"][:3], a), color=(0, 0, 0, 0),
+                       parent=dl)
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 _TITLE_W = 270   # measured after fonts load
@@ -663,9 +722,11 @@ def main():
     # saved audio_enabled flag. Init is best-effort; no audio device or
     # missing files don't break startup.
     try:
-        from ui import audio as _audio
         from data.config import load_config as _load_cfg
-        _audio.set_enabled(bool(_load_cfg().get("audio_enabled", True)))
+        _cfg0 = _load_cfg()
+        audio.set_enabled(bool(_cfg0.get("audio_enabled", True)))
+        audio.set_volume(float(_cfg0.get("audio_volume", 1.0)))
+        anim.set_intensity(float(_cfg0.get("anim_intensity", 1.0)))
     except Exception:
         pass
     # Bind Rajdhani as the application-default font so ALL widgets — including
@@ -763,6 +824,74 @@ def main():
         {"name": "Riven",    "score": 36, "tier": "Gold"},
     ]
 
+    # First-run welcome — surface the new Home tab and ? hotkey overlay once.
+    try:
+        from data.config import load_config as _lc, save_config as _sc
+        _cfg = _lc()
+        if not _cfg.get("welcomed_v40"):
+            def _show_welcome():
+                toast.push(
+                    "Welcome to v4 — new HOME tab, player profiles, seasons & Wrapped. "
+                    "Press ? anytime for keyboard shortcuts.",
+                    kind="info", title="What's new", duration=11.0)
+                _cfg["welcomed_v40"] = True
+                _sc(_cfg)
+            anim.tween(0, 1, 1, "linear", delay_ms=1600, on_done=_show_welcome)
+    except Exception:
+        pass
+
+    # One-time sheet → DB backfill. The Fly DB is empty on first launch even
+    # when the user has years of `_InhouseGameLog` in their sheet. Push them
+    # all through `/api/matches` so the new Home / Profile / Inhouse history
+    # surfaces have something to show. Idempotent server-side (INSERT OR REPLACE
+    # on match id), gated by a config flag so it never re-runs.
+    try:
+        from data.config import load_config as _lc2, save_config as _sc2
+        _cfg2 = _lc2()
+        if not _cfg2.get("backfilled_from_sheet"):
+            from data import sheet_mirror as _sm
+            def _on_backfill_done(counts):
+                _cfg2["backfilled_from_sheet"] = True
+                _sc2(_cfg2)
+                ing = int(counts.get("ingested", 0))
+                if ing > 0:
+                    toast.push(f"Imported {ing} historical games from the sheet.",
+                               kind="success", title="Backfill complete",
+                               duration=8.0)
+                # Invalidate caches that loaded BEFORE backfill ran so the
+                # new matches show up without a relaunch.
+                try:
+                    from data.reader import live as _live, load_match_history, load_records
+                    _live.match_history = []
+                    _live.match_history_loaded = False
+                    _live.match_history_error = None
+                    _live.records = {}
+                    _live.records_loaded = False
+                    load_match_history()
+                    load_records()
+                    # Reset home's per-tab lazy-load gates so it re-pulls too.
+                    try:
+                        from ui.home import _invalidate as _home_invalidate
+                        _home_invalidate()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            def _on_backfill_progress(msg):
+                pass  # silent — toast on done only
+            def _on_backfill_error(msg):
+                # Don't set the flag — let the next launch try again.
+                print(f"[backfill] {msg}")
+            # Give the splash + first-paint plenty of time before pounding
+            # the API.
+            def _kick():
+                _sm.backfill_from_sheets(on_progress=_on_backfill_progress,
+                                          on_done=_on_backfill_done,
+                                          on_error=_on_backfill_error)
+            anim.tween(0, 1, 1, "linear", delay_ms=4000, on_done=_kick)
+    except Exception as _e:
+        print(f"[backfill] init failed: {_e}")
+
     # Live data load — reads Rank Data + Player Stats + InhouseGameLog from Sheets
     def _on_live_data_ready():
         splash.loading_done = True
@@ -781,7 +910,6 @@ def main():
     # IMPORTANT: DPG is NOT thread-safe. The background callback only writes to
     # this list; the main render loop reads it and creates DPG items on the main thread.
     _pending_update = [None]   # [None] or [(latest_tag, download_url)]
-    _UPDATE_WIN = "update_notif_win"
 
     def _on_update_result(latest_tag, download_url):
         if latest_tag:
@@ -804,6 +932,7 @@ def main():
     _TAB_HOTKEYS = [
         (dpg.mvKey_1, 0), (dpg.mvKey_2, 1), (dpg.mvKey_3, 2), (dpg.mvKey_4, 3),
         (dpg.mvKey_5, 4), (dpg.mvKey_6, 5), (dpg.mvKey_7, 6), (dpg.mvKey_8, 7),
+        (dpg.mvKey_9, 8),
     ]
 
     while dpg.is_dearpygui_running():
@@ -820,7 +949,15 @@ def main():
             _is_fullscreen[0] = not _is_fullscreen[0]
         _f11_was_down[0] = f11_down
 
-        # ── Keyboard hotkeys: 1-8 switch tabs, Esc closes active overlay ─────
+        # Per-frame input gates reset (Phase 6): overlays cooperate so a
+        # single click doesn't fire on both the overlay and the tab beneath,
+        # and Esc only closes the topmost open thing.
+        state.click_consumed = False
+        state.esc_consumed   = False
+        esc_down = dpg.is_key_down(dpg.mvKey_Escape)
+        state.esc_pressed = bool(esc_down and not _key_was_down.get(dpg.mvKey_Escape, False))
+
+        # ── Keyboard hotkeys: 1-9 switch tabs, Esc closes active overlay ─────
         # Suppress while splash is up so the user can't tab away mid-intro.
         if state.splash_done:
             for key, tab_idx in _TAB_HOTKEYS:
@@ -836,14 +973,27 @@ def main():
                             dpg.set_y_scroll("content_win", 0)
                 _key_was_down[key] = down
 
-            esc_down = dpg.is_key_down(dpg.mvKey_Escape)
-            if esc_down and not _key_was_down.get(dpg.mvKey_Escape, False):
-                # Close any tab overlay first; if none, dismiss the update notif.
-                cur_tag = _OVL.get(state.active_tab)
-                if cur_tag and dpg.does_item_exist(cur_tag):
-                    dpg.delete_item(cur_tag)
-                elif dpg.does_item_exist(_UPDATE_WIN):
-                    dpg.delete_item(_UPDATE_WIN)
+            # Esc: close overlays in priority order (topmost first) then fall
+            # back to the legacy tab-overlay cleanup. Overlays inspect
+            # `state.esc_pressed` (edge-detected single-frame True) and call
+            # `state.esc_consumed = True` if they handle it.
+            if state.esc_pressed:
+                # Try overlays from topmost down to keep behavior intuitive:
+                # hotkeys > wrapped > profile > tab overlay
+                if hotkey_overlay.is_open():
+                    hotkey_overlay.close()
+                    state.esc_consumed = True
+                elif wrapped_overlay.is_open():
+                    wrapped_overlay.close()
+                    state.esc_consumed = True
+                elif profile_panel.is_open():
+                    profile_panel.close()
+                    state.esc_consumed = True
+                else:
+                    cur_tag = _OVL.get(state.active_tab)
+                    if cur_tag and dpg.does_item_exist(cur_tag):
+                        dpg.delete_item(cur_tag)
+                        state.esc_consumed = True
             _key_was_down[dpg.mvKey_Escape] = esc_down
 
         # Resize: update all containers when viewport dimensions change
@@ -884,11 +1034,24 @@ def main():
 
         # Sidebar & content
         _sidebar_tick(vw, vh)
-        _draw_content("content_dl", vw-_sb_w[0], vh-TITLE_H-TICKER_H)
+        _content_w = vw - _sb_w[0]
+        _content_h = vh - TITLE_H - TICKER_H
+        _draw_content("content_dl", _content_w, _content_h)
+        _draw_tab_transition("content_dl", _content_w, _content_h)
+        profile_panel.draw("content_dl", _content_w, _content_h)
+        wrapped_overlay.draw("content_dl", _content_w, _content_h)
+        hotkey_overlay.draw("content_dl", _content_w, _content_h)
+        toast.draw("content_dl", _content_w, _content_h)
         _draw_ticker("ticker_dl", vw)
 
-        # Kick off rankings reveal once splash is done
-        if state.splash_done and not _rankings_triggered[0]:
+        # Kick off rankings reveal the first time the user actually lands on
+        # the Rankings tab. Phase 4 changed the default tab to HOME, so we no
+        # longer fire the reveal at splash-done — the slam-impact tween reads
+        # rankings layout state that is only populated by `draw_rankings`, and
+        # tweens that fire while the user is on another tab would KeyError.
+        if (state.splash_done
+                and state.active_tab == "rankings"
+                and not _rankings_triggered[0]):
             _rankings_triggered[0] = True
             rankings_state.begin_loading()
             def _start_reveal():
@@ -926,46 +1089,20 @@ def main():
             inhouse_state.begin_load(live.inhouse)
 
         # ── Show update notification (main-thread safe) ───────────────────
-        if _pending_update[0] and not dpg.does_item_exist(_UPDATE_WIN):
-            latest_tag, _dl_url = _pending_update[0]
+        if _pending_update[0]:
+            _upd_tag, _upd_url = _pending_update[0]
             _pending_update[0] = None   # consume once
-            nw, nh = 400, 128
-            nx = vw - nw - 16
-            ny = TITLE_H + 8
-            _tag_capture  = latest_tag
-            _url_capture  = _dl_url
-            with dpg.window(tag=_UPDATE_WIN,
-                            pos=(nx, ny), width=nw, height=nh,
-                            no_title_bar=True, no_resize=True,
-                            no_move=False, no_scrollbar=True):
-                with dpg.drawlist(tag="update_dl", width=nw, height=78):
-                    dpg.draw_rectangle((0, 0), (nw, 78),
-                                       fill=(*C["card"][:3], 240),
-                                       color=(*C["gold"][:3], 220), rounding=6)
-                    dpg.draw_rectangle((0, 0), (4, 78),
-                                       fill=(*C["gold"][:3], 255),
-                                       color=(0, 0, 0, 0), rounding=2)
-                    t1 = dpg.draw_text((14, 10),
-                                       f"UPDATE AVAILABLE: {latest_tag}",
-                                       color=(*C["gold_lt"][:3], 240), size=17)
-                    if "raj_sb_16" in _FONTS: dpg.bind_item_font(t1, _FONTS["raj_sb_16"])
-                    t2 = dpg.draw_text((14, 40),
-                                       "A new version of The Rift is ready to download.",
-                                       color=(*C["txt"][:3], 200), size=15)
-                    if "raj_r_12" in _FONTS: dpg.bind_item_font(t2, _FONTS["raj_r_12"])
-                with dpg.group(horizontal=True):
-                    dpg.add_spacer(width=14)
-                    dpg.add_button(label="Dismiss",
-                                   height=28,
-                                   callback=lambda: dpg.delete_item(_UPDATE_WIN)
-                                   if dpg.does_item_exist(_UPDATE_WIN) else None)
-                    dpg.add_spacer(width=8)
-                    def _open_release():
-                        import webbrowser
-                        webbrowser.open(_url_capture or f"https://github.com/BLHvibe/The-Rift/releases/tag/{_tag_capture}")
-                    dpg.add_button(label="Download ↗",
-                                   height=28,
-                                   callback=_open_release)
+            _rel_url = (_upd_url or
+                        f"https://github.com/BLHvibe/The-Rift/releases/tag/{_upd_tag}")
+            def _open_release(url=_rel_url):
+                import webbrowser
+                try:
+                    webbrowser.open(url)
+                except Exception:
+                    pass
+            toast.push(f"The Rift {_upd_tag} is ready — click to download.",
+                       kind="info", title="Update available",
+                       duration=14.0, action=_open_release)
 
         # Splash overlay
         if not state.splash_done:
@@ -985,7 +1122,19 @@ def main():
 
         dpg.render_dearpygui_frame()
 
-    dpg.destroy_context()
+    # Clean shutdown — release pygame.mixer first so its callback thread
+    # isn't running when the interpreter starts tearing down. Wrap
+    # destroy_context in try/except because PyInstaller-frozen builds on
+    # Windows occasionally fault during the final teardown even on a clean
+    # close; the user has already chosen to exit, so suppress noise.
+    try:
+        audio.shutdown()
+    except Exception:
+        pass
+    try:
+        dpg.destroy_context()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

@@ -7,51 +7,54 @@ import dearpygui.dearpygui as dpg
 # ---------------------------------------------------------------------------
 # Palette — Direction A
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Palette — unified on the LCS-broadcast navy/gold language (Phase 0c).
+# These values mirror ui/tokens.PAL; the legacy key names are kept so the
+# 7 non-draft tabs keep resolving while they migrate. `C` retires once every
+# surface reads ui.tokens directly.
+# ---------------------------------------------------------------------------
 C = {
-    "bg":          (5,   8,  13, 255),
-    "panel":       (11,  19, 32, 255),
-    "card":        (13,  30, 48, 255),
-    "card_hover":  (18,  40, 62, 255),
-    "gold":        (200, 168, 106, 255),
-    "gold_lt":     (232, 213, 163, 255),
-    "gold_dk":     (92,  69,  32, 255),
-    "platinum":    (158, 180, 200, 255),
-    "win":         (79,  168, 130, 255),
-    "loss":        (184,  69,  53, 255),
-    "rule_gold":   (70,  55,  20, 255),
-    "rule_dark":   (44,  56,  78, 255),   # bumped from (26,35,53) for better separator contrast against bg
-    "txt":         (216, 207, 186, 255),
-    "txt2":        (122, 114,  99, 255),
-    "txt_dim":     (70,  65,  55, 255),
-    "rift_purple": (107,  47, 160, 255),
+    "bg":          (8,   14,  26, 255),   # tokens.PAL["bg"]
+    "panel":       (12,  28,  55, 255),   # PAL navy_mid
+    "card":        (16,  36,  64, 255),   # PAL panel
+    "card_hover":  (28,  56,  92, 255),   # PAL panel_hi
+    "gold":        (200, 170, 110, 255),  # PAL gold (#c8aa6e)
+    "gold_lt":     (232, 213, 163, 255),  # PAL gold_lt
+    "gold_dk":     (92,  69,  32, 255),   # PAL gold_dk
+    "platinum":    (158, 180, 200, 255),  # cool steel — no PAL equivalent
+    "win":         (110, 190, 140, 255),  # PAL win
+    "loss":        (200,  90,  90, 255),  # PAL loss
+    "rule_gold":   (120,  90,  40, 255),  # PAL rule (#785a28)
+    "rule_dark":   (40,   54,  78, 255),  # PAL rule_dim
+    "txt":         (240, 230, 210, 255),  # PAL txt
+    "txt2":        (160, 150, 130, 255),  # PAL txt_dim — secondary text
+    "txt_dim":     (100,  92,  78, 255),  # PAL txt_faint — tertiary text
+    "rift_purple": (107,  47, 160, 255),  # brand purple — kept
     # Splash flash
-    "flash":       (13,  27,  42, 255),
+    "flash":       (12,  28,  55, 255),
 
-    # -----------------------------------------------------------------------
-    # LoL client palette (Draft Tool rewrite, Phase 3+).
-    # Used by ui/lol_theme.py for the new draft-tool surface. The rest of the
-    # app keeps using the original gold/platinum keys above — this is purely
-    # additive so non-draft surfaces don't change at all.
-    # -----------------------------------------------------------------------
-    "navy_deep":   (10,  20,  40,  255),   # #0a1428 — deepest background
-    "navy_mid":    (12,  28,  55,  255),   # mid background panel
-    "gold_rule":   (120,  90,  40,  255),  # #785a28 — thin rules
-    "gold_lt2":    (205, 190, 145, 255),   # #cdbe91 — text highlight on splash
+    # LoL client palette keys (also used by ui/lol_theme.py + the draft tool).
+    "navy_deep":   (10,  20,  40, 255),   # #0a1428 — deepest background
+    "navy_mid":    (12,  28,  55, 255),   # mid background panel
+    "gold_rule":   (120,  90,  40, 255),  # #785a28 — thin rules
+    "gold_lt2":    (205, 190, 145, 255),  # #cdbe91 — text highlight on splash
 }
 
-# Direction C — rank badge backgrounds
+# Rank badge colors — aligned with ui/tokens.TIER (Phase 0c). Brighter, more
+# saturated than the old set so badges read clearly on the navy surfaces, and
+# Challenger / Grandmaster / Master are now distinct (gold / red / purple).
 RANK_COLORS = {
-    "Challenger": (200, 168, 106, 255),
-    "Grandmaster":(200, 168, 106, 255),
-    "Master":     (200, 168, 106, 255),
-    "Diamond":    (58,  96, 168, 255),
-    "Emerald":    (58, 173, 122, 255),
-    "Platinum":   (74, 128, 144, 255),
-    "Gold":       (160, 120,  40, 255),
-    "Silver":     (138, 138, 154, 255),
-    "Bronze":     (122,  74,  40, 255),
-    "Iron":       (74,  56,  40, 255),
-    "Unranked":   (40,  50,  65, 255),
+    "Challenger":  (240, 200, 130, 255),
+    "Grandmaster": (220, 110,  90, 255),
+    "Master":      (175, 110, 220, 255),
+    "Diamond":     (130, 175, 220, 255),
+    "Emerald":     (110, 200, 140, 255),
+    "Platinum":    (130, 180, 175, 255),
+    "Gold":        (200, 170, 110, 255),
+    "Silver":      (170, 170, 175, 255),
+    "Bronze":      (175, 110,  70, 255),
+    "Iron":        (110,  95,  85, 255),
+    "Unranked":    (80,   90, 105, 255),
 }
 
 # Medal particle colors (RGB for particle system)

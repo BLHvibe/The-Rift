@@ -8,9 +8,10 @@ import math, time, random as _rnd, os, queue as _queue
 import dearpygui.dearpygui as dpg
 from theme import C, RANK_COLORS
 from core.animations import anim
-from data.reader import live, log_inhouse_games_from_client, get_most_games_logged
+from data.reader import live, log_inhouse_games_from_client, get_most_games_logged, load_match_history, load_rivalries, load_records
 from data.tips import TIPS as _TIPS
 from ui.tierlist import _wheel_delta as _wheel_delta_shared
+from ui import effects, toast, fmt, audio
 
 # ---------------------------------------------------------------------------
 # Demo data
@@ -73,59 +74,8 @@ def update_live_data(players, champs):
             _LIVE_SPARKLINES[p["player"]] = results
 
 # ---------------------------------------------------------------------------
-# "Game Logged" notification
+# Notifications — retired to the unified toast stack (ui/toast.py, Phase 0c).
 # ---------------------------------------------------------------------------
-class _GameLoggedNotif:
-    def __init__(self):
-        self.visible  = False
-        self.y_off    = 0      # -80 = fully hidden above, 0 = fully shown
-        self.alpha    = 0
-        self.hold_t   = 0.0
-        self._holding = False
-
-    def show(self, summary="GAME LOGGED"):
-        self.summary  = summary
-        self.visible  = True
-        self._holding = False
-        self.hold_t   = 0.0
-        self.alpha    = 0
-        self.y_off    = -90
-        anim.tween(-90, 0, 400, "elastic_out",
-                   on_update=lambda v: setattr(self, "y_off", v))
-        anim.tween(0, 255, 200, "out_cubic",
-                   on_update=lambda v: setattr(self, "alpha", int(v)))
-        anim.tween(0, 1, 1, "linear", delay_ms=3400, on_done=self._dismiss)
-
-    def _dismiss(self):
-        anim.tween(0, -90, 260, "out_cubic",
-                   on_update=lambda v: setattr(self, "y_off", v))
-        anim.tween(255, 0, 240, "out_cubic",
-                   on_update=lambda v: setattr(self, "alpha", int(v)),
-                   on_done=lambda: setattr(self, "visible", False))
-
-    def draw(self, dl, vw):
-        if not self.visible: return
-        al = self.alpha
-        if al <= 0: return
-        nw, nh = 260, 72
-        nx = vw - nw - 24
-        ny = 8 + int(self.y_off)
-        # Card
-        dpg.draw_rectangle((nx, ny), (nx+nw, ny+nh),
-                            fill=(*C["card"][:3], al),
-                            color=(*C["gold"][:3], al),
-                            rounding=6, parent=dl)
-        # Gold left accent bar
-        dpg.draw_rectangle((nx, ny), (nx+4, ny+nh),
-                            fill=(*C["gold"][:3], al),
-                            color=(0,0,0,0), rounding=3, parent=dl)
-        # Title
-        _txt(dl, nx+16, ny+10, "GAME LOGGED", (*C["gold_lt"][:3], al), 18, "raj_sb_18")
-        # Summary
-        _txt(dl, nx+16, ny+38, getattr(self, "summary", ""), (*C["txt"][:3], int(al*0.8)), 16, "raj_16")
-
-
-_notif = _GameLoggedNotif()
 
 # ---------------------------------------------------------------------------
 # Avatar texture registry
@@ -227,38 +177,32 @@ def _fetch_most_games_once():
 
 
 def _start_log_game():
-    global _log_in_progress, _most_games_fetched
+    global _log_in_progress
     if _log_in_progress:
         return
     _log_in_progress = True
-    _notif.show("Connecting to LOL client…")
-
-    def _progress(msg):
-        _notif.show(msg)
 
     def _done(count):
         global _log_in_progress, _most_games_fetched
         _log_in_progress = False
         if count and count > 0:
-            _notif.show(f"Logged {count} new game{'s' if count != 1 else ''}")
+            n = int(count)
+            toast.push(f"Logged {n} new game{'s' if n != 1 else ''}.",
+                       kind="success", title="Inhouse")
             if live.inhouse:
                 update_live_data(live.inhouse, live.inhouse_champs)
                 inhouse.begin_load(live.inhouse)
             _most_games_fetched = False
             _fetch_most_games_once()
         else:
-            _notif.show("No new games found")
+            toast.push("No new games found.", kind="info", title="Inhouse")
 
     def _error(msg):
         global _log_in_progress
         _log_in_progress = False
-        _notif.show(f"Error: {str(msg)[:40]}")
+        toast.push(str(msg)[:80], kind="error", title="Log game failed")
 
-    log_inhouse_games_from_client(
-        on_progress=_progress,
-        on_done=_done,
-        on_error=_error,
-    )
+    log_inhouse_games_from_client(on_done=_done, on_error=_error)
 
 # ---------------------------------------------------------------------------
 # State
@@ -286,6 +230,18 @@ class InhouseState:
         self.filter_text   = ""    # live search string
         self._tip          = _rnd.choice(_TIPS)
         self.scroll_off    = 0     # rows-only scroll offset in px
+        # Phase 3 — match-history toggle. "leaderboard" (current standings) or
+        # "history" (per-game card feed pulled from /api/matches).
+        self.view_mode     = "leaderboard"
+        self.history_scroll = 0
+        self.history_loading = False
+        # Phase 3 — per-game detail panel (history view).
+        self.selected_match_id   = None
+        self.match_detail_x_frac = 0.0
+        self.match_detail_scroll = 0
+        # Phase 3 — rivalries view: anchor player + per-anchor scroll.
+        self.rivalries_anchor    = None
+        self.rivalries_scroll    = 0
 
     def reset(self):
         self.__init__()
@@ -328,6 +284,22 @@ class InhouseState:
             anim.tween(0.0, 1.0, 320, "out_cubic",
                        on_update=lambda v: setattr(self, "detail_x_frac", v))
 
+    def select_match(self, match_id):
+        """Toggle the per-game detail panel for a match card."""
+        if not match_id:
+            return
+        if self.selected_match_id == match_id:
+            self.selected_match_id = None
+            anim.tween(self.match_detail_x_frac, 0.0, 220, "out_cubic",
+                       on_update=lambda v: setattr(self, "match_detail_x_frac", v))
+        else:
+            already_open = self.selected_match_id is not None
+            self.selected_match_id = match_id
+            self.match_detail_scroll = 0
+            if not already_open:
+                anim.tween(0.0, 1.0, 280, "out_cubic",
+                           on_update=lambda v: setattr(self, "match_detail_x_frac", v))
+
 
 inhouse = InhouseState()
 _F = {}
@@ -341,7 +313,8 @@ HEADER_H    = 44
 TOP_BAR_H   = 56
 _VP_TITLE_H = 52   # app titlebar height (same as main.py TITLE_H)
 PAD         = 20
-DETAIL_W  = 560   # fixed width of sliding detail panel
+DETAIL_W  = 560   # fixed width of sliding detail panel (player)
+MATCH_DETAIL_W = 680   # per-game detail panel (history view)
 
 COLS = [
     ("#",       0.05),
@@ -376,14 +349,18 @@ def _col_xs(tw):
 # Main draw
 # ---------------------------------------------------------------------------
 
-def _ensure_filter_window(vw, vh, filter_w):
+def _ensure_filter_window(vw, vh, filter_w, show=True):
     """Create or reposition the search-bar overlay window.
-    filter_w clips it to the leaderboard area so it never bleeds into the detail panel."""
+    filter_w clips it to the leaderboard area so it never bleeds into the detail panel.
+    Set show=False to hide the bar on views (history / records) where filtering by
+    player name doesn't apply — leaving it visible looks like a dead black bar."""
     sidebar_w = dpg.get_viewport_width() - vw   # dynamic sidebar width
     win_x     = sidebar_w
     win_y     = _VP_TITLE_H + TOP_BAR_H
 
     if not dpg.does_item_exist(_INHOUSE_FILTER_WIN):
+        if not show:
+            return
         with dpg.window(tag=_INHOUSE_FILTER_WIN,
                         pos=(win_x, win_y),
                         width=filter_w, height=FILTER_H,
@@ -413,7 +390,8 @@ def _ensure_filter_window(vw, vh, filter_w):
     else:
         dpg.configure_item(_INHOUSE_FILTER_WIN,
                            pos=(win_x, win_y),
-                           width=filter_w, height=FILTER_H)
+                           width=filter_w, height=FILTER_H,
+                           show=show)
 
 
 def draw_inhouse(dl, vw, vh, fonts=None):
@@ -431,29 +409,57 @@ def draw_inhouse(dl, vw, vh, fonts=None):
 
     if inhouse.phase == InhousePhase.IDLE:
         _draw_idle(dl, vw, vh)
-        _notif.draw(dl, vw)
         return
     if inhouse.phase == InhousePhase.LOADING:
         _draw_loading(dl, vw, vh)
         return
 
-    # Detail panel slide: occupies right DETAIL_W when open
-    detail_open = inhouse.detail_x_frac > 0.01
-    detail_px   = int(DETAIL_W * inhouse.detail_x_frac)
-    table_w     = vw - PAD*2 - (detail_px if detail_open else 0)
+    # Detail panel slide: only the view-mode's panel reserves space.
+    # Player-detail panel (leaderboard mode) vs match-detail panel (history mode).
+    detail_open = (inhouse.view_mode == "leaderboard"
+                   and inhouse.detail_x_frac > 0.01)
+    detail_px   = int(DETAIL_W * inhouse.detail_x_frac) if detail_open else 0
+    match_detail_open = (inhouse.view_mode == "history"
+                         and inhouse.match_detail_x_frac > 0.01)
+    match_detail_px   = int(MATCH_DETAIL_W * inhouse.match_detail_x_frac) if match_detail_open else 0
+    right_px    = detail_px + match_detail_px  # one of these is always 0
+    table_w     = vw - PAD*2 - right_px
     # header_w tracks the left edge of any right-side panel so bars never bleed over
-    header_w    = vw - detail_px
+    header_w    = vw - right_px
 
-    _ensure_filter_window(vw, vh, header_w)
+    # Search filter is only meaningful on the leaderboard + rivalries views.
+    # Hide it on history / records so it doesn't sit as a dead black bar.
+    show_filter = inhouse.view_mode in ("leaderboard", "rivalries")
+    _ensure_filter_window(vw, vh, header_w, show=show_filter)
 
-    table_top = TOP_BAR_H + FILTER_H + 4
-    _draw_leaderboard(dl, PAD, table_top, table_w - PAD,
+    table_top = TOP_BAR_H + (FILTER_H + 4 if show_filter else 8)
+    if inhouse.view_mode == "history":
+        _draw_history(dl, PAD, table_top, table_w - PAD,
                       vh - table_top - PAD, vw, vh)
+    elif inhouse.view_mode == "rivalries":
+        try:
+            _draw_rivalries(dl, PAD, table_top, table_w - PAD,
+                            vh - table_top - PAD, vw, vh)
+        except Exception as _riv_e:
+            import traceback as _tb
+            _tb.print_exc()
+            _txt(dl, PAD, table_top + 60,
+                 f"Rivalries failed to render: {type(_riv_e).__name__}: {_riv_e}",
+                 (*C["loss"][:3], 230), 16, "raj_r_16")
+    elif inhouse.view_mode == "records":
+        _draw_records(dl, PAD, table_top, table_w - PAD,
+                      vh - table_top - PAD, vw, vh)
+    else:
+        _draw_leaderboard(dl, PAD, table_top, table_w - PAD,
+                          vh - table_top - PAD, vw, vh)
     # Draw top bar AFTER rows so it renders on top of any scrolled-up rows
     _draw_top_bar(dl, vw, header_w)
     if detail_open:
         _draw_detail_panel(dl, vw, vh)
-    _notif.draw(dl, vw)
+    if match_detail_open:
+        _pred_hits.clear()
+        _draw_match_detail_panel(dl, vw, vh)
+        _handle_prediction_clicks()
 
 
 def _draw_idle(dl, vw, vh):
@@ -472,26 +478,15 @@ def _draw_idle(dl, vw, vh):
 
 
 def _draw_loading(dl, vw, vh):
-    cx, cy = vw//2, vh//2
-    t  = (math.sin(inhouse._load_t*2.0)+1)/2
-    a  = int(80 + t*130)
-    dots = "." * (int(inhouse._load_t*2) % 4)
-    label = f"FETCHING LEADERBOARD{dots}"
-    _txt(dl, cx - len(label)*7, cy-30, label, (*C["gold_dk"][:3], a), 27, "raj_36")
+    """Skeleton of the leaderboard — rows morph into real standings on load."""
+    rx = PAD
+    ry = TOP_BAR_H + FILTER_H + 4 + HEADER_H + 4
+    rw = vw - PAD * 2
+    for i in range(12):
+        effects.draw_skeleton_row(dl, rx, ry + i * (ROW_H + 2), rw, ROW_H)
     tip = inhouse._tip
-    tip_x = max(40, cx - len(tip) * 5)
-    _txt(dl, tip_x, cy+16, tip, (*C["txt_dim"][:3], int(a*0.8)), 19, "raj_r_18")
-    # Animated loading bar
-    bar_w = min(400, vw - 120)
-    bar_x = cx - bar_w // 2
-    bar_y = cy + 62
-    prog  = (inhouse._load_t % 1.8) / 1.8
-    fill  = int(bar_w * prog)
-    dpg.draw_rectangle((bar_x, bar_y), (bar_x+bar_w, bar_y+4),
-                        fill=(*C["card"][:3], int(a*0.5)), color=(0,0,0,0), parent=dl)
-    if fill > 0:
-        dpg.draw_rectangle((bar_x, bar_y), (bar_x+fill, bar_y+4),
-                            fill=(*C["gold_dk"][:3], a), color=(0,0,0,0), parent=dl)
+    _txt(dl, max(40, vw // 2 - len(tip) * 5), vh - 44, tip,
+         (*C["txt_dim"][:3], 150), 18, "raj_r_18")
 
 
 def _draw_top_bar(dl, vw, header_w):
@@ -518,10 +513,33 @@ def _draw_top_bar(dl, vw, header_w):
                         fill=btn_fill, color=btn_bdr, rounding=4, parent=dl)
     _txt(dl, bx+14, by+8, btn_lbl, lbl_col, 16, "raj_sb_16")
 
-    # Most Games Logged label (left of LOG GAME button)
+    # Phase 3 — view-mode segmented control: LEADER | HISTORY | RIVALS | RECORDS
+    pill_w = 80
+    seg_gap = 4
+    segments = (("LEADER",  "leaderboard"),
+                ("HISTORY", "history"),
+                ("RIVALS",  "rivalries"),
+                ("RECORDS", "records"))
+    seg_w = pill_w * len(segments) + seg_gap * (len(segments) - 1)
+    seg_x = bx - seg_w - 12
+    seg_y = by
+    for i, (lbl, mode) in enumerate(segments):
+        p_x = seg_x + i * (pill_w + seg_gap)
+        is_active = (inhouse.view_mode == mode)
+        fill = (*C["gold_dk"][:3], 200) if is_active else (*C["card"][:3], 200)
+        bdr  = (*C["gold"][:3], 200)    if is_active else (*C["gold"][:3], 70)
+        lblc = (*C["gold_lt"][:3], 240) if is_active else (*C["txt2"][:3], 200)
+        dpg.draw_rectangle((p_x, seg_y), (p_x + pill_w, seg_y + bh),
+                           fill=fill, color=bdr, rounding=4, parent=dl)
+        # Center the label inside the pill.
+        text_off = max(0, (pill_w - len(lbl) * 9) // 2)
+        _txt(dl, p_x + text_off, seg_y + 8, lbl, lblc, 15, "raj_sb_16")
+
+    # Most Games Logged label (left of segmented control)
     if _most_games_player:
         mg_lbl = f"Most Games Logged:  {_most_games_player}"
-        _txt(dl, bx - 280, by + 10, mg_lbl, (*C["txt2"][:3], 200), 17, "raj_r_16")
+        _txt(dl, seg_x - 280, by + 10, mg_lbl,
+             (*C["txt2"][:3], 200), 17, "raj_r_16")
 
     if dpg.is_mouse_button_clicked(0):
         mouse = dpg.get_mouse_pos(local=False)
@@ -529,6 +547,722 @@ def _draw_top_bar(dl, vw, header_w):
         rx = mouse[0]-vp[0]-68; ry = mouse[1]-vp[1]-52
         if not is_logging and bx<=rx<=bx+bw and by<=ry<=by+bh:
             _start_log_game()
+        # Segmented-control clicks
+        if seg_y <= ry <= seg_y + bh:
+            for i, (_, mode) in enumerate(segments):
+                p_x = seg_x + i * (pill_w + seg_gap)
+                if p_x <= rx <= p_x + pill_w and inhouse.view_mode != mode:
+                    _set_view_mode(mode)
+                    break
+
+
+def _set_view_mode(target):
+    """Switch the Inhouse tab to one of: leaderboard, history, rivalries.
+    Closes any cross-mode slide-in panel so the layout reflows cleanly,
+    and kicks off a one-shot load for the destination mode if needed."""
+    if target == inhouse.view_mode:
+        return
+    # Close cross-mode slide-in panels before changing the layout.
+    if inhouse.selected:
+        inhouse.select(inhouse.selected)
+    if inhouse.selected_match_id:
+        inhouse.select_match(inhouse.selected_match_id)
+    inhouse.view_mode = target
+    if target == "history":
+        inhouse.history_scroll = 0
+        if not live.match_history_loaded and not inhouse.history_loading:
+            inhouse.history_loading = True
+            def _done(_n): inhouse.history_loading = False
+            def _err(_msg): inhouse.history_loading = False
+            load_match_history(on_done=_done, on_error=_err)
+    elif target == "rivalries":
+        # Pick a default anchor if none set yet — prefer the rank-1 inhouse
+        # player (whose name matches the participants table), then fall back to
+        # the most-games-logged Riot ID if no leaderboard is loaded yet.
+        if not inhouse.rivalries_anchor:
+            anchor = None
+            if inhouse.players:
+                try:
+                    anchor = inhouse.players[0].get("player")
+                except (IndexError, AttributeError):
+                    anchor = None
+            if not anchor:
+                anchor = _most_games_player or None
+            if anchor:
+                _set_rivalries_anchor(anchor)
+        inhouse.rivalries_scroll = 0
+    elif target == "records":
+        # Kick off load on first entry; cheap to recompute server-side.
+        if not live.records_loaded and not live._records_inflight:
+            load_records()
+
+
+def _set_rivalries_anchor(name):
+    """Set the rivalries-view anchor and kick off a load if the cache is cold."""
+    if not name:
+        return
+    inhouse.rivalries_anchor = name
+    inhouse.rivalries_scroll = 0
+    if not live.rivalries_loaded.get(name):
+        load_rivalries(name)
+
+
+def _draw_history(dl, tx, ty, tw, th, vw, vh):
+    """Phase 3 — match-history card feed. Each logged custom-game card shows
+    the date, duration, winner side, and all 10 champion picks in role order."""
+    matches = list(live.match_history or [])
+
+    # Loading skeleton
+    if (inhouse.history_loading or
+            (not live.match_history_loaded and not live.match_history_error)):
+        skel_y = ty + 20
+        for i in range(4):
+            effects.draw_skeleton_row(dl, tx, skel_y + i*100, tw, 84,
+                                      cols=(0.20, 0.20, 0.50, 0.10))
+        _txt(dl, tx, ty + 0, "MATCH HISTORY", (*C["gold"][:3], 220), 21, "raj_sb_18")
+        _txt(dl, tx + 200, ty + 4, "loading…",
+             (*C["txt_dim"][:3], 200), 17, "raj_r_16")
+        return
+
+    # Error / empty
+    if live.match_history_error and not matches:
+        _txt(dl, tx, ty + 0, "MATCH HISTORY", (*C["gold"][:3], 220), 21, "raj_sb_18")
+        _txt(dl, tx, ty + 60, f"Could not load history: {live.match_history_error[:80]}",
+             (*C["loss"][:3], 220), 17, "raj_r_16")
+        return
+    if not matches:
+        _txt(dl, tx, ty + 0, "MATCH HISTORY", (*C["gold"][:3], 220), 21, "raj_sb_18")
+        _txt(dl, tx, ty + 60,
+             "No matches yet. Log an inhouse game to seed the feed.",
+             (*C["txt_dim"][:3], 200), 17, "raj_r_16")
+        return
+
+    # Header
+    _txt(dl, tx, ty + 0, f"MATCH HISTORY  ·  {len(matches)} games",
+         (*C["gold"][:3], 220), 21, "raj_sb_18")
+    _txt(dl, tx + 280, ty + 4,
+         "Click any card for the full scoreboard, draft & predictions.",
+         (*C["txt_dim"][:3], 180), 14, "raj_r_14")
+
+    # Wheel-scroll
+    card_h = 148
+    card_gap = 12
+    visible_h = th - 40
+    total_h = len(matches) * (card_h + card_gap)
+    max_scroll = max(0, total_h - visible_h)
+    if _wheel_delta_shared[0] != 0:
+        inhouse.history_scroll = max(0, min(
+            inhouse.history_scroll - _wheel_delta_shared[0] * 30, max_scroll))
+        _wheel_delta_shared[0] = 0
+    inhouse.history_scroll = max(0, min(inhouse.history_scroll, max_scroll))
+
+    scroll = int(inhouse.history_scroll)
+    cards_top = ty + 40
+    cards_bot = ty + th - 8
+
+    # Cursor in content coords — same offset convention as other inhouse handlers.
+    _m  = dpg.get_mouse_pos(local=False)
+    _vp = dpg.get_viewport_pos()
+    mrx = _m[0] - _vp[0] - 68
+    mry = _m[1] - _vp[1] - 52
+    clicked = dpg.is_mouse_button_clicked(0)
+
+    for i, m in enumerate(matches):
+        cy = cards_top + i * (card_h + card_gap) - scroll
+        if cy + card_h < cards_top or cy > cards_bot:
+            continue
+        mid = m.get("id") or ""
+        is_hov = (tx <= mrx <= tx + tw and cy <= mry <= cy + card_h)
+        is_sel = (mid and mid == inhouse.selected_match_id)
+        _draw_match_card(dl, tx, cy, tw, card_h, m, is_hov=is_hov, is_sel=is_sel)
+        if clicked and is_hov:
+            audio.play_click()
+            inhouse.select_match(mid)
+            clicked = False  # consume the click so a second card can't also fire
+
+
+def _draw_match_card(dl, x, y, w, h, m, is_hov=False, is_sel=False):
+    """One match card: scoreboard summary across both teams.
+    Lays out a header row (date/duration/winner) plus two team rows of 5
+    champion+player+KDA cells so the user can read the whole game at a glance."""
+    # Card chrome — selected/hover states layered on top of the base fill.
+    glow = effects.hover_amt(f"match_card_{m.get('id','')}", is_hov or is_sel)
+    base_fill = (*C["card"][:3], 240)
+    border_a  = 60 + int(160 * glow) + (60 if is_sel else 0)
+    border_a  = min(255, border_a)
+    dpg.draw_rectangle((x, y), (x + w, y + h),
+                       fill=base_fill,
+                       color=(*C["gold"][:3], border_a),
+                       rounding=8, parent=dl)
+    if is_sel:
+        effects.draw_hover_glow(dl, x, y, x + w, y + h,
+                                C["gold"], amt=0.7, rounding=8, spread=2)
+    winner = (m.get("winner") or "").lower()
+    accent = _BLUE_COL if winner == "blue" else (
+              _RED_COL if winner == "red" else (160, 160, 170))
+    # Side accent stripe on winner edge.
+    dpg.draw_rectangle((x, y), (x + 4, y + h),
+                       fill=(*accent, 220), color=(0, 0, 0, 0), parent=dl)
+
+    # ----- Header strip -----
+    ts_raw = (m.get("started_at") or "").replace("T", " ").replace("Z", "")
+    dur_sec = int(m.get("duration") or 0)
+    dur_lbl = fmt.duration(dur_sec) if hasattr(fmt, "duration") else (
+              f"{dur_sec // 60}m {dur_sec % 60:02d}s")
+    date_str = _fmt_date(ts_raw[:10])
+    time_str = ts_raw[11:16] if len(ts_raw) >= 16 else ""
+    header_line = f"{date_str}  ·  {time_str}  ·  {dur_lbl}"
+    _txt(dl, x + 18, y + 10, header_line,
+         (*C["txt"][:3], 230), 15, "raj_sb_16")
+    sub_parts = []
+    src = m.get("source") or ""
+    if src:
+        sub_parts.append(src.upper())
+    if m.get("queue"):
+        sub_parts.append(str(m["queue"]))
+    if sub_parts:
+        _txt(dl, x + 18, y + 30, "  ·  ".join(sub_parts),
+             (*C["txt_dim"][:3], 180), 13, "raj_r_14")
+
+    # Winner banner — right side.
+    banner_w = 130
+    bx = x + w - banner_w - 14
+    by = y + 10
+    banner_label = (f"{winner.upper()} WINS" if winner else "PENDING")
+    dpg.draw_rectangle((bx, by), (bx + banner_w, by + 28),
+                       fill=(*accent, 220), color=(*accent, 240),
+                       rounding=5, parent=dl)
+    label_off = max(0, (banner_w - len(banner_label) * 9) // 2)
+    _txt(dl, bx + label_off, by + 5, banner_label,
+         (255, 255, 255, 245), 16, "raj_sb_16")
+
+    # Headline KDA — best performer per team.
+    parts = m.get("participants") or []
+    blue = sorted([p for p in parts if (p.get("team") or "").lower() == "blue"],
+                  key=lambda p: _role_order(p.get("role", "")))
+    red  = sorted([p for p in parts if (p.get("team") or "").lower() == "red"],
+                  key=lambda p: _role_order(p.get("role", "")))
+
+    # ----- Team rows -----
+    # Two rows of 5 cells each; each cell shows ROLE / CHAMP / PLAYER / KDA.
+    row_y_blue = y + 50
+    row_y_red  = y + 96
+    row_h = 42
+    inner_x = x + 14
+    inner_w = w - 28
+    cell_gap = 6
+    cells_per_row = 5
+    cell_w = max(80, (inner_w - cell_gap * (cells_per_row - 1)) // cells_per_row)
+    _draw_match_team_row(dl, inner_x, row_y_blue, cell_w, row_h, cell_gap,
+                         blue, _BLUE_COL, "BLUE", winner == "blue")
+    _draw_match_team_row(dl, inner_x, row_y_red, cell_w, row_h, cell_gap,
+                         red, _RED_COL, "RED", winner == "red")
+
+
+def _draw_match_team_row(dl, x, y, cell_w, cell_h, gap, players, side_color,
+                          team_label, is_winner):
+    """One team's row of 5 player cells inside a match card."""
+    # Label gutter at the very left.
+    lbl_color = (255, 255, 255, 230) if is_winner else (*side_color, 220)
+    dpg.draw_rectangle((x - 8, y), (x - 2, y + cell_h),
+                       fill=(*side_color, 220 if is_winner else 130),
+                       color=(0, 0, 0, 0), rounding=2, parent=dl)
+    for i in range(5):
+        cx = x + i * (cell_w + gap)
+        p = players[i] if i < len(players) else None
+        # Cell bg.
+        fill_a = 230 if p else 90
+        bdr_a  = 110 if is_winner else 70
+        dpg.draw_rectangle((cx, y), (cx + cell_w, y + cell_h),
+                           fill=(*C["panel"][:3], fill_a),
+                           color=(*side_color, bdr_a),
+                           rounding=4, parent=dl)
+        if not p:
+            _txt(dl, cx + 8, y + 12, "—",
+                 (*C["txt_dim"][:3], 130), 14, "raj_r_14")
+            continue
+        role = (p.get("role") or "").upper()[:3]
+        champ = (p.get("champion") or "?").strip()
+        name  = (p.get("player") or "?").strip()
+        kills = int(p.get("kills") or 0)
+        deaths = int(p.get("deaths") or 0)
+        assists = int(p.get("assists") or 0)
+        win = bool(p.get("win"))
+        # Role pill (top-left).
+        if role:
+            role_w = 30
+            dpg.draw_rectangle((cx + 4, y + 4), (cx + 4 + role_w, y + 18),
+                               fill=(*side_color, 200),
+                               color=(0, 0, 0, 0), rounding=2, parent=dl)
+            _txt(dl, cx + 8, y + 4, role,
+                 (255, 255, 255, 240), 11, "raj_sb_14")
+        # Champion (row 1, right of role pill).
+        max_c = max(6, (cell_w - 40) // 7)
+        champ_disp = champ if len(champ) <= max_c else champ[:max_c-1] + "…"
+        _txt(dl, cx + 38, y + 4, champ_disp,
+             (*C["gold_lt"][:3], 240), 13, "raj_sb_14")
+        # Player name (row 2).
+        max_n = max(6, cell_w // 8)
+        name_disp = name if len(name) <= max_n else name[:max_n-1] + "…"
+        _txt(dl, cx + 4, y + 22, name_disp,
+             (*C["txt"][:3], 220), 12, "raj_r_14")
+        # KDA bottom-right.
+        kda_str = f"{kills}/{deaths}/{assists}"
+        kda_x = cx + cell_w - len(kda_str) * 7 - 6
+        kda_color = (*C["txt"][:3], 240) if win else (*C["txt_dim"][:3], 200)
+        _txt(dl, kda_x, y + 22, kda_str, kda_color, 12, "raj_sb_14")
+
+
+_ROLE_ORDER = {"TOP": 0, "JGL": 1, "MID": 2, "BOT": 3, "SUP": 4}
+
+
+def _role_order(role):
+    r = (role or "").upper()
+    return _ROLE_ORDER.get(r, 5 + sum(ord(c) for c in r))
+
+
+def _draw_champ_strip(dl, x, y, w, players, side_color):
+    """Five chip-sized champion tiles, with role + abbreviated champ name."""
+    n = max(1, len(players))
+    cell_w = w // n
+    for i, p in enumerate(players[:5]):
+        cx = x + i * cell_w
+        # Cell bg
+        dpg.draw_rectangle((cx, y), (cx + cell_w - 4, y + 26),
+                           fill=(*C["panel"][:3], 240),
+                           color=(*side_color, 100),
+                           rounding=3, parent=dl)
+        role = (p.get("role") or "").upper()
+        champ = (p.get("champion") or "?").strip()
+        # Trim champ name to fit
+        max_c = max(6, cell_w // 9)
+        display_champ = champ if len(champ) <= max_c else champ[:max_c-1] + "…"
+        _txt(dl, cx + 6, y + 4, role[:3], (*side_color, 220), 12, "raj_sb_14")
+        _txt(dl, cx + 38, y + 4, display_champ,
+             (*C["txt"][:3], 230), 13, "raj_r_14")
+
+
+_RIV_COLS = (
+    ("OPPONENT",    0.30),
+    ("TOGETHER",    0.12),
+    ("VS RECORD",   0.20),
+    ("WITH RECORD", 0.20),
+    ("LAST PLAYED", 0.18),
+)
+
+
+def _draw_rivalries(dl, tx, ty, tw, th, vw, vh):
+    """Phase 3 — RIVALRIES view: per-opponent head-to-head records for the
+    anchor player. Click an opponent to make them the new anchor."""
+    anchor = inhouse.rivalries_anchor
+    # Header strip
+    _txt(dl, tx, ty + 0, "RIVALRIES",
+         (*C["gold"][:3], 220), 21, "raj_sb_18")
+
+    if not anchor:
+        _txt(dl, tx, ty + 60,
+             "No anchor player yet — load inhouse data and try again.",
+             (*C["txt_dim"][:3], 200), 17, "raj_r_16")
+        return
+
+    rows = live.rivalries.get(anchor)
+    loaded = live.rivalries_loaded.get(anchor, False)
+    err = live.rivalries_error
+
+    _txt(dl, tx + 160, ty + 4,
+         f"anchor: {anchor}", (*C["gold_lt"][:3], 220), 17, "raj_sb_16")
+    _txt(dl, tx, ty + 28,
+         "Click an opponent to make them the new anchor.",
+         (*C["txt_dim"][:3], 180), 14, "raj_r_14")
+
+    # Column header
+    hdr_y = ty + 56
+    col_cur = 0
+    col_xs  = []
+    for _, frac in _RIV_COLS:
+        cw = int(tw * frac)
+        col_xs.append((col_cur, cw))
+        col_cur += cw
+    dpg.draw_rectangle((tx, hdr_y - 4), (tx + tw, hdr_y + 22),
+                       fill=(*C["card"][:3], 160),
+                       color=(0, 0, 0, 0), rounding=3, parent=dl)
+    for (lbl, _), (cx, _) in zip(_RIV_COLS, col_xs):
+        _txt(dl, tx + cx + 10, hdr_y, lbl,
+             (*C["txt_dim"][:3], 220), 14, "raj_sb_14")
+
+    rows_top = hdr_y + 30
+    rows_bot = ty + th - 8
+
+    # Loading skeleton — visible until the per-anchor fetch resolves.
+    if not loaded:
+        for i in range(8):
+            effects.draw_skeleton_row(dl, tx, rows_top + i * 40, tw, 32,
+                                      cols=(0.30, 0.12, 0.20, 0.20, 0.18))
+        return
+
+    # Error state — fetch failed entirely.
+    if err and not rows:
+        _txt(dl, tx, rows_top, f"Could not load rivalries: {err[:80]}",
+             (*C["loss"][:3], 220), 16, "raj_r_16")
+        _txt(dl, tx, rows_top + 24,
+             "Pick another anchor below, or check the server connection.",
+             (*C["txt_dim"][:3], 180), 14, "raj_r_14")
+        # Fall through to show the pick-anchor list of inhouse players.
+        rows = []
+
+    # Loaded but empty — typical when the anchor's display-name doesn't match
+    # the Riot ID stored on the server. Offer a pick-anchor list so the user
+    # can swap to any known inhouse player in one click.
+    if not rows:
+        _txt(dl, tx, rows_top,
+             f"No head-to-head data yet for {anchor.upper()}.",
+             (*C["txt_dim"][:3], 220), 16, "raj_sb_16")
+        _txt(dl, tx, rows_top + 24,
+             "Pick a different anchor — click any name below.",
+             (*C["txt_dim"][:3], 180), 14, "raj_r_14")
+        _draw_anchor_picker(dl, tx, rows_top + 56, tw, rows_bot, anchor)
+        return
+
+    # Apply search filter
+    ft = inhouse.filter_text.strip().lower()
+    if ft:
+        rows = [r for r in rows if ft in (r.get("opponent") or "").lower()]
+
+    # Wheel-scroll
+    row_h = 34
+    row_gap = 6
+    visible_h = max(0, rows_bot - rows_top)
+    total_h = len(rows) * (row_h + row_gap)
+    max_scroll = max(0, total_h - visible_h)
+    if _wheel_delta_shared[0] != 0:
+        inhouse.rivalries_scroll = max(0, min(
+            inhouse.rivalries_scroll - _wheel_delta_shared[0] * 30, max_scroll))
+        _wheel_delta_shared[0] = 0
+    inhouse.rivalries_scroll = max(0, min(inhouse.rivalries_scroll, max_scroll))
+    scroll = int(inhouse.rivalries_scroll)
+
+    # Cursor for hover / click
+    _m  = dpg.get_mouse_pos(local=False)
+    _vp = dpg.get_viewport_pos()
+    mrx = _m[0] - _vp[0] - 68
+    mry = _m[1] - _vp[1] - 52
+    clicked = dpg.is_mouse_button_clicked(0)
+
+    for i, r in enumerate(rows):
+        ry = rows_top + i * (row_h + row_gap) - scroll
+        if ry + row_h < rows_top or ry > rows_bot:
+            continue
+        opp = r.get("opponent") or "?"
+        is_hov = (tx <= mrx <= tx + tw and ry <= mry <= ry + row_h)
+        glow = effects.hover_amt(f"riv_{opp}", is_hov)
+        bg_a = 140 + int(60 * glow)
+        dpg.draw_rectangle((tx, ry), (tx + tw, ry + row_h),
+                           fill=(*C["card"][:3], bg_a),
+                           color=(*C["gold"][:3], 60 + int(120 * glow)),
+                           rounding=4, parent=dl)
+
+        # Compute per-row strings
+        gv = int(r.get("games_vs", 0));   wv = int(r.get("wins_vs", 0))
+        gw = int(r.get("games_with", 0)); ww = int(r.get("wins_with", 0))
+        total = gv + gw
+        lv = gv - wv; lw = gw - ww
+        vs_rec   = f"{wv}-{lv}" if gv else "—"
+        with_rec = f"{ww}-{lw}" if gw else "—"
+        vs_pct   = f"{fmt.pct(wv, of=gv)}" if gv else ""
+        with_pct = f"{fmt.pct(ww, of=gw)}" if gw else ""
+        last     = (r.get("last_played") or "—").replace("T", " ").replace("Z", "")
+        last     = last[:10] if last and last != "—" else "—"
+
+        # Colors per win-rate
+        def _wr_col(w, g):
+            if g <= 0: return C["txt_dim"]
+            pct_ = (w / g) * 100
+            return C["win"] if pct_ >= 52 else (C["loss"] if pct_ < 48 else C["txt"])
+
+        vs_col_   = _wr_col(wv, gv)
+        with_col_ = _wr_col(ww, gw)
+
+        # Render columns
+        cell_y = ry + 9
+        # OPPONENT
+        cx, _ = col_xs[0]
+        _txt(dl, tx + cx + 10, cell_y, opp.upper(),
+             (*C["gold_lt"][:3], 240), 16, "raj_sb_16")
+        # TOGETHER
+        cx, _ = col_xs[1]
+        _txt(dl, tx + cx + 10, cell_y, str(total),
+             (*C["txt"][:3], 220), 15, "raj_16")
+        # VS
+        cx, _ = col_xs[2]
+        _txt(dl, tx + cx + 10, cell_y, vs_rec,
+             (*vs_col_[:3], 230), 16, "raj_sb_16")
+        if vs_pct:
+            _txt(dl, tx + cx + 70, cell_y + 2, vs_pct,
+                 (*C["txt_dim"][:3], 180), 13, "raj_r_14")
+        # WITH
+        cx, _ = col_xs[3]
+        _txt(dl, tx + cx + 10, cell_y, with_rec,
+             (*with_col_[:3], 230), 16, "raj_sb_16")
+        if with_pct:
+            _txt(dl, tx + cx + 70, cell_y + 2, with_pct,
+                 (*C["txt_dim"][:3], 180), 13, "raj_r_14")
+        # LAST PLAYED
+        cx, _ = col_xs[4]
+        _txt(dl, tx + cx + 10, cell_y, last,
+             (*C["txt_dim"][:3], 200), 14, "raj_r_14")
+
+        # Click → swap anchor
+        if clicked and is_hov:
+            audio.play_click()
+            _set_rivalries_anchor(opp)
+            clicked = False
+            return  # rows about to change; bail this frame
+
+
+def _draw_anchor_picker(dl, tx, ty, tw, ty_bot, current_anchor):
+    """When the current anchor has no rivalry data, show a clickable grid of
+    every known inhouse player so the user can switch in one click instead of
+    being stuck on an empty state."""
+    names = []
+    seen = set()
+    for p in (inhouse.players or []):
+        nm = (p.get("player") or "").strip()
+        if nm and nm.lower() != (current_anchor or "").lower() and nm not in seen:
+            seen.add(nm)
+            names.append(nm)
+    if not names:
+        return
+    chip_h = 30
+    chip_gap = 8
+    pad_x = 14
+    # Three columns of chips, responsive width.
+    cols = max(1, min(4, tw // 220))
+    chip_w = (tw - chip_gap * (cols - 1)) // cols
+    _m = dpg.get_mouse_pos(local=False)
+    _vp = dpg.get_viewport_pos()
+    mrx = _m[0] - _vp[0] - 68
+    mry = _m[1] - _vp[1] - 52
+    clicked = dpg.is_mouse_button_clicked(0)
+    for i, nm in enumerate(names):
+        col = i % cols
+        row = i // cols
+        cx = tx + col * (chip_w + chip_gap)
+        cy = ty + row * (chip_h + chip_gap)
+        if cy + chip_h > ty_bot:
+            break
+        is_hov = (cx <= mrx <= cx + chip_w and cy <= mry <= cy + chip_h)
+        glow = effects.hover_amt(f"anchor_chip_{nm}", is_hov)
+        fill_a = 160 + int(60 * glow)
+        bdr_a = 80 + int(140 * glow)
+        dpg.draw_rectangle((cx, cy), (cx + chip_w, cy + chip_h),
+                           fill=(*C["card"][:3], fill_a),
+                           color=(*C["gold"][:3], bdr_a),
+                           rounding=4, parent=dl)
+        _txt(dl, cx + pad_x, cy + 7, nm.upper(),
+             (*C["gold_lt"][:3], 230), 14, "raj_sb_14")
+        if clicked and is_hov:
+            audio.play_click()
+            _set_rivalries_anchor(nm)
+            clicked = False
+            return
+
+
+def _fmt_date(ts):
+    """ISO timestamp → 'May 1, 2026' style. Empty / unparseable falls through.
+    Hand-formats day/year to stay cross-platform (Windows lacks the %-d spec)."""
+    if not ts: return ""
+    s = str(ts).replace("T", " ").replace("Z", "")[:10]
+    try:
+        import datetime as _dt
+        d = _dt.datetime.strptime(s, "%Y-%m-%d")
+        return f"{d.strftime('%b')} {d.day}, {d.year}"
+    except Exception:
+        return s
+
+
+def _record_view(key, r):
+    """Render-args for one record card: (big_value, line1, line2, match_id).
+    Returns None when `r` is empty."""
+    if not r:
+        return None
+    mid = r.get("match_id")
+    date = _fmt_date(r.get("started_at"))
+    player = r.get("player", "?")
+    champ  = r.get("champion", "")
+    winner = (r.get("winner") or "").upper()
+    val_raw = r.get("value", 0)
+
+    if key in ("most_kills", "most_assists", "most_cs", "most_vision"):
+        return (str(int(val_raw)),
+                f"{player}  ·  {champ}" if champ else player,
+                date, mid)
+    if key in ("most_damage", "most_gold"):
+        return (fmt.compact(val_raw),
+                f"{player}  ·  {champ}" if champ else player,
+                date, mid)
+    if key == "best_kda_game":
+        sub = f"{player}  ·  {champ}  ({int(r.get('kills',0))}/" \
+              f"{int(r.get('deaths',0))}/{int(r.get('assists',0))})"
+        return (f"{float(val_raw):.2f}", sub, date, mid)
+    if key == "biggest_blowout":
+        return (f"+{int(val_raw)}", f"{winner} TEAM by kill diff",
+                date, mid)
+    if key in ("longest_match", "shortest_match"):
+        return (fmt.duration(int(val_raw)),
+                f"{winner} TEAM won" if winner else "",
+                date, mid)
+    if key in ("longest_win_streak", "longest_loss_streak", "most_games"):
+        return (str(int(val_raw)), player, "", None)
+    # Fallback (unknown key)
+    return (str(val_raw), player, date, mid)
+
+
+# (key, title) — display order for the records grid.
+_RECORD_DEFS = (
+    ("most_kills",         "MOST KILLS"),
+    ("best_kda_game",      "HIGHEST KDA"),
+    ("most_damage",        "MOST DAMAGE"),
+    ("most_assists",       "MOST ASSISTS"),
+    ("most_cs",            "MOST CS"),
+    ("most_gold",          "MOST GOLD"),
+    ("most_vision",        "MOST VISION"),
+    ("longest_win_streak", "LONGEST WIN STREAK"),
+    ("longest_loss_streak","LONGEST LOSS STREAK"),
+    ("most_games",         "MOST GAMES PLAYED"),
+    ("biggest_blowout",    "BIGGEST BLOWOUT"),
+    ("longest_match",      "LONGEST MATCH"),
+    ("shortest_match",     "SHORTEST MATCH"),
+)
+
+
+def _draw_records(dl, tx, ty, tw, th, vw, vh):
+    """Phase 3 — RECORDS view: card grid of league superlatives. Each card
+    shows the title / big value / holder / date. Cards with an associated
+    match_id are clickable: click → jump to HISTORY view with that match's
+    detail panel open."""
+    _txt(dl, tx, ty + 0, "LEAGUE RECORDS",
+         (*C["gold"][:3], 220), 21, "raj_sb_18")
+    _txt(dl, tx + 200, ty + 4,
+         "All-time superlatives across every logged custom game.",
+         (*C["txt_dim"][:3], 180), 14, "raj_r_14")
+
+    rec   = live.records or {}
+    err   = live.records_error
+    loaded = live.records_loaded
+
+    grid_top = ty + 40
+    grid_bot = ty + th - 8
+
+    # Grid geometry — responsive 1..4 cols capped to keep cards glanceable.
+    gap = 16
+    cols = max(1, min(4, (tw + gap) // (240 + gap)))
+    card_w = max(220, (tw - (cols - 1) * gap) // cols)
+    card_h = 124
+
+    # Loading skeleton
+    if not loaded and not rec:
+        for i in range(min(12, cols * 3)):
+            cx = tx + (i % cols) * (card_w + gap)
+            cy = grid_top + (i // cols) * (card_h + gap)
+            effects.draw_skeleton_rect(dl, cx, cy, card_w, card_h,
+                                       rounding=8)
+        return
+
+    if err and not rec:
+        _txt(dl, tx, grid_top, f"Could not load records: {err[:80]}",
+             (*C["loss"][:3], 220), 16, "raj_r_16")
+        return
+
+    if not rec:
+        _txt(dl, tx, grid_top,
+             "No records yet — log an inhouse game to start the hall of fame.",
+             (*C["txt_dim"][:3], 200), 16, "raj_r_16")
+        return
+
+    # Cursor for hover / click
+    _m  = dpg.get_mouse_pos(local=False)
+    _vp = dpg.get_viewport_pos()
+    mrx = _m[0] - _vp[0] - 68
+    mry = _m[1] - _vp[1] - 52
+    clicked = dpg.is_mouse_button_clicked(0)
+
+    for i, (key, title) in enumerate(_RECORD_DEFS):
+        col = i % cols
+        row = i // cols
+        cx = tx + col * (card_w + gap)
+        cy = grid_top + row * (card_h + gap)
+        if cy + card_h > grid_bot:
+            break  # ran out of vertical room
+
+        view = _record_view(key, rec.get(key))
+        is_empty = (view is None)
+        is_hov = (not is_empty
+                  and cx <= mrx <= cx + card_w
+                  and cy <= mry <= cy + card_h)
+        clickable_mid = (view[3] if view else None)
+
+        glow = effects.hover_amt(f"rec_{key}", is_hov and clickable_mid is not None)
+        lift = effects.hover_lift(f"rec_{key}", is_hov and clickable_mid is not None,
+                                  lift=3.0)
+        cy_eff = cy + int(lift)
+
+        # Card chrome
+        base_a = 240 if not is_empty else 160
+        bdr_a  = 60 + int(140 * glow)
+        dpg.draw_rectangle((cx, cy_eff), (cx + card_w, cy_eff + card_h),
+                           fill=(*C["card"][:3], base_a),
+                           color=(*C["gold"][:3], bdr_a),
+                           rounding=8, parent=dl)
+        if glow > 0.02:
+            effects.draw_hover_glow(dl, cx, cy_eff, cx + card_w, cy_eff + card_h,
+                                    C["gold"], amt=glow, rounding=8, spread=2)
+
+        # Title bar
+        _txt(dl, cx + 14, cy_eff + 10, title,
+             (*C["gold"][:3], 220), 13, "raj_sb_14")
+
+        if is_empty:
+            _txt(dl, cx + 14, cy_eff + 50, "no data yet",
+                 (*C["txt_dim"][:3], 180), 16, "raj_r_16")
+            continue
+
+        big_val, line1, line2, _ = view
+        # Big value — count-up when the value is a clean integer string.
+        try:
+            target = float(big_val.replace("+", "").replace(",", "").replace("K","000").replace("M","000000").rstrip(":"))
+            disp = effects.count_up(f"rec_v_{key}", target, rate=0.18)
+            # Keep formatting consistent with the source string for non-numeric forms
+            shown = big_val if not big_val.replace(".", "").replace("+","").replace(",","").isdigit() else (
+                f"{disp:.2f}" if "." in big_val else f"{int(disp):,}")
+            if big_val.startswith("+"): shown = "+" + shown.lstrip("+")
+        except Exception:
+            shown = big_val
+        _txt(dl, cx + 14, cy_eff + 34, shown,
+             (*C["gold_lt"][:3], 240), 32, "cinzel_36")
+
+        # Holder line
+        if line1:
+            _txt(dl, cx + 14, cy_eff + 78,
+                 fmt.clamp_text(line1, max(8, card_w // 9)),
+                 (*C["txt"][:3], 220), 15, "raj_r_16")
+        if line2:
+            _txt(dl, cx + 14, cy_eff + 100,
+                 fmt.clamp_text(line2, max(8, card_w // 9)),
+                 (*C["txt_dim"][:3], 180), 13, "raj_r_14")
+
+        # Subtle "→ open match" hint for cards with a match link
+        if clickable_mid:
+            _txt(dl, cx + card_w - 32, cy_eff + 100, "→",
+                 (*C["gold"][:3], 200 if is_hov else 120),
+                 16, "raj_sb_16")
+
+        if clicked and is_hov and clickable_mid:
+            audio.play_click()
+            # Jump to history view, ensure cache is loaded, then open detail panel.
+            _set_view_mode("history")
+            inhouse.select_match(clickable_mid)
+            clicked = False
+            return
 
 
 def _draw_leaderboard(dl, tx, ty, tw, th, vw, vh):
@@ -554,6 +1288,12 @@ def _draw_leaderboard(dl, tx, ty, tw, th, vw, vh):
 
     row_y = ty + HEADER_H + 4
 
+    # Cursor in content coords, for per-row hover feedback.
+    _m   = dpg.get_mouse_pos(local=False)
+    _vp  = dpg.get_viewport_pos()
+    _mrx = _m[0] - _vp[0] - 68
+    _mry = _m[1] - _vp[1] - 52
+
     # Draw rows FIRST so the column header renders on top of any scrolled-up rows
     for i, p in enumerate(players):
         n  = p["player"]
@@ -568,10 +1308,14 @@ def _draw_leaderboard(dl, tx, ty, tw, th, vw, vh):
         rank = p["rank"]
         is_top3 = rank <= 3
         is_sel  = inhouse.selected == n
+        is_hov  = (not is_sel and tx+xo <= _mrx <= tx+tw+xo
+                   and ry <= _mry <= ry+ROW_H)
 
         # Row background
         if is_sel:
             bg = (*C["card_hover"][:3], al)
+        elif is_hov:
+            bg = (*C["card_hover"][:3], int(al * 0.6))
         elif is_top3:
             bg = (26, 20, 40, al)   # subtle purple tint for top 3
         elif i % 2 == 0:
@@ -802,3 +1546,481 @@ def _draw_detail_panel(dl, vw, vh):
     # Close hint
     _txt(dl, px+20, vh-72, "Click the same row again to close",
          (*C["txt_dim"][:3], int(al*0.5)), 15, "raj_r_14")
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — per-game detail panel (history view)
+# ---------------------------------------------------------------------------
+
+_BLUE_COL = (140, 175, 230)
+_RED_COL  = (230, 145, 145)
+
+
+def _picks_to_list(picks):
+    """Normalize a `blue_picks` / `red_picks` field (either dict-by-role or
+    list) into a 5-entry list in role order: TOP, JGL, MID, BOT, SUP."""
+    if isinstance(picks, dict):
+        out = []
+        for r in ("TOP", "JGL", "MID", "BOT", "SUP"):
+            alt = {"JGL": "JUNGLE", "BOT": "BOTTOM", "SUP": "SUPPORT"}.get(r, r)
+            out.append(picks.get(r) or picks.get(alt))
+        return out
+    if isinstance(picks, list):
+        return list(picks)[:5] + [None] * max(0, 5 - len(picks))
+    return [None] * 5
+
+
+# Per-frame hit-test slots for the predictions vote buttons.
+_pred_hits = []   # [(x1, y1, x2, y2, match_id, side, voter), ...]
+
+
+def _do_share_match(mid):
+    import threading, os
+    def _bg():
+        try:
+            from data import share_cards
+            path = share_cards.make_match_card(mid)
+            if not path:
+                toast.push("Could not generate match card", kind="warn")
+                return
+            copied = share_cards.copy_path_to_clipboard(path)
+            msg = f"Saved match card · {os.path.basename(path)}"
+            if copied:
+                msg += "  (path copied to clipboard)"
+            toast.push(msg, kind="success", duration=7.0)
+        except Exception as e:
+            toast.push(f"Share card error: {e}", kind="error")
+    threading.Thread(target=_bg, daemon=True, name="share_match").start()
+
+
+def _draw_match_predictions(dl, px, sy, panel_w, frac, mid, winner):
+    """Phase 5b — predictions section inside the match-detail panel.
+       Returns the new sy after rendering."""
+    from data.config import load_config
+    from data.reader import live as _live, load_match_predictions
+    al = int(255 * frac)
+
+    _txt(dl, px + 20, sy, "PREDICTIONS",
+         (*C["gold"][:3], al), 16, "raj_sb_18")
+    sy += 24
+
+    cfg = load_config()
+    voter = (cfg.get("display_name") or "").strip()
+
+    # Lazy-load
+    if mid not in _live.predictions and mid not in _live._predictions_inflight:
+        load_match_predictions(mid)
+    preds = _live.predictions.get(mid)
+
+    # Tally
+    blue_votes = sum(1 for p in (preds or []) if p.get("predicted") == "blue")
+    red_votes  = sum(1 for p in (preds or []) if p.get("predicted") == "red")
+    my_vote    = next((p.get("predicted") for p in (preds or [])
+                       if p.get("voter") == voter), None)
+
+    # Bar
+    total = max(1, blue_votes + red_votes)
+    bar_x = px + 20
+    bar_w = panel_w - 40
+    bar_y = sy
+    bar_h = 22
+    blue_frac = blue_votes / total
+    dpg.draw_rectangle((bar_x, bar_y),
+                       (bar_x + int(bar_w * blue_frac), bar_y + bar_h),
+                       fill=(*_BLUE_COL, int(200*frac)),
+                       color=(0,0,0,0), rounding=4, parent=dl)
+    dpg.draw_rectangle((bar_x + int(bar_w * blue_frac), bar_y),
+                       (bar_x + bar_w, bar_y + bar_h),
+                       fill=(*_RED_COL, int(200*frac)),
+                       color=(0,0,0,0), rounding=4, parent=dl)
+    _txt(dl, bar_x + 8, bar_y + 3,
+         f"{blue_votes} BLUE",
+         (12, 24, 48, al), 13, "raj_sb_14")
+    rt = f"{red_votes} RED"
+    rw = len(rt) * 7
+    _txt(dl, bar_x + bar_w - rw - 8, bar_y + 3, rt,
+         (48, 12, 24, al), 13, "raj_sb_14")
+    sy += bar_h + 10
+
+    # Vote controls — only when there's no winner yet AND we know who you are
+    if not winner and voter:
+        btn_w = (panel_w - 60) // 2
+        bx_b = px + 20
+        bx_r = px + 20 + btn_w + 20
+        btn_h = 28
+
+        # Hover state — translate the absolute mouse into content_dl coords by
+        # looking up the actual sidebar/titlebar positions instead of hard-
+        # coding 68/52 (the sidebar can collapse/expand to widths up to 200).
+        _m  = dpg.get_mouse_pos(local=False)
+        _vp = dpg.get_viewport_pos()
+        try:
+            _cw_pos = dpg.get_item_pos("content_win")
+        except Exception:
+            _cw_pos = (68, 52)
+        mrx = _m[0] - _vp[0] - _cw_pos[0]
+        mry = _m[1] - _vp[1] - _cw_pos[1]
+
+        # BLUE button
+        h_blue = (bx_b <= mrx <= bx_b + btn_w and sy <= mry <= sy + btn_h)
+        is_mine_blue = (my_vote == "blue")
+        amt_b = effects.hover_amt(f"pred_b_{mid}", h_blue)
+        fill_a = int((220 if is_mine_blue else 100 + 80 * amt_b) * frac)
+        dpg.draw_rectangle((bx_b, sy), (bx_b + btn_w, sy + btn_h),
+                           fill=(*_BLUE_COL, fill_a),
+                           color=(*_BLUE_COL, int(220*frac)),
+                           rounding=6, parent=dl)
+        label_b = ("✓ VOTED BLUE" if is_mine_blue else "VOTE BLUE")
+        lw = len(label_b) * 7
+        _txt(dl, bx_b + (btn_w - lw)//2, sy + 6, label_b,
+             ((12, 18, 32, al) if is_mine_blue else (*C["txt"][:3], al)),
+             14, "raj_sb_16")
+        _pred_hits.append((bx_b, sy, bx_b + btn_w, sy + btn_h, mid, "blue", voter))
+
+        # RED button
+        h_red = (bx_r <= mrx <= bx_r + btn_w and sy <= mry <= sy + btn_h)
+        is_mine_red = (my_vote == "red")
+        amt_r = effects.hover_amt(f"pred_r_{mid}", h_red)
+        fill_a = int((220 if is_mine_red else 100 + 80 * amt_r) * frac)
+        dpg.draw_rectangle((bx_r, sy), (bx_r + btn_w, sy + btn_h),
+                           fill=(*_RED_COL, fill_a),
+                           color=(*_RED_COL, int(220*frac)),
+                           rounding=6, parent=dl)
+        label_r = ("✓ VOTED RED" if is_mine_red else "VOTE RED")
+        lw = len(label_r) * 7
+        _txt(dl, bx_r + (btn_w - lw)//2, sy + 6, label_r,
+             ((32, 12, 18, al) if is_mine_red else (*C["txt"][:3], al)),
+             14, "raj_sb_16")
+        _pred_hits.append((bx_r, sy, bx_r + btn_w, sy + btn_h, mid, "red", voter))
+        sy += btn_h + 8
+    elif winner:
+        # Outcome accuracy
+        correct = blue_votes if winner == "blue" else red_votes
+        total_v = blue_votes + red_votes
+        if total_v:
+            acc = correct / total_v * 100
+            _txt(dl, px + 20, sy,
+                 f"{correct} of {total_v} predictors called it correctly ({acc:.0f}%).",
+                 (*C["txt2"][:3], int(al*0.9)), 13, "raj_r_14")
+        else:
+            _txt(dl, px + 20, sy,
+                 "No predictions were made for this match.",
+                 (*C["txt_dim"][:3], int(al*0.7)), 13, "raj_r_14")
+        sy += 18
+    else:
+        # No winner, no voter set
+        _txt(dl, px + 20, sy,
+             "Set your display name in Settings to cast a prediction.",
+             (*C["txt_dim"][:3], int(al*0.8)), 12, "raj_r_14")
+        sy += 18
+    return sy
+
+
+def _handle_prediction_clicks():
+    """Consume any click that hit a vote button. Called after the panel draws."""
+    if not _pred_hits:
+        return
+    if not dpg.is_mouse_button_clicked(0):
+        return
+    _m  = dpg.get_mouse_pos(local=False)
+    _vp = dpg.get_viewport_pos()
+    try:
+        _cw_pos = dpg.get_item_pos("content_win")
+    except Exception:
+        _cw_pos = (68, 52)
+    mrx = _m[0] - _vp[0] - _cw_pos[0]
+    mry = _m[1] - _vp[1] - _cw_pos[1]
+    for x1, y1, x2, y2, mid, side, voter in _pred_hits:
+        if x1 <= mrx <= x2 and y1 <= mry <= y2:
+            try:
+                audio.play_click()
+            except Exception:
+                pass
+            import threading
+            def _post(mid=mid, side=side, voter=voter):
+                try:
+                    from data import rift_api
+                    from data.reader import load_match_predictions, live as _live
+                    res = rift_api.post_prediction(mid, voter, side)
+                    if res and res.get("ok") is not False:
+                        # Force a fresh fetch — overwrite cache
+                        _live.predictions.pop(mid, None)
+                        load_match_predictions(mid)
+                        toast.push(f"Prediction recorded: {side.upper()}", kind="success")
+                    else:
+                        toast.push("Could not save prediction", kind="warn")
+                except Exception as e:
+                    toast.push(f"Prediction error: {e}", kind="error")
+            threading.Thread(target=_post, daemon=True).start()
+            return
+
+
+def _draw_match_detail_panel(dl, vw, vh):
+    frac = inhouse.match_detail_x_frac
+    mid  = inhouse.selected_match_id
+    if not mid or frac < 0.01:
+        return
+
+    # Pull from the already-cached history list — no extra fetch needed.
+    m = next((mm for mm in (live.match_history or []) if mm.get("id") == mid), None)
+    if not m:
+        # Match disappeared (DB pruned?). Quietly close.
+        inhouse.selected_match_id = None
+        inhouse.match_detail_x_frac = 0.0
+        return
+
+    panel_w = int(MATCH_DETAIL_W * frac)
+    px = vw - panel_w
+    py = TOP_BAR_H
+    al = int(255 * frac)
+
+    # Panel chrome
+    dpg.draw_rectangle((px, py), (vw, vh),
+                       fill=(*C["panel"][:3], int(240*frac)),
+                       color=(0,0,0,0), parent=dl)
+    dpg.draw_line((px, py), (px, vh),
+                  color=(*C["rule_dark"][:3], int(220*frac)),
+                  thickness=1, parent=dl)
+
+    winner = (m.get("winner") or "").lower()
+    accent = _BLUE_COL if winner == "blue" else (_RED_COL if winner == "red"
+                                                  else (200, 180, 120))
+    dpg.draw_rectangle((px, py), (vw, py+4),
+                       fill=(*accent, int(220*frac)),
+                       color=(0,0,0,0), parent=dl)
+
+    # Close (X) button — top-right of panel
+    bx_close = vw - 36
+    by_close = py + 12
+    bw_close = bh_close = 24
+    _m  = dpg.get_mouse_pos(local=False)
+    _vp = dpg.get_viewport_pos()
+    try:
+        _cw_pos = dpg.get_item_pos("content_win")
+    except Exception:
+        _cw_pos = (68, 52)
+    mrx = _m[0] - _vp[0] - _cw_pos[0]
+    mry = _m[1] - _vp[1] - _cw_pos[1]
+    is_close_hov = (bx_close <= mrx <= bx_close + bw_close
+                    and by_close <= mry <= by_close + bh_close)
+    close_glow = effects.hover_amt(f"match_close_{mid}", is_close_hov)
+    btn_bg_a = int((40 + 120 * close_glow) * frac)
+    dpg.draw_rectangle((bx_close, by_close),
+                       (bx_close + bw_close, by_close + bh_close),
+                       fill=(*C["card_hover"][:3], btn_bg_a),
+                       color=(*C["gold"][:3], int((80 + 120 * close_glow) * frac)),
+                       rounding=4, parent=dl)
+    _txt(dl, bx_close + 7, by_close + 3, "X",
+         (*C["gold_lt"][:3], al), 16, "raj_sb_16")
+
+    # Header — section label + timestamp + winner-side big label
+    _txt(dl, px + 20, py + 14, "MATCH DETAIL",
+         (*C["gold"][:3], al), 19, "raj_sb_18")
+    ts_raw = (m.get("started_at") or "").replace("T", " ").replace("Z", "")
+    _txt(dl, px + 20, py + 42, ts_raw[:16] or "—",
+         (*C["txt"][:3], al), 16, "raj_r_16")
+
+    win_label = (f"{winner.upper()} TEAM WINS" if winner
+                 else "RESULT UNKNOWN")
+    _txt(dl, vw - 260, py + 44, win_label,
+         (*accent, al), 17, "raj_sb_18")
+
+    dur_sec = int(m.get("duration") or 0)
+    sub_parts = [fmt.duration(dur_sec)]
+    if m.get("queue"): sub_parts.append(str(m["queue"]))
+    if m.get("patch"): sub_parts.append(f"patch {m['patch']}")
+    if m.get("source"): sub_parts.append(f"source: {m['source']}")
+    _txt(dl, px + 20, py + 66, "  ·  ".join(sub_parts),
+         (*C["txt_dim"][:3], int(al * 0.85)), 14, "raj_r_14")
+
+    dy = py + 96
+    dpg.draw_line((px + 16, dy), (vw - 16, dy),
+                  color=(*C["rule_dark"][:3], int(180*frac)),
+                  thickness=1, parent=dl)
+
+    # ----- SCOREBOARD -----
+    sy = dy + 12
+    _txt(dl, px + 20, sy, "SCOREBOARD",
+         (*C["gold"][:3], al), 16, "raj_sb_18")
+    sy += 26
+
+    parts = m.get("participants") or []
+    blue = sorted([p for p in parts if (p.get("team") or "").lower() == "blue"],
+                  key=lambda p: _role_order(p.get("role", "")))
+    red  = sorted([p for p in parts if (p.get("team") or "").lower() == "red"],
+                  key=lambda p: _role_order(p.get("role", "")))
+
+    sb_cols = [
+        ("ROLE",   40),
+        ("CHAMP",  120),
+        ("PLAYER", 108),
+        ("K/D/A",  82),
+        ("CS",     42),
+        ("GOLD",   58),
+        ("DMG",    66),
+        ("VIS",    40),
+    ]
+
+    # Header row
+    hx = px + 22
+    dpg.draw_rectangle((px + 16, sy - 3), (vw - 16, sy + 20),
+                       fill=(*C["card"][:3], int(170*frac)),
+                       color=(0,0,0,0), rounding=3, parent=dl)
+    for lbl, cw in sb_cols:
+        _txt(dl, hx, sy, lbl, (*C["txt_dim"][:3], int(al*0.95)),
+             13, "raj_sb_14")
+        hx += cw
+    sy += 26
+
+    def _sb_row(yy, p, side_col, alt):
+        bg_a = int((130 if alt else 90) * frac)
+        dpg.draw_rectangle((px + 16, yy - 2), (vw - 16, yy + 22),
+                           fill=(*C["card"][:3], bg_a),
+                           color=(0,0,0,0), rounding=2, parent=dl)
+        dpg.draw_rectangle((px + 16, yy - 2), (px + 19, yy + 22),
+                           fill=(*side_col, int(220*frac)),
+                           color=(0,0,0,0), parent=dl)
+        role  = (p.get("role") or "").upper()[:3]
+        champ = p.get("champion") or "?"
+        plyr  = p.get("player") or "—"
+        k = int(p.get("kills", 0)); d = int(p.get("deaths", 0)); a_ = int(p.get("assists", 0))
+        vals = [
+            (role,                            side_col),
+            (fmt.clamp_text(str(champ), 15),  C["gold_lt"]),
+            (fmt.clamp_text(str(plyr), 13),   C["txt"]),
+            (f"{k}/{d}/{a_}",                 C["txt"]),
+            (str(int(p.get("cs", 0))),        C["txt"]),
+            (fmt.compact(p.get("gold", 0)),   C["txt"]),
+            (fmt.compact(p.get("damage", 0)), C["txt"]),
+            (str(int(p.get("vision", 0))),    C["txt"]),
+        ]
+        xx = px + 22
+        for (text, col), (_, cw) in zip(vals, sb_cols):
+            _txt(dl, xx, yy + 1, text, (*col[:3], al), 14, "raj_r_14")
+            xx += cw
+
+    # Blue side
+    if blue:
+        for i, p in enumerate(blue[:5]):
+            _sb_row(sy + i*24, p, _BLUE_COL, i % 2 == 0)
+        sy += min(5, len(blue)) * 24 + 6
+    else:
+        _txt(dl, px + 22, sy, "(no blue-side participants logged)",
+             (*C["txt2"][:3], al), 14, "raj_r_14")
+        sy += 22
+
+    # Thin team divider
+    dpg.draw_line((px + 16, sy - 3), (vw - 16, sy - 3),
+                  color=(*C["rule_dark"][:3], int(120*frac)),
+                  thickness=1, parent=dl)
+
+    # Red side
+    if red:
+        for i, p in enumerate(red[:5]):
+            _sb_row(sy + i*24, p, _RED_COL, i % 2 == 0)
+        sy += min(5, len(red)) * 24 + 12
+    else:
+        _txt(dl, px + 22, sy, "(no red-side participants logged)",
+             (*C["txt2"][:3], al), 14, "raj_r_14")
+        sy += 22
+
+    # ----- DRAFT -----
+    draft = m.get("draft") or {}
+    _txt(dl, px + 20, sy, "DRAFT",
+         (*C["gold"][:3], al), 16, "raj_sb_18")
+    sy += 24
+
+    half_w  = (panel_w - 32) // 2
+    col_x_b = px + 16
+    col_x_r = px + 16 + half_w + 4
+    _txt(dl, col_x_b + 4, sy, "BLUE",
+         (*_BLUE_COL, al), 13, "raj_sb_14")
+    _txt(dl, col_x_r + 4, sy, "RED",
+         (*_RED_COL, al), 13, "raj_sb_14")
+    sy += 18
+
+    def _draft_row(yy, lbl, items, anchor_x, accent_col):
+        _txt(dl, anchor_x + 4, yy + 4, lbl,
+             (*C["txt2"][:3], al), 13, "raj_sb_14")
+        cx = anchor_x + 52
+        chip_w = 62
+        chip_h = 22
+        for it in (items or [None]*5)[:5]:
+            name = (str(it).strip() if it else "—")
+            dpg.draw_rectangle((cx, yy), (cx + chip_w - 4, yy + chip_h),
+                               fill=(*C["card"][:3], int(200*frac)),
+                               color=(*accent_col, int(160*frac)),
+                               rounding=3, parent=dl)
+            _txt(dl, cx + 5, yy + 4,
+                 fmt.clamp_text(name, 7),
+                 (*C["txt"][:3], al), 13, "raj_r_14")
+            cx += chip_w
+
+    blue_bans = draft.get("blue_bans") or []
+    red_bans  = draft.get("red_bans")  or []
+    blue_pl   = _picks_to_list(draft.get("blue_picks"))
+    red_pl    = _picks_to_list(draft.get("red_picks"))
+
+    _draft_row(sy, "BANS", blue_bans, col_x_b, _BLUE_COL)
+    _draft_row(sy, "BANS", red_bans,  col_x_r, _RED_COL)
+    sy += 26
+    _draft_row(sy, "PICKS", blue_pl, col_x_b, _BLUE_COL)
+    _draft_row(sy, "PICKS", red_pl,  col_x_r, _RED_COL)
+    sy += 30
+
+    if not (blue_bans or red_bans or any(blue_pl) or any(red_pl)):
+        _txt(dl, px + 20, sy, "(No draft was logged for this match.)",
+             (*C["txt2"][:3], al), 14, "raj_r_14")
+        sy += 20
+
+    # ----- PREDICTIONS (Phase 5b) -----
+    sy += 6
+    dpg.draw_line((px + 16, sy), (vw - 16, sy),
+                  color=(*C["rule_dark"][:3], int(160*frac)),
+                  thickness=1, parent=dl)
+    sy += 12
+    sy = _draw_match_predictions(dl, px, sy, panel_w, frac, mid, winner)
+
+    # ----- TIMELINE -----
+    sy += 6
+    dpg.draw_line((px + 16, sy), (vw - 16, sy),
+                  color=(*C["rule_dark"][:3], int(160*frac)),
+                  thickness=1, parent=dl)
+    sy += 12
+    _txt(dl, px + 20, sy, "TIMELINE",
+         (*C["gold"][:3], al), 16, "raj_sb_18")
+    sy += 24
+    _txt(dl, px + 20, sy,
+         "Per-minute timeline not yet captured for this match.",
+         (*C["txt2"][:3], al), 14, "raj_r_14")
+    sy += 20
+    _txt(dl, px + 20, sy,
+         "Coming with the next Riot-API pass — full minute-by-minute curves.",
+         (*C["txt2"][:3], int(al * 0.85)), 13, "raj_r_14")
+
+    # SHARE button — bottom-right of panel
+    sb_w = 90; sb_h = 28
+    sbx = vw - sb_w - 20
+    sby = vh - sb_h - 18
+    sb_hov = (sbx <= mrx <= sbx + sb_w and sby <= mry <= sby + sb_h)
+    sb_amt = effects.hover_amt(f"match_share_{mid}", sb_hov)
+    dpg.draw_rectangle((sbx, sby), (sbx + sb_w, sby + sb_h),
+                       fill=(*C["card_hover"][:3], int((180 + 60 * sb_amt) * frac)),
+                       color=(*C["gold"][:3], int((180 + 60 * sb_amt) * frac)),
+                       rounding=6, parent=dl)
+    _txt(dl, sbx + 18, sby + 6, "SHARE PNG",
+         (*C["gold_lt"][:3], al), 13, "raj_sb_14")
+
+    # Close-hint footer
+    _txt(dl, px + 20, vh - 28,
+         "Press the X — or click the same card again — to close.",
+         (*C["txt_dim"][:3], int(al*0.55)), 12, "raj_r_14")
+
+    # X-button click
+    if dpg.is_mouse_button_clicked(0) and is_close_hov:
+        audio.play_click()
+        inhouse.select_match(mid)
+    # SHARE click — generate PNG in a worker, toast the path
+    if dpg.is_mouse_button_clicked(0) and sb_hov:
+        audio.play_click()
+        _do_share_match(mid)

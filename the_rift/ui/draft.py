@@ -346,6 +346,12 @@ class DraftState:
         self._board_lock_pop_idx  = -1   # timeline cell idx that just locked
         self._board_lock_pop_anim = 1.0  # 0 = just popped, 1 = settled
         self._board_last_pointer  = 0    # detect a new lock
+        # v3.0.5: re-run recommend_action when async scout/inhouse data lands.
+        # Tracks (#scout sheets loaded, len(inhouse_champs)) so the first-ban
+        # call can refresh once the prefetch finishes — without this the
+        # recompute happened ONCE on board entry, before scout data was
+        # ready, and the TOP CALL panel stayed empty until the first lock.
+        self._board_data_sig      = None
         # Phase 4 — SCOUTING / BRIEFING / ARCHETYPE state
         self.scout_progress     = {}    # name -> 1 (done) / 0 (in-flight)
         self.scout_total        = 0     # total players to fetch (for progress bar)
@@ -714,7 +720,7 @@ def _draw_tb_card(dl, x, y, w, h, player, dragging=False):
         _txt(dl, x+10, y+5,    name.upper(), (130, 155, 210, al), 21, "raj_20")
         _txt(dl, x+10, y+h-19, "RAND",       ( 90, 110, 160, int(al*0.7)), 18, "raj_sb_18")
         _txt(dl, x+w-46, y+5,  "~50",
-             (*lol_theme.LOL["txt_dim"][:3], int(al*0.55)), 18, "raj_20")
+             (*lol_theme.LOL["txt_dim"][:3], int(al*0.85)), 18, "raj_20")
     else:
         dpg.draw_rectangle((x, y), (x+w, y+h),
                             fill=lol_theme._alpha(lol_theme.LOL["navy_panel"],
@@ -739,7 +745,7 @@ def _draw_tb_card(dl, x, y, w, h, player, dragging=False):
         sc = _tb_score_str(player)
         if sc:
             _txt(dl, x+w-52, y+5, sc,
-                 (*lol_theme.LOL["txt_dim"][:3], int(al*0.9)), 20, "raj_20")
+                 (*lol_theme.LOL["gold_lt"][:3], al), 20, "raj_20")
 
 
 def _tb_slot_hit(sx, sy, sw, sh, pos):
@@ -750,10 +756,7 @@ def _tb_slot_hit(sx, sy, sw, sh, pos):
 
 def _tb_handle_input(vw, vh):
     """Process mouse input for the team builder. Call every frame."""
-    mouse = dpg.get_mouse_pos(local=False)
-    vp    = dpg.get_viewport_pos()
-    mx    = mouse[0] - vp[0] - 68   # content-relative x (68 = collapsed sidebar)
-    my    = mouse[1] - vp[1] - 52   # content-relative y (52 = titlebar)
+    mx, my = _content_mouse()
 
     _tb.drag_pos = (mx, my)
 
@@ -1101,6 +1104,41 @@ _pdrag = _PickDrag()
 # Mouse position in content-area coords, updated each frame by _draw_board.
 # Lets every render helper compute hover state without re-doing the offset math.
 _mouse_xy = (0, 0)
+
+
+def _content_origin():
+    """v3.0.5: dynamic content-drawlist screen-space top-left. Replaces the
+    old hardcoded (sidebar_w=68, titlebar_h=52) offsets that broke whenever
+    the sidebar animated open (200px expanded) or the viewport state changed
+    (fullscreen toggle / minimize+restore could leave the sidebar stuck wide,
+    making every click miss).
+
+    We read the content drawlist's `rect_min` (absolute screen position) and
+    subtract the viewport position to get viewport-relative coords.
+    Falls back to the old constants if the item isn't ready or DPG complains."""
+    try:
+        st = dpg.get_item_state("content_dl") or {}
+        rm = st.get("rect_min")
+        if rm and len(rm) >= 2:
+            vp = dpg.get_viewport_pos()
+            return (float(rm[0]) - float(vp[0]),
+                    float(rm[1]) - float(vp[1]))
+    except Exception:
+        pass
+    return (68.0, 52.0)
+
+
+def _content_mouse():
+    """Mouse position relative to the content drawlist top-left.
+    Use this instead of the (mouse - vp - 68, mouse - vp - 52) idiom that
+    only worked when the sidebar was collapsed."""
+    try:
+        mouse = dpg.get_mouse_pos(local=False)
+        vp = dpg.get_viewport_pos()
+        ox, oy = _content_origin()
+        return (mouse[0] - vp[0] - ox, mouse[1] - vp[1] - oy)
+    except Exception:
+        return (0.0, 0.0)
 
 
 def _hover(x, y, w, h):
@@ -1654,9 +1692,27 @@ def _draw_sync_lobby(dl, vw, vh):
             fill=lol_theme._alpha(lol_theme.LOL["navy_panel"], 220),
             border_color=sw_border,
             border_thickness=2 if can_swap else 1, rounding=4)
-        _txt(dl, sw_x + 14, sw_y + 8, "⇄",
-             (*sw_text_col[:3], 240 if can_swap else 130),
-             22, "raj_sb_22")
+        # v3.0.5: draw a swap arrow shape rather than the ⇄ glyph — the
+        # Rajdhani font in use here doesn't have U+21C4 in its glyph set,
+        # so the unicode literal was rendering as "?".
+        arrow_a = 240 if can_swap else 130
+        arrow_col = (*sw_text_col[:3], arrow_a)
+        ax_c = sw_x + sw_w // 2
+        ay_c = sw_y + sw_h // 2
+        # Top arrow (rightwards)
+        dpg.draw_line((ax_c - 10, ay_c - 5), (ax_c + 8, ay_c - 5),
+                      color=arrow_col, thickness=2, parent=dl)
+        dpg.draw_polygon([(ax_c + 10, ay_c - 5),
+                          (ax_c + 4, ay_c - 9),
+                          (ax_c + 4, ay_c - 1)],
+                         fill=arrow_col, color=(0, 0, 0, 0), parent=dl)
+        # Bottom arrow (leftwards)
+        dpg.draw_line((ax_c - 8, ay_c + 5), (ax_c + 10, ay_c + 5),
+                      color=arrow_col, thickness=2, parent=dl)
+        dpg.draw_polygon([(ax_c - 10, ay_c + 5),
+                          (ax_c - 4, ay_c + 1),
+                          (ax_c - 4, ay_c + 9)],
+                         fill=arrow_col, color=(0, 0, 0, 0), parent=dl)
         if can_swap:
             opp_side = "RED" if my_side_str == "BLUE" else "BLUE"
             _board_hits.append((sw_x, sw_y, sw_w, sw_h, "swap_side", opp_side))
@@ -2296,72 +2352,306 @@ def _draw_briefing(dl, vw, vh):
     _board_hits.append((btn_x, btn_y, btn_w, btn_h, "briefing_continue", None))
 
 
-def _draw_archetype(dl, vw, vh):
-    """7-archetype hidden picker for the local side. Cards laid out in a grid
-    using lol_theme.draw_archetype_card. Click = pending selection;
-    CONFIRM button locks via set_archetype()."""
-    dpg.draw_rectangle((0, 0), (vw, vh),
-                       fill=lol_theme.LOL["navy_deep"],
+def _archetype_subs(card_data, players, inhouse, primary, scout):
+    """v3.0.5: return a list of 5 sub-pick champion names, parallel to the
+    archetype's primary 5 picks. Each sub is the player's #2 candidate for
+    their assigned role that isn't already the primary pick on this card
+    (or on any other role of this card, to keep the comp legal).
+
+    Used by the circular archetype-card layout to render one backup icon
+    under each primary champ — "if X is banned, the comp falls back to Y"."""
+    if not card_data:
+        return []
+    primary_picks = [(p.get("champion") or "")
+                     for p in (card_data.get("picks") or [])][:5]
+    used = {c for c in primary_picks if c}
+    subs = []
+    for i, p in enumerate(players[:5]):
+        primary_champ = primary_picks[i] if i < len(primary_picks) else ""
+        role = _ROLES[i] if i < len(_ROLES) else (p.get("role", "") if p else "")
+        sub = ""
+        # Use the board-layer wrapper that already guards _eng presence and
+        # missing-kwarg cases.
+        try:
+            local_used = set(used)
+            if primary_champ:
+                local_used.add(primary_champ)
+            cands = _candidates_for_player(
+                p, role, inhouse, primary, local_used,
+                k=6, scout_champs=scout)
+        except Exception:
+            cands = []
+        for cname, _comfort in cands:
+            if cname:
+                sub = cname
+                break
+        subs.append(sub)
+        if sub:
+            used.add(sub)
+    return subs
+
+
+def _draw_archetype_card_circular(dl, cx, cy, card_data, subs, *,
+                                  card_w=240, card_h=210,
+                                  hot=False, selected=False,
+                                  accent_side="BLUE"):
+    """v3.0.5: compact archetype card for the circular layout. Lays out the
+    primary 5 picks as champion icons (32×32) in a row, with 1 sub icon
+    (22×22) directly beneath each, plus label + viability chip + spike."""
+    x1 = cx - card_w // 2
+    y1 = cy - card_h // 2
+    x2 = x1 + card_w
+    y2 = y1 + card_h
+
+    # Hover/selected lift
+    fill = lol_theme.LOL["navy_lt"] if (selected or hot) else lol_theme.LOL["navy_panel"]
+    border_col = (lol_theme.LOL["gold"] if selected else
+                  (lol_theme.LOL["gold_lt"] if hot else lol_theme.LOL["gold_rule"]))
+    border_thickness = 3 if selected else (2 if hot else 1)
+    lol_theme.draw_navy_panel(dl, x1, y1, x2, y2, fill=fill,
+                              border_color=border_col,
+                              border_thickness=border_thickness, rounding=8)
+
+    # Side-accent stripe along the top
+    accent = lol_theme.SIDE_ACCENT.get(accent_side, lol_theme.LOL["gold"])
+    dpg.draw_rectangle((x1 + 2, y1 + 2), (x2 - 2, y1 + 6),
+                       fill=lol_theme._alpha(accent, 220),
                        color=(0, 0, 0, 0), parent=dl)
 
+    # Archetype label (truncated to fit)
+    label = str(card_data.get("label", card_data.get("archetype", "?")))
+    _txt(dl, x1 + 12, y1 + 12, label[:22],
+         (*lol_theme.LOL["gold_lt"][:3], 240), 16, "raj_sb_16")
+
+    # Viability chip + combined %
+    viab = str(card_data.get("viability", ""))
+    viab_color_key = lol_theme._VIABILITY_COLORS.get(viab, "gold")
+    viab_col = lol_theme.LOL.get(viab_color_key, lol_theme.LOL["gold"])
+    combined = card_data.get("combined", 0)
+    chip_txt = f"[ {viab} {combined} ]"
+    chip_w = len(chip_txt) * 6 + 8
+    chip_x = x2 - chip_w - 12
+    dpg.draw_rectangle((chip_x, y1 + 14), (chip_x + chip_w, y1 + 34),
+                       fill=(*viab_col[:3], 60),
+                       color=(*viab_col[:3], 220),
+                       thickness=1, rounding=3, parent=dl)
+    _txt(dl, chip_x + 5, y1 + 16, chip_txt,
+         (*viab_col[:3], 235), 11, "raj_sb_11")
+
+    # 5 champion icons in a row
+    primary_picks = (card_data.get("picks") or [])[:5]
+    icon_sz = 32
+    sub_sz = 22
+    row_y = y1 + 50
+    sub_y = row_y + icon_sz + 6
+    total_w = 5 * icon_sz + 4 * 10
+    icon_start_x = x1 + (card_w - total_w) // 2
+    for i in range(5):
+        ix = icon_start_x + i * (icon_sz + 10)
+        # Role label above each icon
+        role = _ROLES[i] if i < len(_ROLES) else ""
+        if role:
+            rc = _ROLE_COLORS.get(role, (180, 180, 180))
+            _txt(dl, ix + (icon_sz - len(role) * 6) // 2, row_y - 14,
+                 role, (*rc, 220), 11, "raj_sb_11")
+        # Primary icon
+        primary_champ = (primary_picks[i].get("champion") or "?") if i < len(primary_picks) else "?"
+        _draw_portrait(dl, ix, row_y, icon_sz, primary_champ, accent,
+                       alpha=240, rounding=4, border_w=2)
+        # Sub icon (1 backup, smaller and dimmer)
+        sub_champ = subs[i] if i < len(subs) else ""
+        sub_x = ix + (icon_sz - sub_sz) // 2
+        if sub_champ:
+            _draw_portrait(dl, sub_x, sub_y, sub_sz, sub_champ,
+                           lol_theme.LOL["gold_rule"], alpha=200,
+                           rounding=4, border_w=1)
+        else:
+            # Empty slot placeholder
+            dpg.draw_rectangle((sub_x, sub_y), (sub_x + sub_sz, sub_y + sub_sz),
+                               fill=lol_theme._alpha(lol_theme.LOL["navy_deep"], 120),
+                               color=lol_theme._alpha(lol_theme.LOL["gold_rule"], 120),
+                               thickness=1, rounding=3, parent=dl)
+            _txt(dl, sub_x + sub_sz // 2 - 3, sub_y + 4, "?",
+                 (*lol_theme.LOL["txt_dim"][:3], 130), 12, "raj_sb_12")
+
+    # Spike / win-condition tagline at the bottom
+    spike = str(card_data.get("spike", "")).strip()
+    wc = str(card_data.get("win_condition", "")).strip()
+    tag = spike or wc
+    if tag:
+        tag_y = y2 - 24
+        _txt(dl, x1 + 12, tag_y, ("→ " + tag)[:34],
+             (*lol_theme.LOL["txt_dim"][:3], 215), 11, "raj_sb_11")
+
+
+def _draw_archetype(dl, vw, vh):
+    """v3.0.5: 7-archetype hidden picker — circular formation around an
+    animated rune wheel center. Each card shows 5 primary champion icons
+    + 1 sub icon per role. Click a card → pending selection; CONFIRM
+    locks via set_archetype()."""
     side = _sync_ui.my_side() or "BLUE"
     accent_key = "blue_side" if side == "BLUE" else "red_side"
 
-    # Header
-    _txt(dl, vw // 2 - 220, 40, "PICK YOUR ARCHETYPE",
+    # ── Backdrop: solid navy + subtle vignette (LoL-client feel) ─────
+    dpg.draw_rectangle((0, 0), (vw, vh),
+                       fill=lol_theme.LOL["navy_deep"],
+                       color=(0, 0, 0, 0), parent=dl)
+    # Splash of a featured champion behind the center, dimmed heavily.
+    # The current draft's TOP CALL champion (if any) is a good thematic anchor;
+    # otherwise we just skip the splash and leave navy.
+    feature_champ = None
+    try:
+        rec = draft.board_rec or {}
+        sg = (rec.get("suggestions") or [{}])[0] or {}
+        feature_champ = sg.get("champion") or None
+    except Exception:
+        feature_champ = None
+    if feature_champ:
+        try:
+            sp_tex = splash_art.get_texture(feature_champ)
+            if sp_tex:
+                # Center the splash, scale to cover, then black-out heavily.
+                dpg.draw_image(sp_tex, (0, 60), (vw, vh - 60),
+                               uv_min=(0.10, 0.18), uv_max=(0.90, 0.78),
+                               parent=dl)
+                dpg.draw_rectangle((0, 0), (vw, vh),
+                                   fill=lol_theme._alpha(
+                                       lol_theme.LOL["navy_deep"], 215),
+                                   color=(0, 0, 0, 0), parent=dl)
+        except Exception:
+            pass
+    # Vignette — radial-ish darken at the corners
+    vig_layers = 6
+    for vi in range(vig_layers):
+        va = int(50 * (1 - vi / vig_layers))
+        if va <= 0:
+            continue
+        inset = vi * 14
+        dpg.draw_rectangle((inset, inset), (vw - inset, vh - inset),
+                           fill=(0, 0, 0, 0),
+                           color=(0, 0, 0, va),
+                           thickness=2, parent=dl)
+
+    # ── Header ──────────────────────────────────────────────────────
+    _txt(dl, vw // 2 - 220, 32, "PICK YOUR ARCHETYPE",
          (*lol_theme.LOL["gold_lt"][:3], 245), 36, "cinzel_36")
     sub = "hidden from your opponent · CONFIRM to lock"
-    _txt(dl, vw // 2 - len(sub) * 4, 90, sub,
+    _txt(dl, vw // 2 - len(sub) * 4, 78, sub,
          (*lol_theme.LOL["txt_dim"][:3], 220), 16, "raj_sb_16")
 
-    # Compute viability-sorted cards for OUR roster.
+    # ── Compute viability-sorted cards for OUR roster ───────────────
+    cards = []
+    sub_picks_per_card = []
     try:
         if draft.board is not None:
             inhouse = getattr(live, "inhouse_champs", {}) or {}
             primary = getattr(live, "primary_roles", {}) or {}
-            scout = _scout_champs_for_players(
-                list(draft.board.players.get(side, [])))
+            players = list(draft.board.players.get(side, []))
+            scout = _scout_champs_for_players(players)
             cards = _eng.recommend_comps(
                 draft.board.players[side], inhouse, primary,
                 enemy_picks=[], n_results=7, scout_champs=scout) or []
-        else:
-            cards = []
+            for c in cards:
+                sub_picks_per_card.append(
+                    _archetype_subs(c, players, inhouse, primary, scout))
     except Exception:
         cards = []
+        sub_picks_per_card = []
 
-    # Grid: 4 columns × 2 rows (7th card sits alone in bottom-left).
-    cols = 4
-    rows = (len(cards) + cols - 1) // cols if cards else 0
-    grid_top = 130
-    grid_bottom = vh - 130
-    avail_h = grid_bottom - grid_top
-    avail_w = vw - 80
-    card_w = max(220, (avail_w - (cols + 1) * 14) // cols)
-    card_h = max(180, (avail_h - (max(rows, 1) + 1) * 14) // max(rows, 1))
-    base_x = (vw - (cols * card_w + (cols - 1) * 14)) // 2
+    # ── Circular layout geometry ────────────────────────────────────
+    # Center the ring vertically below the header, leaving room for the
+    # CONFIRM button at the bottom.
+    ring_cx = vw // 2
+    ring_cy = (130 + (vh - 110)) // 2
+    # Card size scales modestly with viewport for readability.
+    card_w = 260 if vw >= 1500 else 240
+    card_h = 200 if vw >= 1500 else 190
+    # Ring radius — pick so cards don't overlap horizontally at the closest
+    # angular separation (top + adjacents). With 7 cards, min separation is
+    # 2π/7 ≈ 51.4°; clamp to viewport.
+    n_cards = max(1, len(cards[:7]))
+    angular_step = 2 * math.pi / max(n_cards, 1)
+    min_sep_w = card_w + 28
+    # Distance between two card-centers at adjacent angles = 2 R sin(step/2)
+    # Solve for R: R = sep / (2 sin(step/2))
+    sep_factor = 2.0 * math.sin(angular_step / 2.0)
+    needed_r = min_sep_w / sep_factor if sep_factor > 0.05 else 320.0
+    # Bound by viewport — the card extents at angle 0 (right) would push
+    # past the right edge if needed_r + card_w/2 > vw/2 - 32.
+    max_r_w = (vw // 2) - card_w // 2 - 32
+    max_r_h = (ring_cy - 120) - card_h // 2 - 8
+    max_r = min(max_r_w, max_r_h + (card_h // 4))
+    ring_r = max(180.0, min(needed_r, max_r))
+
+    # ── Hover detection BEFORE drawing so card lift / center pulse sync ─
+    # (we compute hover for the input handler; the click pick lives there)
+    draft.archetype_hover = None
+    mx, my = _content_mouse()
+    for i, card_data in enumerate(cards[:7]):
+        ang = -math.pi / 2 + i * angular_step
+        cx_i = ring_cx + ring_r * math.cos(ang)
+        cy_i = ring_cy + ring_r * math.sin(ang)
+        hx = cx_i - card_w / 2
+        hy = cy_i - card_h / 2
+        if hx <= mx <= hx + card_w and hy <= my <= hy + card_h:
+            draft.archetype_hover = card_data.get("archetype", "")
+            break
+
+    # ── Connector lines between center and each card ────────────────
+    for i, card_data in enumerate(cards[:7]):
+        arch_key = card_data.get("archetype", "")
+        ang = -math.pi / 2 + i * angular_step
+        cx_i = ring_cx + ring_r * math.cos(ang)
+        cy_i = ring_cy + ring_r * math.sin(ang)
+        # Pulse the line for the hovered card.
+        is_hover = (draft.archetype_hover == arch_key)
+        pulse = (math.sin(time.monotonic() * 2.0 * 2 * math.pi) + 1) / 2 if is_hover else 0.0
+        line_a = int(60 + 140 * pulse) if is_hover else 50
+        # Don't draw the line all the way into the card — stop short.
+        # Compute the unit vector from center→card.
+        dx = cx_i - ring_cx
+        dy = cy_i - ring_cy
+        d = math.hypot(dx, dy) or 1.0
+        ux, uy = dx / d, dy / d
+        l_start = (ring_cx + ux * 80, ring_cy + uy * 80)
+        l_end = (cx_i - ux * (card_h / 2 - 4),
+                 cy_i - uy * (card_h / 2 - 4))
+        dpg.draw_line(l_start, l_end,
+                      color=(*lol_theme.LOL["gold_rule"][:3], line_a),
+                      thickness=1 + (1 if is_hover else 0),
+                      parent=dl)
+
+    # ── Center rune wheel ───────────────────────────────────────────
+    _draw_archetype_center_wheel(dl, ring_cx, ring_cy,
+                                 cards, draft.archetype_hover or
+                                          draft.archetype_pending)
+
+    # ── Draw cards around the ring ──────────────────────────────────
     _archetype_hits = []
-    for idx, card_data in enumerate(cards[:8]):
-        row = idx // cols
-        col = idx % cols
-        cx = base_x + col * (card_w + 14)
-        cy = grid_top + row * (card_h + 14)
+    for i, card_data in enumerate(cards[:7]):
+        ang = -math.pi / 2 + i * angular_step
+        cx_i = int(ring_cx + ring_r * math.cos(ang))
+        cy_i = int(ring_cy + ring_r * math.sin(ang))
         arch_key = card_data.get("archetype", "")
         is_pending = (draft.archetype_pending == arch_key)
         is_hover = (draft.archetype_hover == arch_key)
-        lol_theme.draw_archetype_card(
-            dl, cx, cy, cx + card_w, cy + card_h, card_data,
+        subs = sub_picks_per_card[i] if i < len(sub_picks_per_card) else []
+        _draw_archetype_card_circular(
+            dl, cx_i, cy_i, card_data, subs,
+            card_w=card_w, card_h=card_h,
             hot=is_hover, selected=is_pending, accent_side=side)
-        _archetype_hits.append((cx, cy, card_w, card_h, arch_key))
+        _archetype_hits.append((cx_i - card_w // 2, cy_i - card_h // 2,
+                                card_w, card_h, arch_key))
 
     # Stash for input handler
     _board_hits.clear()
     for hx, hy, hw, hh, ak in _archetype_hits:
         _board_hits.append((hx, hy, hw, hh, "archetype_pick", ak))
 
-    # CONFIRM button (only when something is selected)
+    # ── CONFIRM button (only when something is selected) ────────────
     btn_w, btn_h = 240, 50
     btn_x = vw // 2 - btn_w // 2
-    btn_y = vh - 78
+    btn_y = vh - 72
     can_confirm = bool(draft.archetype_pending)
     btn_fill = (lol_theme.LOL["gold_dk"] if can_confirm
                 else lol_theme._alpha(lol_theme.LOL["navy_panel"], 120))
@@ -2379,6 +2669,110 @@ def _draw_archetype(dl, vw, vh):
     if can_confirm:
         _board_hits.append((btn_x, btn_y, btn_w, btn_h,
                              "archetype_confirm", draft.archetype_pending))
+
+
+def _draw_archetype_center_wheel(dl, cx, cy, cards, focused_arch):
+    """v3.0.5: rotating gold rune ring at the center of the circular archetype
+    picker, plus a focal readout of the hovered/pending archetype in the
+    middle (label + viability + spike). Focal-motion only (rune rotates,
+    inner text pulses gently)."""
+    # Rotating rune dashes
+    t = time.monotonic()
+    n_dashes = 24
+    inner_r = 56
+    outer_r = 72
+    base_angle = (t / 8.0) * 2 * math.pi    # slow rotation, ~8s/rev
+    for i in range(n_dashes):
+        a = base_angle + (2 * math.pi * i / n_dashes)
+        cosA, sinA = math.cos(a), math.sin(a)
+        x1 = cx + inner_r * cosA
+        y1 = cy + inner_r * sinA
+        x2 = cx + outer_r * cosA
+        y2 = cy + outer_r * sinA
+        fade = i / max(n_dashes - 1, 1)
+        alpha = int(70 + 170 * (1.0 - fade))
+        gold = lol_theme.LOL["gold"]
+        col = (gold[0], gold[1], gold[2], alpha)
+        dpg.draw_line((x1, y1), (x2, y2),
+                      color=col, thickness=2, parent=dl)
+    # Inner ring (counter-rotating dim arc)
+    base_angle2 = -(t / 12.0) * 2 * math.pi
+    inner2_r = 44
+    outer2_r = 50
+    for i in range(36):
+        a = base_angle2 + (2 * math.pi * i / 36)
+        cosA, sinA = math.cos(a), math.sin(a)
+        x1 = cx + inner2_r * cosA
+        y1 = cy + inner2_r * sinA
+        x2 = cx + outer2_r * cosA
+        y2 = cy + outer2_r * sinA
+        dpg.draw_line((x1, y1), (x2, y2),
+                      color=(*lol_theme.LOL["gold_dk"][:3], 160),
+                      thickness=1, parent=dl)
+    # Outer ring
+    ring_pts = []
+    n_ring = 64
+    for i in range(n_ring):
+        a = 2 * math.pi * i / n_ring
+        ring_pts.append((cx + (outer_r + 6) * math.cos(a),
+                         cy + (outer_r + 6) * math.sin(a)))
+    for i in range(len(ring_pts)):
+        a, b = ring_pts[i], ring_pts[(i + 1) % len(ring_pts)]
+        dpg.draw_line(a, b, color=lol_theme._alpha(lol_theme.LOL["gold_rule"], 180),
+                      thickness=1, parent=dl)
+    # Inner ring
+    inner_ring_pts = []
+    for i in range(n_ring):
+        a = 2 * math.pi * i / n_ring
+        inner_ring_pts.append((cx + (inner_r - 4) * math.cos(a),
+                               cy + (inner_r - 4) * math.sin(a)))
+    for i in range(len(inner_ring_pts)):
+        a, b = inner_ring_pts[i], inner_ring_pts[(i + 1) % len(inner_ring_pts)]
+        dpg.draw_line(a, b, color=lol_theme._alpha(lol_theme.LOL["gold_rule"], 200),
+                      thickness=1, parent=dl)
+
+    # Find focused card data (by archetype key)
+    focused_data = None
+    if focused_arch:
+        for c in cards:
+            if c.get("archetype") == focused_arch:
+                focused_data = c
+                break
+
+    # Inner panel — text readout for the focused archetype.
+    pulse = (math.sin(time.monotonic() * 1.6 * 2 * math.pi) + 1) / 2
+    if focused_data:
+        label = str(focused_data.get("label", focused_data.get("archetype", "")))
+        viab = str(focused_data.get("viability", ""))
+        combined = focused_data.get("combined", 0)
+        spike = str(focused_data.get("spike", "") or
+                    focused_data.get("win_condition", ""))[:32]
+        # Title
+        title = label.split("(")[0].strip()  # drop the "(AoE + Engage)" suffix
+        title_w = len(title) * 7
+        _txt(dl, cx - title_w // 2, cy - 18, title[:18],
+             (*lol_theme.LOL["gold_lt"][:3], int(220 + pulse * 35)),
+             16, "raj_sb_16")
+        # Viability + score, second line
+        line2 = f"{viab}  {combined}"
+        l2_w = len(line2) * 5
+        viab_color_key = lol_theme._VIABILITY_COLORS.get(viab, "gold")
+        viab_col = lol_theme.LOL.get(viab_color_key, lol_theme.LOL["gold"])
+        _txt(dl, cx - l2_w // 2, cy + 4, line2,
+             (*viab_col[:3], 230), 12, "raj_sb_12")
+        # Spike, third line (dim)
+        if spike:
+            sp_w = len(spike) * 4
+            _txt(dl, cx - sp_w // 2, cy + 22, spike,
+                 (*lol_theme.LOL["txt_dim"][:3], 210),
+                 10, "raj_sb_11")
+    else:
+        # Idle state — generic hint, pulsing
+        msg = "HOVER A CARD"
+        mw = len(msg) * 7
+        _txt(dl, cx - mw // 2, cy - 8, msg,
+             (*lol_theme.LOL["gold_lt"][:3], int(150 + pulse * 100)),
+             14, "raj_sb_14")
 
 
 def _draw_enemy_ghost_chip(dl, b):
@@ -2719,7 +3113,34 @@ def _draw_board(dl, vw, vh):
     # whenever a new revision lands so the suggestions follow remote actions.
     _prev_pointer = draft.board.pointer if draft.board is not None else -1
     _sync_ui.sync_tick(draft)
-    if draft.board is not None and draft.board.pointer != _prev_pointer:
+    needs_recompute = (draft.board is not None
+                       and draft.board.pointer != _prev_pointer)
+
+    # v3.0.5: also recompute when async scout / inhouse data lands. Without
+    # this, _board_recompute() fired only at board-entry — before
+    # prefetch_scout_sheets() had a chance to populate live.scout_sheets —
+    # so the very first ban's TOP CALL panel rendered empty (no suggestions)
+    # until the user manually advanced. We snapshot a coarse data signature
+    # (#scout sheets, #inhouse-champ entries, live.loaded flag) per frame
+    # and retrigger when it grows. Cheap: just length lookups, no copying.
+    if draft.board is not None:
+        try:
+            data_sig = (len(getattr(live, "scout_sheets", {}) or {}),
+                        len(getattr(live, "inhouse_champs", {}) or {}),
+                        bool(getattr(live, "loaded", False)))
+        except Exception:
+            data_sig = None
+        if data_sig != draft._board_data_sig:
+            draft._board_data_sig = data_sig
+            # Only retrigger when we have an empty/missing suggestion list —
+            # don't trample the engine result with a re-run after the user
+            # has already seen a useful recommendation (cheap optimisation).
+            cur_rec = draft.board_rec or {}
+            cur_sug = cur_rec.get("suggestions") or []
+            if not cur_sug:
+                needs_recompute = True
+
+    if needs_recompute:
         _board_recompute()
 
     # If we're in a synced session whose host hasn't pressed START yet,
@@ -2741,12 +3162,7 @@ def _draw_board(dl, vw, vh):
     if dpg.does_item_exist("content_win"):
         dpg.set_y_scroll("content_win", 0)
     global _mouse_xy
-    try:
-        mp = dpg.get_mouse_pos(local=False)
-        vp = dpg.get_viewport_pos()
-        _mouse_xy = (mp[0] - vp[0] - 68, mp[1] - vp[1] - 52)
-    except Exception:
-        _mouse_xy = (0, 0)
+    _mouse_xy = _content_mouse()
     b = draft.board
     if b is None:
         draft.phase = DraftPhase.IDLE
@@ -3359,6 +3775,41 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
     # ── PRIMARY CALL — the #1 recommendation, emphasised ─────────────
     sug = rec.get("suggestions") or []
     pool_region_h = 220
+    if not sug and act:
+        # v3.0.5: graceful fallback so the very first ban (or any state
+        # where the engine produces nothing) doesn't render an empty hero
+        # area. _draw_board's data-signature retry re-runs once scout data
+        # lands; while we wait, we show a placeholder card that tells the
+        # user what to do and keeps the manual pool grid below interactive.
+        pc_h = 96
+        ny += 8
+        card_y = ny
+        placeholder_col = lol_theme.LOL["gold"][:3]
+        dpg.draw_rectangle((x + 14, card_y), (x + w - 14, card_y + pc_h),
+                           fill=lol_theme._alpha(lol_theme.LOL["navy_panel"], 200),
+                           color=(*placeholder_col, 200),
+                           thickness=2, rounding=8, parent=dl)
+        # Caption + body
+        head = ("WARMING UP" if (not getattr(live, "loaded", False)
+                                  or not getattr(live, "scout_sheets", None))
+                else "NO STRONG CALL")
+        _txt(dl, x + 24, card_y + 16, head,
+             (*placeholder_col, 240), 14, "raj_sb_14")
+        body = ("loading scouting data — pick from the pool below"
+                if head == "WARMING UP" else
+                "engine has no high-confidence pick — choose from the manual pool")
+        _txt(dl, x + 24, card_y + 42, body[:64],
+             (*lol_theme.LOL["txt_dim"][:3], 230), 13, "raj_sb_12")
+        if act.kind == "ban":
+            _txt(dl, x + 24, card_y + 64,
+                 "tip: strip the enemy's deepest comfort pick",
+                 (*lol_theme.LOL["gold_lt"][:3], 200), 12, "raj_sb_12")
+        else:
+            _txt(dl, x + 24, card_y + 64,
+                 "tip: prioritise comfort picks before lane is revealed",
+                 (*lol_theme.LOL["gold_lt"][:3], 200), 12, "raj_sb_12")
+        ny += pc_h + 14
+        sug = []  # ensure the rest of the block stays no-op
     if sug:
         s0 = sug[0]
         tag = s0.get("tag", "")
@@ -3977,10 +4428,7 @@ def _briefing_handle_input(vw, vh):
     CONTINUE button which short-circuits the 5s auto-advance."""
     if not dpg.is_mouse_button_clicked(0):
         return
-    mouse = dpg.get_mouse_pos(local=False)
-    vp = dpg.get_viewport_pos()
-    mx = mouse[0] - vp[0] - 68
-    my = mouse[1] - vp[1] - 52
+    mx, my = _content_mouse()
     for (hx, hy, hw, hh, kind, payload) in list(_board_hits):
         if not (hx <= mx <= hx + hw and hy <= my <= hy + hh):
             continue
@@ -4001,10 +4449,7 @@ def _archetype_handle_input(vw, vh):
     """Mouse input for the ARCHETYPE screen. Two click types:
        - archetype_pick: stage a pending selection (highlights the card)
        - archetype_confirm: send set_archetype to the server (locks it)"""
-    mouse = dpg.get_mouse_pos(local=False)
-    vp = dpg.get_viewport_pos()
-    mx = mouse[0] - vp[0] - 68
-    my = mouse[1] - vp[1] - 52
+    mx, my = _content_mouse()
     # Hover update (visual lift) every frame
     draft.archetype_hover = None
     for (hx, hy, hw, hh, kind, payload) in list(_board_hits):
@@ -4036,10 +4481,7 @@ def _lobby_handle_input(vw, vh):
        - click on START DRAFT / EXIT (registered in _board_hits)
        - host-only drag-and-drop from pool to slot
        - host-only drag-out of slot to clear it"""
-    mouse = dpg.get_mouse_pos(local=False)
-    vp = dpg.get_viewport_pos()
-    mx = mouse[0] - vp[0] - 68
-    my = mouse[1] - vp[1] - 52
+    mx, my = _content_mouse()
     _tb.drag_pos = (mx, my)
 
     client = None
@@ -4178,10 +4620,7 @@ def _board_handle_input(vw, vh):
         kw[key] = d
 
     # ── Mouse clicks against registered hit rects ────────────────────
-    mouse = dpg.get_mouse_pos(local=False)
-    vp = dpg.get_viewport_pos()
-    mx = mouse[0] - vp[0] - 68
-    my = mouse[1] - vp[1] - 52
+    mx, my = _content_mouse()
 
     # ── Pick-drag: move a locked champion between role slots ─────────
     # Synced sessions: only the host may reassign (server enforces this);
@@ -4477,10 +4916,7 @@ def _draw_idle(dl, vw, vh):
          "Connect, build teams, draft together.",
          (*lol_theme.LOL["txt_dim"][:3], 200), 21, "raj_20")
 
-    mp = dpg.get_mouse_pos(local=False)
-    vp = dpg.get_viewport_pos()
-    rx = mp[0] - vp[0] - 68
-    ry = mp[1] - vp[1] - 52
+    rx, ry = _content_mouse()
 
     # --- BEGIN DRAFT — single large primary button ---
     bw, bh = 380, 84
@@ -4570,10 +5006,7 @@ def _draw_connecting(dl, vw, vh):
     cw, ch = 140, 32
     cxx = cx - cw // 2
     cyy = vh - 60
-    mp = dpg.get_mouse_pos(local=False)
-    vp = dpg.get_viewport_pos()
-    rx = mp[0] - vp[0] - 68
-    ry = mp[1] - vp[1] - 52
+    rx, ry = _content_mouse()
     hot = cxx <= rx <= cxx + cw and cyy <= ry <= cyy + ch
     dpg.draw_rectangle((cxx, cyy), (cxx + cw, cyy + ch),
                        fill=(0, 0, 0, 0),

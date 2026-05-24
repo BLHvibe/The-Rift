@@ -23,6 +23,14 @@ _DEFAULTS = {
     # Draft Tool Rewrite (Phase 5) — when False, mutes pygame.mixer cues
     # (pick lock, ban, your-turn, archetype stinger, pivot alert, draft end).
     "audio_enabled": True,
+    # Upgrade initiative (Phase 0a) — global animation-intensity multiplier.
+    # 0.0 = no ambient/persistent motion (calm, snappy); 1.0 = full. The
+    # motion/effects layer reads this so each user can dial the app's feel.
+    "anim_intensity": 1.0,
+    # Phase 0d — optional bearer token for the REST data API (server/api.py).
+    # Blank = open deployment; set it to match the server's RIFT_API_TOKEN
+    # env var to require auth on writes.
+    "api_token": "",
     # Display name shown on the synced draft lobby & in chat. Auto-populated
     # from the player's first connect; user-editable in Settings.
     "display_name": "",

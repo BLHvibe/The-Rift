@@ -36,13 +36,23 @@ class AppState:
         self.tierlist_state  = {}
 
         # UI navigation
-        self.active_tab      = "rankings"   # "rankings"|"draft"|"scout"|"inhouse"|"tierlist"|"settings"|"commands"
+        self.active_tab      = "home"       # "home"|"rankings"|"draft"|"scout"|"inhouse"|"tierlist"|"settings"|"commands"|"feed"
         self.prev_tab        = None
         self.nav_to_scout    = None         # set to a player name to navigate → scout tab
+        self.nav_to_profile  = None         # set to a player name to open the Player Profile panel
 
         # Splash
         self.splash_done     = False
         self.fun_fact        = ""
+
+        # Per-frame input gates (Phase 6). main.py resets these every frame
+        # before draw, and overlay code sets click_consumed / esc_consumed
+        # when it handles those inputs. Tabs underneath check these gates so
+        # a single click doesn't trigger both an overlay action AND a tab
+        # action, and Esc only closes the topmost overlay.
+        self.click_consumed  = False
+        self.esc_pressed     = False   # edge-detected, single-frame True
+        self.esc_consumed    = False
 
     def update(self, **kwargs):
         with self._lock:

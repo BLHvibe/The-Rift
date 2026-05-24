@@ -23,14 +23,17 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
 
-# --- Engine import (match the convention used across the codebase) ----------
+# --- Engine import (server-side flat layout) --------------------------------
 try:
-    from data import draft_engine as _eng  # type: ignore
-except Exception:  # pragma: no cover - frozen-exe / direct-run fallback
+    import engine_core as _eng  # type: ignore
+except Exception:  # pragma: no cover - dev/test fallback to the in-tree client copy
     try:
-        import draft_engine as _eng  # type: ignore
+        from data import draft_engine as _eng  # type: ignore
     except Exception:
-        _eng = None  # type: ignore
+        try:
+            import draft_engine as _eng  # type: ignore
+        except Exception:
+            _eng = None  # type: ignore
 
 
 # ============================================================================
@@ -367,9 +370,10 @@ class DraftBoardState:
         self.pointer = h.action_idx
         return True
 
-    # --- serialization (Phase 2 cutover — mirrors server's DraftBoardState) -
+    # --- serialization (Phase 2 cutover) -----------------------------------
 
     def to_dict(self) -> Dict[str, Any]:
+        """JSON-safe snapshot of the entire state, for ferrying across the API."""
         return {
             "our_side": self.our_side,
             "pointer":  self.pointer,
@@ -735,15 +739,76 @@ def target_archetype(
     forced_arch: Optional[str] = None,
     scout_champs: Optional[Dict[str, List[Dict]]] = None,
 ) -> Dict[str, Any]:
-    """Proxy → /api/engine/target_archetype. See server/engine_board.py."""
-    from data import engine_api
-    return engine_api.target_archetype(
-        state.to_dict(), side,
-        inhouse_champs=inhouse_champs,
-        primary_roles=primary_roles,
-        forced_arch=forced_arch,
-        scout_champs=scout_champs,
-    ) or {}
+    """Best archetype this side's *players* support (via recommend_comps),
+    plus the per-axis deficit vs locked picks so picks can be steered toward a
+    coherent win condition. If `forced_arch` is given, that archetype is used
+    directly (the user's draft-board pick), skipping the auto-detection — the
+    deficit is still computed against locked picks so steering adapts as the
+    draft progresses (incl. across bans which reduce the candidate pool used
+    downstream)."""
+    if _eng is None:
+        return {}
+    arches = getattr(_eng, "ARCHETYPES", {}) or {}
+
+    # User-forced archetype: skip recommend_comps, build the deficit directly.
+    if forced_arch and forced_arch in arches:
+        arch_data = arches[forced_arch] or {}
+        target = arch_data.get("target", {}) or {}
+        cur = _eng._team_vector(state.locked_picks(side)) \
+            if hasattr(_eng, "_team_vector") else {}
+        deficit = {ax: max(0.0, target.get(ax, 0.0) - cur.get(ax, 0.0))
+                   for ax in target}
+        return {
+            "archetype":     forced_arch,
+            "label":         arch_data.get("label", forced_arch),
+            "win_condition": arch_data.get("win_condition", ""),
+            "spike":         arch_data.get("spike", ""),
+            "viability":     "USER PICK",
+            "deficit":       deficit,
+            "forced":        True,
+        }
+
+    # Auto: engine picks the best archetype for these players.
+    if not hasattr(_eng, "recommend_comps"):
+        return {}
+    try:
+        try:
+            comps = _eng.recommend_comps(
+                state.engine_players(side),
+                inhouse_champs=inhouse_champs,
+                primary_roles=primary_roles,
+                enemy_picks=state.locked_picks(_other(side)),
+                n_results=1,
+                scout_champs=scout_champs or {},
+            )
+        except TypeError:
+            comps = _eng.recommend_comps(
+                state.engine_players(side),
+                inhouse_champs=inhouse_champs,
+                primary_roles=primary_roles,
+                enemy_picks=state.locked_picks(_other(side)),
+                n_results=1,
+            )
+    except Exception:
+        return {}
+    if not comps:
+        return {}
+    top = comps[0]
+    arch = top.get("archetype", "")
+    target = (arches.get(arch, {}) or {}).get("target", {}) or {}
+    cur = _eng._team_vector(state.locked_picks(side)) \
+        if hasattr(_eng, "_team_vector") else {}
+    deficit = {ax: max(0.0, target.get(ax, 0.0) - cur.get(ax, 0.0))
+               for ax in target}
+    return {
+        "archetype":     arch,
+        "label":         top.get("label", arch),
+        "win_condition": top.get("win_condition", ""),
+        "spike":         top.get("spike", ""),
+        "viability":     top.get("viability", ""),
+        "deficit":       deficit,
+        "forced":        False,
+    }
 
 
 def archetype_pivot_check(
@@ -754,14 +819,109 @@ def archetype_pivot_check(
     primary_roles: Dict[str, str],
     scout_champs: Optional[Dict[str, List[Dict]]] = None,
 ) -> Dict[str, Any]:
-    """Proxy → /api/engine/archetype_pivot_check."""
-    from data import engine_api
-    return engine_api.archetype_pivot_check(
-        state.to_dict(), side, current_arch or "",
-        inhouse_champs=inhouse_champs,
-        primary_roles=primary_roles,
-        scout_champs=scout_champs,
-    ) or {}
+    """
+    Phase 2 helper. After each enemy ban, the UI calls this for the player's
+    side to determine whether the chosen archetype has been wrecked and (if
+    so) which pivot alternatives are still strong.
+
+    Returns:
+      {
+        "wrecked":         bool,
+        "reason":          str,       # plain-English summary for the banner
+        "severity":        float,     # 0..1 — higher = more urgent
+        "pivot_options":   [str, ...] # ordered top-2 viable replacements
+        "viability_now":   str,       # current archetype's current band
+      }
+
+    Phase-1 sensitivity: during the first six enemy bans (action indexes
+    0-5), a single-band drop (STRONG→VIABLE) is enough to fire the alert.
+    Later in the draft we wait for a sharper drop (≥ WEAK) since the comp
+    is more committed and pivoting carries higher cost.
+    """
+    if _eng is None or not current_arch:
+        return {"wrecked": False, "reason": "",
+                "severity": 0.0, "pivot_options": [],
+                "viability_now": ""}
+
+    arches = getattr(_eng, "ARCHETYPES", {})
+    if current_arch not in arches:
+        return {"wrecked": False, "reason": "",
+                "severity": 0.0, "pivot_options": [],
+                "viability_now": ""}
+
+    if not hasattr(_eng, "recommend_comps"):
+        return {"wrecked": False, "reason": "",
+                "severity": 0.0, "pivot_options": [],
+                "viability_now": ""}
+
+    try:
+        try:
+            comps = _eng.recommend_comps(
+                state.engine_players(side),
+                inhouse_champs=inhouse_champs,
+                primary_roles=primary_roles,
+                enemy_picks=state.locked_picks(_other(side)),
+                n_results=len(arches),
+                scout_champs=scout_champs or {},
+            )
+        except TypeError:
+            comps = _eng.recommend_comps(
+                state.engine_players(side),
+                inhouse_champs=inhouse_champs,
+                primary_roles=primary_roles,
+                enemy_picks=state.locked_picks(_other(side)),
+                n_results=len(arches),
+            )
+    except Exception:
+        return {"wrecked": False, "reason": "",
+                "severity": 0.0, "pivot_options": [],
+                "viability_now": ""}
+
+    # Top-2 viable alternatives (excluding current arch). Keep order from
+    # recommend_comps (already sorted by combined score).
+    alternatives = [c.get("archetype") for c in comps
+                    if c.get("archetype") != current_arch
+                    and c.get("viability") in ("STRONG", "VIABLE")][:2]
+
+    current_entry = next(
+        (c for c in comps if c.get("archetype") == current_arch), None)
+
+    if current_entry is None:
+        return {"wrecked": True,
+                "reason": f"{current_arch} is no longer buildable — bans removed your key picks",
+                "severity": 1.0,
+                "pivot_options": alternatives,
+                "viability_now": "NOT RECOMMENDED"}
+
+    current_viab = str(current_entry.get("viability", ""))
+
+    if current_viab == "NOT RECOMMENDED":
+        return {"wrecked": True,
+                "reason": f"{current_arch} is unworkable — your pool can't support its win condition",
+                "severity": 1.0,
+                "pivot_options": alternatives,
+                "viability_now": current_viab}
+    if current_viab == "WEAK":
+        return {"wrecked": True,
+                "reason": f"{current_arch} dropped to WEAK — bans hurt your win condition",
+                "severity": 0.85,
+                "pivot_options": alternatives,
+                "viability_now": current_viab}
+
+    # Phase-1 sensitivity: during bans 0-5, even a single step from STRONG
+    # to VIABLE deserves a heads-up (you can still pivot cheaply, picks
+    # haven't locked in your direction yet).
+    phase_1_active = state.pointer <= 5
+    if phase_1_active and current_viab == "VIABLE":
+        return {"wrecked": True,
+                "reason": f"{current_arch} slipped to VIABLE during early bans — pivot is cheap right now",
+                "severity": 0.55,
+                "pivot_options": alternatives,
+                "viability_now": current_viab}
+
+    return {"wrecked": False, "reason": "",
+            "severity": 0.0, "pivot_options": [],
+            "viability_now": current_viab}
 
 
 def predict_enemy_next_pick(
@@ -770,14 +930,69 @@ def predict_enemy_next_pick(
     primary_roles: Dict[str, str],
     scout_champs: Optional[Dict[str, List[Dict]]] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Proxy → /api/engine/predict_enemy_next."""
-    from data import engine_api
-    return engine_api.predict_enemy_next(
-        state.to_dict(), state.our_side,
-        inhouse_champs=inhouse_champs,
-        primary_roles=primary_roles,
-        scout_champs=scout_champs,
-    )
+    """
+    Phase 2 helper for the "enemy probable next pick" ghost-suggestion chip.
+
+    Walks forward in DRAFT_SEQUENCE from `state.pointer` to find the next
+    PICK action by the OTHER side (relative to state.our_side), then runs
+    the engine's candidate generator over the enemy's still-open roles and
+    returns the highest-scored prediction.
+
+    Returns {champion, role, player, confidence, action_idx} or None if the
+    enemy has no remaining picks (draft over / all enemy roles filled).
+
+    Confidence is the top candidate's score share among the top 3 — a
+    peaked distribution (one obvious pick) reads ≈0.6+, a flat distribution
+    (genuine guess) reads ≈0.33.
+    """
+    enemy_side = _other(state.our_side)
+
+    target_idx: Optional[int] = None
+    for i in range(state.pointer, len(DRAFT_SEQUENCE)):
+        if (DRAFT_SEQUENCE[i].kind == "pick"
+                and DRAFT_SEQUENCE[i].side == enemy_side):
+            target_idx = i
+            break
+    if target_idx is None:
+        return None
+
+    used = state.used_champs()
+    open_enemy_roles = state.open_roles(enemy_side)
+    if not open_enemy_roles:
+        return None
+
+    all_candidates: List[Dict[str, Any]] = []
+    for role in open_enemy_roles:
+        player = state.player_for_role(enemy_side, role)
+        if not player:
+            continue
+        cands = _candidates_for_player(
+            player, role, inhouse_champs, primary_roles, used, k=5,
+            scout_champs=scout_champs)
+        for ch, sc in cands:
+            all_candidates.append({
+                "champion": ch,
+                "role": role,
+                "player": player.get("name", ""),
+                "score": float(sc),
+            })
+
+    if not all_candidates:
+        return None
+
+    all_candidates.sort(key=lambda c: -c["score"])
+    top = all_candidates[0]
+    top_3_total = sum(c["score"] for c in all_candidates[:3])
+    confidence = top["score"] / top_3_total if top_3_total > 0 else 0.0
+    confidence = max(0.0, min(1.0, confidence))
+
+    return {
+        "champion":   top["champion"],
+        "role":       top["role"],
+        "player":     top["player"],
+        "confidence": round(confidence, 3),
+        "action_idx": target_idx,
+    }
 
 
 def pick_impact_delta(
@@ -788,19 +1003,44 @@ def pick_impact_delta(
     primary_roles: Dict[str, str],
     scout_champs: Optional[Dict[str, List[Dict]]] = None,
 ) -> float:
-    """Proxy → /api/engine/pick_impact_delta. Returns 0.0 on failure."""
-    from data import engine_api
-    r = engine_api.pick_impact_delta(
-        state_before.to_dict(), state_after.to_dict(), side,
-        inhouse_champs=inhouse_champs,
-        primary_roles=primary_roles,
-        scout_champs=scout_champs,
-    )
-    if r is None:
+    """
+    Phase 2 helper for the "+X% your win" overlay shown after each lock.
+
+    Returns the change in `side`'s top-archetype `combined` percentage
+    between state_before and state_after. Positive = the action helped this
+    side; negative = the action hurt this side (e.g. a teammate locked a
+    suboptimal pick, or an enemy lock that countered our build).
+
+    The caller is responsible for shaping the two states (typically a snap-
+    shot from before the apply + the current state).
+    """
+    if _eng is None or not hasattr(_eng, "recommend_comps"):
         return 0.0
-    if isinstance(r, dict):
-        return float(r.get("delta") or 0.0)
-    return float(r or 0.0)
+
+    def _combined(st: "DraftBoardState") -> float:
+        try:
+            try:
+                comps = _eng.recommend_comps(
+                    st.engine_players(side),
+                    inhouse_champs=inhouse_champs,
+                    primary_roles=primary_roles,
+                    enemy_picks=st.locked_picks(_other(side)),
+                    n_results=1,
+                    scout_champs=scout_champs or {},
+                )
+            except TypeError:
+                comps = _eng.recommend_comps(
+                    st.engine_players(side),
+                    inhouse_champs=inhouse_champs,
+                    primary_roles=primary_roles,
+                    enemy_picks=st.locked_picks(_other(side)),
+                    n_results=1,
+                )
+            return float(comps[0]["combined"]) if comps else 0.0
+        except Exception:
+            return 0.0
+
+    return round(_combined(state_after) - _combined(state_before), 2)
 
 
 def _steer_bonus(champ: str, deficit: Dict[str, float]) -> float:
@@ -825,20 +1065,110 @@ def recommend_bans_split(
     n: int = 5,
     scout_champs: Optional[Dict[str, List[Dict]]] = None,
 ) -> List[Dict[str, Any]]:
-    """Proxy → /api/engine/recommend_bans_split. Server reads current action
-    from the state's pointer; `action` arg ignored on the wire."""
-    from data import engine_api
-    r = engine_api.recommend_bans_split(
-        state.to_dict(),
-        inhouse_champs=inhouse_champs,
-        primary_roles=primary_roles,
-        n=n, scout_champs=scout_champs,
-    )
-    if r is None:
-        return []
-    if isinstance(r, list):
-        return r
-    return r.get("bans") or r.get("names") or []
+    """
+    Phase-aware ban suggestions.
+
+    Phase 1 (no/early picks): strip the enemy's highest-value comfort picks,
+      weighted by role importance (Top>Mid>ADC>Sup>JGL) and a flex multiplier
+      (a champ the enemy can flex is worth more to remove).
+
+    Phase 2 (after pick phase 1): protect our *committed* comp — prioritise
+      champions that counter what we have already locked, blended with the
+      enemy's remaining comfort threat.
+    """
+    enemy_side = _other(action.side)
+    used = state.used_champs()
+
+    # Engine baseline: Bayesian-shrunk, role-filtered, coverage-discounted
+    # comfort threat for every champ on the enemy roster.
+    threat: Dict[str, Dict[str, Any]] = {}
+    if _eng is not None and hasattr(_eng, "recommend_bans"):
+        try:
+            try:
+                _, detail = _eng.recommend_bans(
+                    state.engine_players(enemy_side),
+                    inhouse_champs=inhouse_champs,
+                    own_picks=state.locked_picks(action.side),
+                    primary_roles=primary_roles,
+                    n_bans=40,
+                    scout_champs=scout_champs or {},
+                )
+            except TypeError:
+                _, detail = _eng.recommend_bans(
+                    state.engine_players(enemy_side),
+                    inhouse_champs=inhouse_champs,
+                    own_picks=state.locked_picks(action.side),
+                    primary_roles=primary_roles,
+                    n_bans=40,
+                )
+            for d in detail:
+                ch = d.get("champion")
+                if ch and ch not in used:
+                    threat[ch] = d
+        except Exception:
+            pass
+
+    out: List[Dict[str, Any]] = []
+
+    if action.phase == 1:
+        for ch, d in threat.items():
+            t = float(d.get("threat", 0.0) or 0.0)
+            pl = d.get("player", "")
+            role = _role_of_player(state, enemy_side, pl)
+            rw = ROLE_BAN_WEIGHT.get(role, 1.0)
+            flex = champ_role_count(ch) >= 2
+            score = t * rw * (1.15 if flex else 1.0)
+            why = d.get("phase_reason", "") or f"{pl or 'enemy'} comfort"
+            if flex:
+                why += " - flex"
+            out.append({"champion": ch, "score": round(score, 3),
+                        "tag": "BAN-P1", "why": why,
+                        "player": pl, "role": role})
+        out.sort(key=lambda s: -s["score"])
+        return out[:n]
+
+    # Phase 2 — protect our committed picks. Map each of our locked champs to
+    # the role (and thus role-importance) it occupies, so banning a counter to
+    # our Top is weighted above a counter to our Jungle.
+    side_picks = state.picks[action.side]              # {role: champ}
+    champ_role = {c: r for r, c in side_picks.items()}
+    counter_us: Dict[str, float] = {}
+    best_reason_strength: Dict[str, float] = {}
+    reason: Dict[str, str] = {}
+    role_w: Dict[str, float] = {}
+    rv = getattr(_eng, "ROLE_VALID", {}) if _eng else {}
+    for p in state.locked_picks(action.side):
+        prw = ROLE_BAN_WEIGHT.get(champ_role.get(p, ""), 1.0)
+        for atk, strg in _counters_of(p):
+            if atk in used:
+                continue
+            counter_us[atk] = counter_us.get(atk, 0.0) + strg
+            role_w[atk] = max(role_w.get(atk, 1.0), prw)
+            # Phase 2: COUNTERS rescaled to 0.30-0.90; "solid counter" tier
+            # starts at 0.45 (was 0.20 on the old scale).
+            if strg >= 0.45 and strg > best_reason_strength.get(atk, 0.0):
+                best_reason_strength[atk] = strg
+                reason[atk] = f"counters your {p}"
+
+    for ch in set(counter_us) | set(threat):
+        if ch in used:
+            continue
+        # Phase 2: counter_us sums rescaled COUNTERS (max 0.9 per pair) so a
+        # champion that hard-counters two of our locked picks easily exceeds
+        # 1.0 raw; divisor bumped to 1.4 so the normalised cu still spans 0..1.
+        cu = min(counter_us.get(ch, 0.0) / 1.4, 1.0)
+        th = min(float(threat.get(ch, {}).get("threat", 0.0) or 0.0), 1.0)
+        # Worth a ban only if it's a real pickable champ or it counters us.
+        if cu <= 0.0 and not any(ch in rv.get(r, ()) for r in ROLES):
+            continue
+        score = (0.62 * cu + 0.38 * th) * role_w.get(ch, 1.0)
+        why = (reason.get(ch)
+               or (threat.get(ch, {}) or {}).get("phase_reason", "")
+               or "enemy threat to your comp")
+        out.append({"champion": ch, "score": round(score, 3),
+                    "tag": "BAN-P2", "why": why})
+    out.sort(key=lambda s: -s["score"])
+    return out[:n]
 
 
 # ============================================================================
@@ -853,17 +1183,279 @@ def recommend_action(
     forced_arch: Optional[str] = None,
     scout_champs: Optional[Dict[str, List[Dict]]] = None,
 ) -> Dict[str, Any]:
-    """Proxy → /api/engine/recommend_action."""
-    from data import engine_api
-    return engine_api.recommend_action(
-        state.to_dict(),
-        inhouse_champs=inhouse_champs,
-        primary_roles=primary_roles,
-        n=n,
-        forced_arch=forced_arch,
-        scout_champs=scout_champs,
-    ) or {"done": state.is_complete(), "action": None, "our_turn": False,
-          "candidates": [], "notes": ["engine offline"]}
+    """
+    Recommend the current action.
+
+    Returns a dict the UI renders directly:
+      {
+        "done": bool,                       # draft complete
+        "action": DraftAction | None,
+        "our_turn": bool,
+        "kind": "ban" | "pick",
+        "suggestions": [
+            {"champion","score","tag","why",
+             "role"?,"player"?}             # role/player only for picks
+        ],
+        "enemy_weakness": {axis: 0..1},     # context, from engine
+        "notes": [str, ...],
+      }
+    """
+    inhouse_champs = inhouse_champs or {}
+    primary_roles = primary_roles or {}
+    scout_champs = scout_champs or {}
+
+    a = state.current_action()
+    if a is None:
+        return {"done": True, "action": None, "our_turn": False,
+                "kind": None, "suggestions": [], "enemy_weakness": {},
+                "notes": ["Draft complete."]}
+
+    used = state.used_champs()
+    notes: List[str] = []
+
+    # Enemy-weakness context: what the *opponent of the acting side* has
+    # revealed so far. (E4 will turn this into explicit ban/pick advice.)
+    enemy_side = _other(a.side)
+    enemy_locked = state.locked_picks(enemy_side)
+    enemy_weak: Dict[str, float] = {}
+    if _eng is not None and hasattr(_eng, "enemy_weakness_vector"):
+        try:
+            enemy_weak = _eng.enemy_weakness_vector(enemy_locked)
+        except Exception:
+            enemy_weak = {}
+
+    suggestions: List[Dict[str, Any]] = []
+    target_comp: Dict[str, Any] = {}
+    cohesion: List[str] = cohesion_text(state.locked_picks(state.our_side))
+
+    if a.kind == "ban":
+        try:
+            suggestions = recommend_bans_split(
+                state, a, inhouse_champs, primary_roles, n=n,
+                scout_champs=scout_champs)
+        except Exception as e:  # pragma: no cover
+            notes.append(f"ban engine fallback: {e}")
+            suggestions = []
+        if a.phase == 1:
+            notes.append("Ban phase 1 - strip enemy comfort / flex threats")
+        else:
+            notes.append("Ban phase 2 - deny counters to your locked comp")
+        if not suggestions:
+            notes.append("No ban data - engine unavailable / empty rosters.")
+
+    else:  # pick — E3: comfort + blind-safety + counter + flex + steering
+        open_r = state.open_roles(a.side)
+        tcomp = target_archetype(state, a.side, inhouse_champs, primary_roles,
+                                  forced_arch=forced_arch,
+                                  scout_champs=scout_champs)
+        deficit = tcomp.get("deficit", {}) if tcomp else {}
+        # Strict contested: a champ is only "contested" when a player on EACH
+        # side has actually played it in customs (≥3 games) — not ranked
+        # mastery or priors. min() of the two sides' real customs comfort.
+        def _cust_pool(side):
+            m: Dict[str, float] = {}
+            if _eng is None or not hasattr(_eng, "customs_champs"):
+                return m
+            for p in state.players.get(side, []):
+                for c, v in _eng.customs_champs(p, inhouse_champs).items():
+                    if v > m.get(c, 0.0):
+                        m[c] = v
+            return m
+        blue_cust = _cust_pool("BLUE")
+        red_cust = _cust_pool("RED")
+
+        def contested_strict(ch):
+            return round(min(blue_cust.get(ch, 0.0),
+                             red_cust.get(ch, 0.0)), 3)
+
+        lanes = getattr(_eng, "LANE_MATCHUPS", {}) if _eng else {}
+        enemy_by_role = state.picks[enemy_side]
+        enemy_info = len(enemy_locked)
+        late = a.idx in COUNTER_PICK_SLOTS         # R3 / B5 / R5
+        is_counter_pick_slot = a.idx in COUNTER_PICK_SLOTS
+        slot_bias = SLOT_ROLE_BIAS.get(a.idx, {})
+
+        # Phase 2: FLEX tightening. Flexing only conceals our draft when ≥2
+        # of our open roles haven't been matched against a locked enemy
+        # yet — if both enemy mid + top are already locked, "flex mid/top"
+        # is meaningless. `unmatched_open` is the set of our still-open roles
+        # without a same-lane enemy yet revealed.
+        unmatched_open = [r for r in open_r if r not in enemy_by_role]
+
+        pool: List[Dict[str, Any]] = []
+        for role in open_r:
+            player = state.player_for_role(a.side, role)
+            if not player:
+                continue
+            pname = player.get("name", "player")
+            opp_champ = enemy_by_role.get(role)   # same-lane enemy, if known
+            for ch, sc in _candidates_for_player(
+                player, role, inhouse_champs, primary_roles, used, k=n + 2,
+                scout_champs=scout_champs,
+            ):
+                bs = blind_safety(ch)
+                fr = flex_score(ch, open_r)
+                fr_unmatched = flex_score(ch, unmatched_open)
+                cv, cv_why = counter_value(ch, enemy_locked, opp_champ)
+                con = contested_strict(ch)
+                steer = _steer_bonus(ch, deficit)
+                cmf = float(sc)
+                # Direct same-lane matchup (±8 → -1..+1; >0 = we win lane).
+                lane_known = bool(opp_champ)
+                lane_n = 0.0
+                if lane_known:
+                    lr = lanes.get((ch, opp_champ), 0.0)
+                    lane_n = max(-1.0, min(1.0, lr / 8.0))
+
+                # --- context-aware tag ---
+                if lane_known:
+                    # Our lane opponent is locked → counter-pick this slot.
+                    # Never call a pick "blind-safe" when the lane is known.
+                    if cv >= 0.40 or lane_n >= 0.25:
+                        tag = "COUNTER"
+                        why = (cv_why or f"counters {opp_champ}").capitalize()
+                    elif lane_n <= -0.30:
+                        tag, why = "COMFORT", f"{pname}'s best into {opp_champ} (hard lane)"
+                    else:
+                        tag, why = "COMFORT", f"{pname} {role} vs {opp_champ}"
+                elif enemy_info == 0:
+                    if con >= 0.40:
+                        tag, why = "POWER", "Contested - both teams play it"
+                    elif bs >= 0.62:
+                        tag, why = "SAFE", f"Blind-safe - hard to counter ({int(bs*100)})"
+                    elif fr_unmatched >= 2:
+                        tag, why = "FLEX", f"Flex {fr_unmatched} roles - hides your draft"
+                    else:
+                        tag, why = "COMFORT", f"{pname} {role} comfort"
+                else:
+                    if cv >= 0.45:
+                        tag, why = "COUNTER", (cv_why or "counters their pick").capitalize()
+                    elif con >= 0.45:
+                        tag, why = "POWER", "Contested - lock before they grab it"
+                    # Phase 2: only flex when there are still ≥2 unmatched open
+                    # roles AND the slot isn't a canonical counter-pick slot.
+                    elif fr_unmatched >= 2 and not late:
+                        tag, why = "FLEX", (
+                            f"Flex {fr_unmatched} unmatched roles - hides your {role}")
+                    elif bs >= 0.60 and not late:
+                        tag, why = "SAFE", "Blind-safe - hard to counter"
+                    else:
+                        tag, why = "COMFORT", f"{pname} {role} comfort"
+
+                # --- ranking blend ---
+                # Phase 2: at canonical counter-pick slots (R3/B5/R5), when
+                # this is a HARD counter (cv ≥ 0.70), let the matchup dominate
+                # the score so a 1-vote-stronger counter beats a slightly more
+                # comfortable non-counter pick.
+                if (is_counter_pick_slot and lane_known
+                        and cv >= COUNTER_PICK_THRESHOLD):
+                    score = (0.65 * cv + 0.20 * cmf + 0.15 * max(0.0, lane_n))
+                    score -= 0.20 * max(0.0, -lane_n)
+                elif lane_known:
+                    # Counter-pick slot: comfort still matters but the matchup
+                    # dominates, and picking into a losing lane is punished.
+                    score = (0.34 * cmf + 0.40 * cv
+                             + 0.16 * max(0.0, lane_n) + 0.06 * steer
+                             + (0.04 if fr_unmatched >= 2 else 0.0))
+                    score -= 0.24 * max(0.0, -lane_n)
+                elif enemy_info == 0:
+                    # v3.0.5: bs weight reduced 0.22 → 0.14 (was over-represented
+                    # given blind_safety returns 0.5 default for off-table champs).
+                    # Shifted to comfort (0.50 → 0.55) and steer (0.08 → 0.11)
+                    # so the engine leans on real customs/scout data first.
+                    score = (0.55 * cmf + 0.14 * bs + 0.18 * con
+                             + 0.11 * steer + (0.04 if fr_unmatched >= 2 else 0.0))
+                else:
+                    score = (0.44 * cmf + 0.34 * cv + 0.10 * con
+                             + 0.06 * bs + 0.06 * steer
+                             + (0.03 if fr_unmatched >= 2 else 0.0))
+
+                # Phase 2: per-slot role bias matching pro-draft convention.
+                # B1 favors JGL/BOT, R5 favors TOP, etc. See SLOT_ROLE_BIAS.
+                role_bias = slot_bias.get(role, 1.0)
+                if role_bias != 1.0:
+                    score *= role_bias
+
+                # Phase 2: sample-size + off-role surfaced as factors so the
+                # UI can render the small confidence badge & off-role warning
+                # without re-deriving them.
+                if _eng is not None and hasattr(_eng, "sample_confidence"):
+                    # Use the player's customs-game count on this champ as
+                    # the sample-size source. Fall back to overall games when
+                    # the champ has no customs entry yet.
+                    ih = inhouse_champs.get(pname, []) or []
+                    ch_games = next(
+                        (float(c.get("games") or 0) for c in ih
+                         if c.get("champ") == ch), 0.0)
+                    if ch_games == 0.0:
+                        ch_games = float(player.get("games") or 0)
+                    confidence = _eng.sample_confidence(ch_games)
+                else:
+                    confidence = "ok"
+                if _eng is not None and hasattr(_eng, "off_role_severity"):
+                    sev = _eng.off_role_severity(
+                        player, role, inhouse_champs, primary_roles,
+                        scout_champs)
+                else:
+                    sev = 0.0
+
+                factors = {
+                    "comfort":    round(max(0.0, min(1.0, cmf)), 3),
+                    "counter":    round(cv, 3),
+                    "lane":       round((lane_n + 1.0) / 2.0, 3),
+                    "blind_safe": round(bs, 3),
+                    "flex":       round(min(1.0, fr / 3.0), 3),
+                    "flex_unmatched": round(min(1.0, fr_unmatched / 3.0), 3),
+                    "contested":  round(con, 3),
+                    "steer":      round(max(0.0, min(1.0, steer)), 3),
+                    "slot_bias":  round(role_bias, 3),
+                    "confidence": confidence,                 # "thin"/"ok"/"strong"
+                    "off_role":   round(sev, 3),
+                    "final":      round(max(0.0, min(1.0, score)), 3),
+                }
+
+                pool.append({
+                    "champion": ch,
+                    "score": round(score, 3),
+                    "comfort": round(cmf, 3),
+                    "tag": tag,
+                    "why": f"{why}  ({pname} {role})",
+                    "role": role,
+                    "player": pname,
+                    "factors": factors,
+                })
+
+        best: Dict[str, Dict[str, Any]] = {}
+        for s in pool:
+            cur = best.get(s["champion"])
+            if cur is None or s["score"] > cur["score"]:
+                best[s["champion"]] = s
+        suggestions = sorted(best.values(), key=lambda s: -s["score"])[:n]
+        if tcomp:
+            target_comp = tcomp
+            wc = tcomp.get("win_condition", "")
+            notes.append(f"Build toward {tcomp.get('label','')}"
+                         + (f" - {wc}" if wc else ""))
+        if not suggestions:
+            notes.append("No pick data - engine unavailable / no open roles.")
+
+    if a.side == state.our_side:
+        notes.insert(0, f"YOUR {a.kind.upper()} - {a.label}")
+    else:
+        notes.insert(0, f"Opponent {a.kind} - {a.label} (plan ahead)")
+
+    return {
+        "done": False,
+        "action": a,
+        "our_turn": a.side == state.our_side,
+        "kind": a.kind,
+        "suggestions": suggestions,
+        "target_comp": target_comp,        # E3: archetype we're building toward
+        "cohesion": cohesion,              # E2: plain-language gaps in OUR comp
+        "enemy_weakness": enemy_weak,      # raw axis vector
+        "exploit": weakness_advice(enemy_weak),   # U4: readable exploits
+        "notes": notes,
+    }
 
 
 # ============================================================================

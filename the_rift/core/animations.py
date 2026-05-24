@@ -188,6 +188,10 @@ class AnimationManager:
         self._particles = []
         self._ripples   = []
         self._last_tick = None
+        # Phase 0a — global animation-intensity multiplier (0..1) and the
+        # stateful store backing smooth() (hover lifts, count-ups, etc.).
+        self.intensity  = 1.0
+        self._smooth    = {}
 
     def add_tween(self, tween: Tween):
         self._tweens.append(tween)
@@ -207,6 +211,36 @@ class AnimationManager:
         r = Ripple(x, y, color, max_radius, duration_ms, thickness)
         self._ripples.append(r)
         return r
+
+    # ----------------------------------------------------------- intensity
+    def set_intensity(self, value):
+        """Set the global animation-intensity multiplier (0.0-1.0). Ambient and
+        persistent effects scale by this; at 0 the app reads as calm/static."""
+        self.intensity = max(0.0, min(1.0, float(value)))
+
+    def smooth(self, key, target, rate=0.2, snap=0.01, start=None):
+        """Stateful exponential approach. Returns the value stored under `key`,
+        eased a fraction `rate` toward `target` each call — the backbone for
+        hover lifts, count-ups and sliding indicators. On first sight a key
+        seeds to `start` (or to `target` when start is None)."""
+        cur = self._smooth.get(key)
+        if cur is None:
+            cur = float(start) if start is not None else float(target)
+        cur += (float(target) - cur) * rate
+        if abs(float(target) - cur) <= snap:
+            cur = float(target)
+        self._smooth[key] = cur
+        return cur
+
+    def clear_smooth(self, prefix=None):
+        """Drop stored smooth() state — all of it, or just keys starting with
+        `prefix`. Use when a surface is torn down so values don't 'jump' the
+        next time it appears."""
+        if prefix is None:
+            self._smooth.clear()
+        else:
+            for k in [k for k in self._smooth if str(k).startswith(prefix)]:
+                self._smooth.pop(k, None)
 
     def tick(self):
         now_ms = time.monotonic() * 1000

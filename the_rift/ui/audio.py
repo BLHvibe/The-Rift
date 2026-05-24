@@ -59,12 +59,20 @@ _FILES = {
     "archetype":       "archetype_stinger.wav",
     "pivot":           "pivot_alert.wav",
     "draft_end":       "draft_complete.wav",
+    # Phase 0a — app-wide UI cues (silent no-ops until the WAVs are sourced).
+    "tab":             "tab_switch.wav",
+    "click":           "ui_click.wav",
+    "toast":           "toast.wav",
+    "success":         "success.wav",
+    "error":           "error.wav",
 }
 
 _sounds: Dict[str, "pygame.mixer.Sound"] = {}     # key -> loaded Sound (or absent)
 _mixer_ready: bool = False
 _init_lock = threading.Lock()
 _enabled: bool = True
+# Phase 3 — master volume scaler in [0.0, 1.0], multiplied into every cue.
+_volume: float = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +155,20 @@ def is_enabled() -> bool:
     return _enabled
 
 
+def set_volume(v: float) -> None:
+    """Phase 3 — master volume scaler in [0.0, 1.0]. Multiplied into every
+    cue, so the per-cue volume defaults still set the *relative* loudness."""
+    global _volume
+    try:
+        _volume = max(0.0, min(1.0, float(v)))
+    except (TypeError, ValueError):
+        _volume = 1.0
+
+
+def get_volume() -> float:
+    return _volume
+
+
 def is_ready() -> bool:
     """True only when pygame.mixer is initialised AND at least one sound
     file loaded. Useful for "audio: missing" diagnostics in Settings."""
@@ -168,8 +190,11 @@ def _play(key: str, volume: Optional[float] = None) -> None:
     if snd is None:
         return
     try:
-        if volume is not None:
-            snd.set_volume(max(0.0, min(1.0, volume)))
+        # Phase 3 — multiply the per-cue volume by the master scaler so the
+        # user's volume slider controls overall loudness without re-tuning
+        # each cue.
+        base = 1.0 if volume is None else max(0.0, min(1.0, volume))
+        snd.set_volume(max(0.0, min(1.0, base * _volume)))
         snd.play()
     except Exception:
         pass
@@ -197,6 +222,51 @@ def play_pivot() -> None:
 
 def play_draft_end() -> None:
     _play("draft_end", 0.95)
+
+
+# --- Phase 0a — app-wide UI cues (subtle; lower volume than draft cues) ----
+
+def play_tab() -> None:
+    _play("tab", 0.45)
+
+
+def play_click() -> None:
+    _play("click", 0.55)
+
+
+def play_toast() -> None:
+    _play("toast", 0.60)
+
+
+def play_success() -> None:
+    _play("success", 0.70)
+
+
+def play_error() -> None:
+    _play("error", 0.70)
+
+
+# ---------------------------------------------------------------------------
+# Clean shutdown — call from main.py before dpg.destroy_context() so the
+# audio device is released before the interpreter starts tearing down the
+# rest of the world. Without this, PyInstaller-frozen builds on Windows can
+# segfault at exit when pygame's mixer thread is killed mid-callback.
+# ---------------------------------------------------------------------------
+
+def shutdown() -> None:
+    """Mute, stop any active sounds, and quit the mixer. Idempotent."""
+    global _mixer_ready
+    if not _PYGAME_OK or not _mixer_ready:
+        return
+    try:
+        pygame.mixer.stop()        # silence anything currently playing
+    except Exception:
+        pass
+    try:
+        pygame.mixer.quit()
+    except Exception:
+        pass
+    _mixer_ready = False
 
 
 # ---------------------------------------------------------------------------

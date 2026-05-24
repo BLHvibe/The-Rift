@@ -32,6 +32,7 @@ TOP_PAD     = 20
 
 # Tab definitions: (id, label, draw_fn)
 TABS = [
+    ("home",      "HOME",      "_draw_home_icon"),
     ("rankings",  "RANKINGS",  "_draw_swords"),
     ("draft",     "DRAFT",     "_draw_shield"),
     ("scout",     "SCOUT",     "_draw_magnifier"),
@@ -166,6 +167,30 @@ def _draw_feed_icon(dl, cx, cy, size, color):
         dpg.draw_line((cx - hw, y), (cx + hw, y), color=color, thickness=2, parent=dl)
 
 
+def _draw_home_icon(dl, cx, cy, size, color):
+    """Simple house silhouette (Home)."""
+    half_w = size * 0.42
+    half_h = size * 0.38
+    roof_h = size * 0.20
+    # Roof peak triangle
+    roof = [
+        (cx - half_w - 2, cy - half_h + roof_h),
+        (cx, cy - half_h - roof_h),
+        (cx + half_w + 2, cy - half_h + roof_h),
+    ]
+    dpg.draw_polygon(roof, color=color, thickness=2, parent=dl)
+    # Body rectangle
+    dpg.draw_rectangle((cx - half_w, cy - half_h + roof_h),
+                       (cx + half_w, cy + half_h),
+                       color=color, thickness=2, parent=dl)
+    # Door (small notch at bottom)
+    dw = size * 0.14
+    dh = size * 0.22
+    dpg.draw_rectangle((cx - dw, cy + half_h - dh),
+                       (cx + dw, cy + half_h),
+                       color=color, thickness=1.5, parent=dl)
+
+
 _DRAW_FNS = {
     "_draw_swords":         _draw_swords,
     "_draw_shield":         _draw_shield,
@@ -175,6 +200,7 @@ _DRAW_FNS = {
     "_draw_gear":           _draw_gear,
     "_draw_terminal":       _draw_terminal,
     "_draw_feed_icon":      _draw_feed_icon,
+    "_draw_home_icon":      _draw_home_icon,
 }
 
 # ---------------------------------------------------------------------------
@@ -259,12 +285,15 @@ def _redraw_sidebar():
             else:
                 draw_fn(dl, cx, cy, ICON_SIZE, (*icon_color[:3], 255))
 
-        # Label — only when expanded enough
+        # Label — only when expanded enough. Floor the alpha so the label
+        # never ghosts into the background during the slide.
         if la > 10 and w > COLLAPSED_W + 10:
             text_x  = COLLAPSED_W + 10
-            text_col = (*C["gold"][:3], la) if is_active else (*C["txt"][:3], la)
-            dpg.draw_text((text_x, cy - 10), label,
-                          color=text_col, size=17, parent=dl)
+            la_floor = max(la, 160)
+            text_col = (*C["gold_lt"][:3], la_floor) if is_active else \
+                       (*C["txt"][:3], la_floor)
+            dpg.draw_text((text_x, cy - 11), label,
+                          color=text_col, size=18, parent=dl)
 
     # Sliding gold indicator — drawn last so it sits on top
     ind_y = int(_indicator_y[0])

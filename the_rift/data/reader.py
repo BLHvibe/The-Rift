@@ -48,6 +48,50 @@ class LiveData:
         self.activity       = []   # list of activity event dicts (newest first)
         self.players        = []   # ordered list of real player display names (from Players sheet)
         self.summoner_map   = {}   # gameName (Riot ID game part) → display name
+        # Phase 3 — match-history feed source. Populated by load_match_history
+        # from the REST API; each entry is the full match dict including
+        # participants and draft. Newest first.
+        self.match_history     = []
+        self.match_history_loaded = False
+        self.match_history_error  = None
+        # Phase 3 — per-anchor rivalry tables. Populated by load_rivalries.
+        self.rivalries        = {}   # anchor_name → list of rivalry dicts
+        self.rivalries_loaded = {}   # anchor_name → bool
+        self.rivalries_error  = None
+        self._rivalries_inflight = set()  # anchor names currently being fetched
+        # Phase 3 — league records / superlatives (dict of named entries).
+        self.records          = {}
+        self.records_loaded   = False
+        self.records_error    = None
+        self._records_inflight = False
+        # Phase 3 — Tier List cross-rater meta (loaded from the 3 sheet tabs
+        # written by fetch_ranks/tier_analytics.py).
+        self.tier_consensus  = []   # [{name, std, avg, verdict}, ...]
+        self.tier_hot_takes  = []   # [{rater, player, rated, avg, diff, direction}, ...]
+        self.tier_rater_bias = []   # [{rater, avg, label, diff_from_avg}, ...]
+        self.tier_meta_loaded = False
+        self.tier_meta_error  = None
+        self._tier_meta_inflight = False
+        # Phase 4c — Seasons (REST cache).
+        self.seasons          = []
+        self.seasons_loaded   = False
+        self.seasons_error    = None
+        self._seasons_inflight = False
+        self.season_standings = {}   # season_id -> standings dict
+        self._standings_inflight = set()
+        # Phase 5a — Per-player achievements cache (name -> list of dicts).
+        self.achievements        = {}
+        self._achievements_inflight = set()
+        self.achievements_error  = None
+        # Achievement catalog (server-side master list).
+        self.achievement_catalog = []
+        self._achievement_catalog_inflight = False
+        # Phase 5b — Predictions per match + leaderboard cache.
+        self.predictions          = {}   # match_id -> [pred dicts]
+        self._predictions_inflight = set()
+        self.pred_leaderboard          = []
+        self.pred_leaderboard_loaded   = False
+        self._pred_leaderboard_inflight = False
         # Cache of parsed per-player scouting sheets (champ_pool, roles, etc.).
         # Populated lazily by load_scout_sheet callbacks and by prefetch_scout_sheets.
         # Per-player draft engine reads this to weight ranked/draft champion stats.
@@ -1873,6 +1917,383 @@ def get_most_games_logged(on_done=None, on_error=None):
     threading.Thread(target=_bg, daemon=True, name="most_games_logged").start()
 
 
+def load_tier_meta(on_done=None, on_error=None):
+    """Phase 3 — pull the three Tier-List meta sheets (Consensus &
+    Controversy, Hot Take Detector, Rater Bias Report) into `live`. Best-
+    effort: any single sheet missing is treated as empty so the UI can
+    still render the others."""
+    if live._tier_meta_inflight:
+        return
+    live._tier_meta_inflight = True
+    def _bg():
+        try:
+            sh = _open_sheet()
+            if sh is None:
+                live.tier_meta_error = "no sheet configured"
+                if on_error: on_error(live.tier_meta_error)
+                return
+
+            cons, hot, bias = [], [], []
+
+            def _safe_ws(name):
+                try:
+                    return sh.worksheet(name).get_all_values()
+                except Exception:
+                    return []
+
+            # Consensus & Controversy — rows from row 3, cols A-I.
+            for row in _safe_ws("Consensus & Controversy")[2:]:
+                if not row or not row[1]:
+                    continue
+                try:
+                    cons.append({
+                        "name":     row[1],
+                        "avg":      _float(row[2]),
+                        "avg_tier": row[3] if len(row) > 3 else "",
+                        "std":      _float(row[4]) if len(row) > 4 else 0,
+                        "min":      row[5] if len(row) > 5 else "",
+                        "max":      row[6] if len(row) > 6 else "",
+                        "verdict":  row[8] if len(row) > 8 else "",
+                    })
+                except Exception:
+                    continue
+
+            # Hot Take Detector — rows from row 4.
+            for row in _safe_ws("Hot Take Detector")[3:]:
+                if not row or len(row) < 4 or not row[1]:
+                    continue
+                try:
+                    hot.append({
+                        "rater":     row[1],
+                        "player":    row[2],
+                        "rated":     row[3],
+                        "avg":       row[4] if len(row) > 4 else "",
+                        "diff":      _float(row[5]) if len(row) > 5 else 0,
+                        "direction": row[6] if len(row) > 6 else "",
+                    })
+                except Exception:
+                    continue
+
+            # Rater Bias Report — rows from row 3.
+            for row in _safe_ws("Rater Bias Report")[2:]:
+                if not row or len(row) < 2 or not row[1]:
+                    continue
+                try:
+                    bias.append({
+                        "rater":         row[1],
+                        "avg":           _float(row[2]),
+                        "avg_tier":      row[3] if len(row) > 3 else "",
+                        "label":         row[8] if len(row) > 8 else "",
+                        "diff_from_avg": row[7] if len(row) > 7 else "",
+                    })
+                except Exception:
+                    continue
+
+            with live._lock:
+                live.tier_consensus   = cons
+                live.tier_hot_takes   = hot
+                live.tier_rater_bias  = bias
+                live.tier_meta_loaded = True
+                live.tier_meta_error  = None
+            if on_done: on_done(len(cons), len(hot), len(bias))
+        except Exception as e:
+            live.tier_meta_error = str(e)
+            if on_error: on_error(str(e))
+        finally:
+            live._tier_meta_inflight = False
+    threading.Thread(target=_bg, daemon=True, name="tier_meta").start()
+
+
+def _float(v):
+    try: return float(str(v).replace("%", "").replace(",", ""))
+    except (TypeError, ValueError): return 0.0
+
+
+def _open_sheet():
+    """Open the configured Google Sheet (read-only is fine). Returns the
+    spreadsheet handle or None on any failure."""
+    try:
+        from data.config import load_config
+        import gspread
+        from google.oauth2.service_account import Credentials
+        cfg = load_config() or {}
+        sheet_url = (cfg.get("sheet_url") or "").strip()
+        creds_path = (cfg.get("credentials") or "credentials.json").strip()
+        if not sheet_url:
+            return None
+        scopes = ["https://www.googleapis.com/auth/spreadsheets",
+                  "https://www.googleapis.com/auth/drive"]
+        creds = Credentials.from_service_account_file(creds_path, scopes=scopes)
+        gc = gspread.authorize(creds)
+        return gc.open_by_url(sheet_url)
+    except Exception:
+        return None
+
+
+def _roster_names():
+    """Snapshot of names in `live.rankings` — the canonical "users" set used
+    to filter server-side leaderboards. Returns None when the roster hasn't
+    loaded yet so the caller falls back to the unfiltered global view rather
+    than asking the server for an empty whitelist (which would zero out the
+    record book)."""
+    try:
+        rk = live.rankings or []
+    except Exception:
+        return None
+    names = [str(r.get("name") or "").strip() for r in rk if r]
+    names = [n for n in names if n]
+    return names or None
+
+
+def load_records(on_done=None, on_error=None):
+    """Phase 3 — fetch league records / superlatives from the REST data API
+    and cache on `live.records`. Best-effort; one in-flight call at a time
+    (the cache is global, not per-anchor). Filters to the roster when it's
+    loaded (so non-roster fill players don't pollute the record book)."""
+    if live._records_inflight:
+        return
+    live._records_inflight = True
+    def _bg():
+        try:
+            from data import rift_api
+            if not rift_api.is_configured():
+                live.records_error = "data API not configured"
+                if on_error: on_error(live.records_error)
+                return
+            rec = rift_api.get_records(players=_roster_names()) or {}
+            with live._lock:
+                live.records        = rec
+                live.records_loaded = True
+                live.records_error  = None
+            if on_done: on_done(len(rec))
+        except Exception as e:
+            live.records_error = str(e)
+            if on_error: on_error(str(e))
+        finally:
+            live._records_inflight = False
+    threading.Thread(target=_bg, daemon=True, name="records").start()
+
+
+def load_rivalries(anchor_name, on_done=None, on_error=None):
+    """Phase 3 — fetch per-opponent h2h records for `anchor_name` from the
+    REST data API and cache on `live.rivalries[anchor_name]`. Best-effort:
+    on failure leaves the cache empty and the UI falls back to its empty
+    state."""
+    if not anchor_name:
+        if on_error: on_error("no anchor name")
+        return
+    if anchor_name in live._rivalries_inflight:
+        return
+    live._rivalries_inflight.add(anchor_name)
+    def _bg():
+        try:
+            from data import rift_api
+            if not rift_api.is_configured():
+                live.rivalries_error = "data API not configured"
+                if on_error: on_error(live.rivalries_error)
+                return
+            rows = rift_api.get_rivalries(
+                anchor_name, players=_roster_names()) or []
+            with live._lock:
+                live.rivalries[anchor_name] = rows
+                live.rivalries_loaded[anchor_name] = True
+                live.rivalries_error = None
+            if on_done: on_done(len(rows))
+        except Exception as e:
+            with live._lock:
+                live.rivalries_error = str(e)
+                # Still mark loaded so the UI can render an error state instead
+                # of holding the skeleton forever.
+                live.rivalries_loaded[anchor_name] = True
+                live.rivalries.setdefault(anchor_name, [])
+            if on_error: on_error(str(e))
+        finally:
+            live._rivalries_inflight.discard(anchor_name)
+    threading.Thread(target=_bg, daemon=True,
+                     name=f"rivalries_{anchor_name}").start()
+
+
+def load_match_history(limit=200, on_done=None, on_error=None):
+    """Phase 3 — pull every match header + participants + draft from the REST
+    data API and cache the result on `live.match_history`. Newest first.
+
+    Streams results: headers are published immediately so the UI can show the
+    list straight away, then each full match payload is appended as it arrives
+    so the cards "fill in" instead of holding the whole tab in a skeleton for
+    10+ seconds while a 50-game pull completes.
+
+    Best-effort: server outage / offline leaves whatever did arrive cached and
+    the loaded flag still flips so the UI's empty state shows correctly."""
+    def _bg():
+        try:
+            from data import rift_api
+            if not rift_api.is_configured():
+                live.match_history_error = "data API not configured"
+                if on_error: on_error(live.match_history_error)
+                return
+            headers = rift_api.get_matches(limit=int(limit)) or []
+            # Publish headers up front so the UI list count + basic metadata
+            # (timestamp, winner, duration, source) renders immediately.
+            with live._lock:
+                live.match_history = [dict(h) for h in headers]
+                live.match_history_error = None
+            # Stream full payloads in. Update one entry at a time so the UI
+            # progressively fills in participants + draft. We mutate the same
+            # list in place so iterators in the UI see the upgrade on next paint.
+            for idx, h in enumerate(headers):
+                mid = h.get("id")
+                if not mid:
+                    continue
+                m = rift_api.get_match(mid)
+                if m:
+                    with live._lock:
+                        if idx < len(live.match_history):
+                            live.match_history[idx] = m
+            with live._lock:
+                live.match_history_loaded = True
+            if on_done: on_done(len(headers))
+        except Exception as e:
+            live.match_history_error = str(e)
+            # Mark loaded so the UI stops showing skeletons indefinitely.
+            live.match_history_loaded = True
+            if on_error: on_error(str(e))
+    threading.Thread(target=_bg, daemon=True, name="match_history").start()
+
+
+# ---------------------------------------------------------------------------
+# Phase 4c — Seasons
+# ---------------------------------------------------------------------------
+
+def load_seasons(on_done=None, on_error=None):
+    if live._seasons_inflight:
+        return
+    live._seasons_inflight = True
+    def _bg():
+        try:
+            from data import rift_api
+            if not rift_api.is_configured():
+                live.seasons_error = "data API not configured"
+                if on_error: on_error(live.seasons_error)
+                return
+            rows = rift_api.get_seasons() or []
+            with live._lock:
+                live.seasons = rows
+                live.seasons_loaded = True
+                live.seasons_error = None
+            if on_done: on_done(len(rows))
+        except Exception as e:
+            live.seasons_error = str(e)
+            if on_error: on_error(str(e))
+        finally:
+            live._seasons_inflight = False
+    threading.Thread(target=_bg, daemon=True, name="seasons").start()
+
+
+def load_season_standings(season_id, on_done=None, on_error=None):
+    sid = int(season_id)
+    if sid in live._standings_inflight:
+        return
+    live._standings_inflight.add(sid)
+    def _bg():
+        try:
+            from data import rift_api
+            data = rift_api.get_season_standings(
+                sid, players=_roster_names()) or {}
+            with live._lock:
+                live.season_standings[sid] = data
+            if on_done: on_done(sid)
+        except Exception as e:
+            if on_error: on_error(str(e))
+        finally:
+            live._standings_inflight.discard(sid)
+    threading.Thread(target=_bg, daemon=True, name=f"standings_{sid}").start()
+
+
+# ---------------------------------------------------------------------------
+# Phase 5a — Achievements
+# ---------------------------------------------------------------------------
+
+def load_player_achievements(name, on_done=None, on_error=None):
+    if not name or name in live._achievements_inflight:
+        return
+    live._achievements_inflight.add(name)
+    # Also ensure the catalog has been pulled so locked entries render.
+    load_achievement_catalog()
+    def _bg():
+        try:
+            from data import rift_api
+            rows = rift_api.get_player_achievements(name) or []
+            with live._lock:
+                live.achievements[name] = rows
+            if on_done: on_done(len(rows))
+        except Exception as e:
+            live.achievements_error = str(e)
+            if on_error: on_error(str(e))
+        finally:
+            live._achievements_inflight.discard(name)
+    threading.Thread(target=_bg, daemon=True, name=f"ach_{name}").start()
+
+
+def load_achievement_catalog(on_done=None, on_error=None):
+    if live._achievement_catalog_inflight or live.achievement_catalog:
+        return
+    live._achievement_catalog_inflight = True
+    def _bg():
+        try:
+            from data import rift_api
+            rows = rift_api.get_achievement_catalog() or []
+            with live._lock:
+                live.achievement_catalog = rows
+            if on_done: on_done(len(rows))
+        except Exception as e:
+            if on_error: on_error(str(e))
+        finally:
+            live._achievement_catalog_inflight = False
+    threading.Thread(target=_bg, daemon=True, name="ach_catalog").start()
+
+
+# ---------------------------------------------------------------------------
+# Phase 5b — Predictions
+# ---------------------------------------------------------------------------
+
+def load_match_predictions(match_id, on_done=None, on_error=None):
+    if not match_id or match_id in live._predictions_inflight:
+        return
+    live._predictions_inflight.add(match_id)
+    def _bg():
+        try:
+            from data import rift_api
+            rows = rift_api.get_match_predictions(match_id) or []
+            with live._lock:
+                live.predictions[match_id] = rows
+            if on_done: on_done(len(rows))
+        except Exception as e:
+            if on_error: on_error(str(e))
+        finally:
+            live._predictions_inflight.discard(match_id)
+    threading.Thread(target=_bg, daemon=True, name=f"pred_{match_id}").start()
+
+
+def load_prediction_leaderboard(on_done=None, on_error=None):
+    if live._pred_leaderboard_inflight:
+        return
+    live._pred_leaderboard_inflight = True
+    def _bg():
+        try:
+            from data import rift_api
+            rows = rift_api.get_prediction_leaderboard(
+                players=_roster_names()) or []
+            with live._lock:
+                live.pred_leaderboard = rows
+                live.pred_leaderboard_loaded = True
+            if on_done: on_done(len(rows))
+        except Exception as e:
+            if on_error: on_error(str(e))
+        finally:
+            live._pred_leaderboard_inflight = False
+    threading.Thread(target=_bg, daemon=True, name="pred_leaderboard").start()
+
+
 def log_inhouse_games_from_client(on_progress=None, on_done=None, on_error=None):
     """
     Connect to the League client, fetch recent custom games, append only NEW
@@ -1991,7 +2412,8 @@ def log_inhouse_games_from_client(on_progress=None, on_done=None, on_error=None)
 
             role_map = {"TOP":"TOP","JUNGLE":"JGL","MIDDLE":"MID","BOTTOM":"BOT",
                         "UTILITY":"SUP","SUPPORT":"SUP","NONE":"","UNKNOWN":"","":""}
-            new_records = []
+            new_records  = []
+            api_matches  = []     # Phase 1: parallel list of match dicts for /api/matches
             seen = set()
             for g in customs:
                 gid = g.get("gameId")
@@ -2008,11 +2430,19 @@ def log_inhouse_games_from_client(on_progress=None, on_done=None, on_error=None)
                 if len(participants) != 10: continue
                 duration  = max(d.get("gameDuration", 1), 1)
                 timestamp = _dt.fromtimestamp(d.get("gameCreation", 0) / 1000).strftime("%Y-%m-%d %H:%M")
+                started_at = _dt.utcfromtimestamp(d.get("gameCreation", 0) / 1000).strftime("%Y-%m-%dT%H:%M:%SZ")
+                patch      = str(d.get("gameVersion") or "")
+                team_slot  = {100: 0, 200: 0}     # for role-collision-safe slot fallback
+                api_parts  = []
+                winner     = ""
                 for idx, p in enumerate(participants):
                     pname = "Unknown"
+                    riot_id = ""
                     if idx < len(identities):
                         pl    = identities[idx].get("player", {})
                         pname = pl.get("gameName") or pl.get("summonerName") or f"Player_{idx}"
+                        tag   = pl.get("tagLine") or ""
+                        riot_id = f"{pname}#{tag}" if tag else pname
                     stats  = p.get("stats", {})
                     cid    = p.get("championId", 0)
                     cname  = champ_map.get(cid, f"Champ#{cid}")
@@ -2037,6 +2467,39 @@ def log_inhouse_games_from_client(on_progress=None, on_done=None, on_error=None)
                         "duration":  round(duration / 60, 1),
                         "logged_by": logged_by,
                     })
+                    # --- Phase 1: build the API participant row in parallel ---
+                    team_id = p.get("teamId", 0)
+                    team    = "blue" if team_id == 100 else ("red" if team_id == 200 else "spec")
+                    team_slot[team_id] = team_slot.get(team_id, 0) + 1
+                    is_win = bool(stats.get("win", False))
+                    if is_win and not winner:
+                        winner = team
+                    api_parts.append({
+                        "player":   pname,
+                        "riot_id":  riot_id,
+                        "team":     team,
+                        "slot":     team_slot[team_id],   # 1..5 within team — PK component
+                        "role":     role,                 # may be empty / duplicated; UX-only
+                        "champion": cname,
+                        "win":      1 if is_win else 0,
+                        "kills":    stats.get("kills", 0),
+                        "deaths":   stats.get("deaths", 0),
+                        "assists":  stats.get("assists", 0),
+                        "cs":       cs,
+                        "gold":     stats.get("goldEarned", 0),
+                        "damage":   stats.get("totalDamageDealtToChampions", 0),
+                        "vision":   stats.get("visionScore", 0),
+                    })
+                api_matches.append({
+                    "id":         str(gid),
+                    "source":     "inhouse",
+                    "queue":      "CUSTOM",
+                    "patch":      patch,
+                    "duration":   int(duration),
+                    "started_at": started_at,
+                    "winner":     winner,
+                    "participants": api_parts,
+                })
 
             if not new_records:
                 if on_done: on_done(0)
@@ -2066,6 +2529,34 @@ def log_inhouse_games_from_client(on_progress=None, on_done=None, on_error=None)
 
             new_game_count = len(new_records) // 10
 
+            # --- Phase 1: mirror to the REST data API. Best-effort — a server
+            # outage or auth issue must not block the sheet-based log flow. ---
+            api_post_ok = False
+            if api_matches:
+                try:
+                    from data import rift_api
+                    if rift_api.is_configured():
+                        if on_progress: on_progress(f"Mirroring {len(api_matches)} game{'s' if len(api_matches)!=1 else ''} to data API…")
+                        resp = rift_api.post_matches(api_matches)
+                        if isinstance(resp, dict) and not resp.get("ok", True):
+                            print(f"[rift-api] ingest non-200: {resp}")
+                        else:
+                            api_post_ok = resp is not None
+                except Exception as _e:
+                    print(f"[rift-api] mirror failed: {_e}")
+
+            # --- Phase 1: backup the DB to Google Sheets (best-effort). Only
+            # runs when the API ingest itself succeeded; otherwise there's
+            # nothing new on the server to mirror. ---
+            if api_post_ok:
+                try:
+                    from data import sheet_mirror
+                    sheet_mirror.full_refresh(
+                        on_done=lambda c: print(f"[rift-mirror] backed up {c}"),
+                        on_error=lambda m: print(f"[rift-mirror] failed: {m}"))
+                except Exception as _e:
+                    print(f"[rift-mirror] launch failed: {_e}")
+
             # Write activity event
             write_activity_event("INHOUSE", logged_by,
                                  f"Logged {new_game_count} new inhouse game{'s' if new_game_count!=1 else ''}")
@@ -2085,6 +2576,221 @@ def log_inhouse_games_from_client(on_progress=None, on_done=None, on_error=None)
             if on_error: on_error(str(e))
 
     threading.Thread(target=_bg, daemon=True, name="log_inhouse").start()
+
+
+# ---------------------------------------------------------------------------
+# LCU participant repair
+# ---------------------------------------------------------------------------
+
+def repair_match_participants(on_progress=None, on_done=None, on_error=None):
+    """Walk every match in the REST data API, find ones with <10 participants,
+    re-fetch the full LCU match payload, and POST it back. Idempotent — the
+    server upserts on (match_id) and wipes the participant table for that
+    match before re-inserting, so re-running is safe.
+
+    Use this after deploying the slot-PK fix to recover the games that were
+    truncated by the old (match_id, team, role) collision. Requires the League
+    client to be running locally (the LCU is the only source for full-roster
+    custom-game data).
+
+    on_progress(msg)             — status updates ("Repairing 12/53…")
+    on_done({checked,repaired,skipped,failed})
+    on_error(msg)
+    """
+    import os, re, subprocess, urllib3, requests
+    from datetime import datetime as _dt
+
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    def _find_lockfile():
+        candidates = []
+        local_app = os.environ.get("LOCALAPPDATA", "")
+        if local_app:
+            candidates.append(os.path.join(local_app, "Riot Games",
+                                           "League of Legends", "lockfile"))
+        for drive in ("C:\\", "D:\\", "E:\\"):
+            for sub in ("Riot Games", "Program Files\\Riot Games",
+                        "Program Files (x86)\\Riot Games"):
+                candidates.append(os.path.join(drive, sub,
+                                               "League of Legends", "lockfile"))
+        for p in candidates:
+            if os.path.isfile(p):
+                return p
+        try:
+            out = subprocess.check_output(
+                'wmic process where "name=\'LeagueClientUx.exe\'" get commandline',
+                shell=True, text=True, stderr=subprocess.DEVNULL)
+            m = re.search(r'"([^"]*LeagueClientUx\.exe)"', out)
+            if m:
+                lf = os.path.join(os.path.dirname(m.group(1)), "lockfile")
+                if os.path.isfile(lf):
+                    return lf
+        except Exception:
+            pass
+        return None
+
+    def _load_champion_map():
+        try:
+            v    = requests.get("https://ddragon.leagueoflegends.com/api/versions.json", timeout=8).json()
+            data = requests.get(f"https://ddragon.leagueoflegends.com/cdn/{v[0]}/data/en_US/champion.json", timeout=8).json()
+            return {int(d["key"]): d["name"] for d in data["data"].values()}
+        except Exception:
+            return {}
+
+    def _bg():
+        try:
+            from data import rift_api
+            if not rift_api.is_configured():
+                if on_error: on_error("Rift API not configured (no server URL)")
+                return
+
+            if on_progress: on_progress("Finding League client…")
+            lockfile = _find_lockfile()
+            if not lockfile:
+                if on_error: on_error("League client not running — open the client first.")
+                return
+            with open(lockfile) as f:
+                parts = f.read().strip().split(":")
+            if len(parts) < 5:
+                if on_error: on_error("Unexpected lockfile format.")
+                return
+            port, password, protocol = parts[2], parts[3], parts[4]
+            base_url = f"{protocol}://127.0.0.1:{port}"
+            auth     = ("riot", password)
+
+            if on_progress: on_progress("Listing matches on server…")
+            headers = rift_api.get_matches(source="inhouse", limit=1000)
+            if not headers:
+                if on_done: on_done({"checked": 0, "repaired": 0,
+                                     "skipped": 0, "failed": 0})
+                return
+
+            if on_progress: on_progress("Loading champion map…")
+            champ_map = _load_champion_map()
+            role_map  = {"TOP":"TOP","JUNGLE":"JGL","MIDDLE":"MID","BOTTOM":"BOT",
+                         "UTILITY":"SUP","SUPPORT":"SUP","NONE":"","UNKNOWN":"","":""}
+
+            # Find matches that need repair (<10 participants on the server).
+            short_ids = []
+            total = len(headers)
+            for i, h in enumerate(headers, 1):
+                mid = str(h.get("id") or "").strip()
+                if not mid:
+                    continue
+                if on_progress and i % 20 == 0:
+                    on_progress(f"Scanning {i}/{total}…")
+                m = rift_api.get_match(mid)
+                if m is None:
+                    continue
+                pcount = len(m.get("participants") or [])
+                if pcount < 10:
+                    short_ids.append(mid)
+
+            if not short_ids:
+                if on_done: on_done({"checked": total, "repaired": 0,
+                                     "skipped": 0, "failed": 0})
+                return
+
+            repaired = failed = skipped = 0
+            for i, mid in enumerate(short_ids, 1):
+                if on_progress:
+                    on_progress(f"Repairing {i}/{len(short_ids)}: {mid}…")
+                try:
+                    dr = requests.get(
+                        f"{base_url}/lol-match-history/v1/games/{mid}",
+                        auth=auth, verify=False, timeout=15)
+                    if dr.status_code != 200:
+                        skipped += 1
+                        continue
+                    d = dr.json() or {}
+                except Exception:
+                    skipped += 1
+                    continue
+
+                participants = d.get("participants", []) or []
+                identities   = d.get("participantIdentities", []) or []
+                if len(participants) != 10:
+                    # LCU history doesn't have the full game (most likely
+                    # because it was played on a different account). Leave
+                    # the match alone — it stays partial until someone with
+                    # the LCU history of that game runs REPAIR.
+                    skipped += 1
+                    continue
+
+                duration   = max(d.get("gameDuration", 1), 1)
+                started_at = _dt.utcfromtimestamp(
+                    d.get("gameCreation", 0) / 1000
+                ).strftime("%Y-%m-%dT%H:%M:%SZ")
+                patch      = str(d.get("gameVersion") or "")
+                team_slot  = {100: 0, 200: 0}
+                api_parts  = []
+                winner     = ""
+                for idx, p in enumerate(participants):
+                    pname = "Unknown"
+                    riot_id = ""
+                    if idx < len(identities):
+                        pl    = identities[idx].get("player", {})
+                        pname = (pl.get("gameName") or pl.get("summonerName")
+                                 or f"Player_{idx}")
+                        tag   = pl.get("tagLine") or ""
+                        riot_id = f"{pname}#{tag}" if tag else pname
+                    stats   = p.get("stats", {}) or {}
+                    cid     = p.get("championId", 0)
+                    cname   = champ_map.get(cid, f"Champ#{cid}")
+                    lane    = str(p.get("timeline", {}).get("lane", "")).upper()
+                    role    = role_map.get(lane, "")
+                    cs      = (stats.get("totalMinionsKilled", 0)
+                               + stats.get("neutralMinionsKilled", 0))
+                    team_id = p.get("teamId", 0)
+                    team    = ("blue" if team_id == 100
+                               else ("red" if team_id == 200 else "spec"))
+                    team_slot[team_id] = team_slot.get(team_id, 0) + 1
+                    is_win  = bool(stats.get("win", False))
+                    if is_win and not winner:
+                        winner = team
+                    api_parts.append({
+                        "player":   pname,
+                        "riot_id":  riot_id,
+                        "team":     team,
+                        "slot":     team_slot[team_id],
+                        "role":     role,
+                        "champion": cname,
+                        "win":      1 if is_win else 0,
+                        "kills":    stats.get("kills", 0),
+                        "deaths":   stats.get("deaths", 0),
+                        "assists":  stats.get("assists", 0),
+                        "cs":       cs,
+                        "gold":     stats.get("goldEarned", 0),
+                        "damage":   stats.get("totalDamageDealtToChampions", 0),
+                        "vision":   stats.get("visionScore", 0),
+                    })
+
+                payload = [{
+                    "id":         mid,
+                    "source":     "inhouse",
+                    "queue":      "CUSTOM",
+                    "patch":      patch,
+                    "duration":   int(duration),
+                    "started_at": started_at,
+                    "winner":     winner,
+                    "participants": api_parts,
+                }]
+                resp = rift_api.post_matches(payload)
+                if isinstance(resp, dict) and resp.get("ok"):
+                    repaired += 1
+                else:
+                    failed += 1
+
+            if on_done:
+                on_done({"checked":  total,
+                         "repaired": repaired,
+                         "skipped":  skipped,
+                         "failed":   failed})
+        except Exception as e:
+            if on_error: on_error(str(e))
+
+    threading.Thread(target=_bg, daemon=True,
+                     name="repair_match_participants").start()
 
 
 # ---------------------------------------------------------------------------

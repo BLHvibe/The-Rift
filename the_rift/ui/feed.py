@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timedelta, timezone
 import dearpygui.dearpygui as dpg
 from theme import C
+from ui import effects
 from data.reader import live, load_activity
 
 _F = {}
@@ -39,6 +40,7 @@ _KIND_META = {
     "SCOUT_NEW":  ((170, 130, 230, 255), "NEW"),
     "RESCOUTED":  ((120,  80, 200, 255), "RSC"),
     "DRAFT":      ((80,  160, 220, 255), "DFT"),
+    "TIER_LIST":  ((220, 165, 100, 255), "TL"),
     "INHOUSE":    (C["win"],             "IH"),
     "inhouse":    (C["win"],             "IH"),
     "rank":       (C["gold"],            "RNK"),
@@ -144,49 +146,118 @@ def _event_date_key(ev):
 def _build_events():
     """
     Return up to MAX_EVENTS events with date context attached.
-    Primary: live.activity (real sheet events).
-    Fallback: derive from live.inhouse + live.rankings.
-    """
-    raw = list(live.activity or [])
 
-    if raw:
-        # Sheet events already ordered newest-first
-        events = []
-        for ev in raw[:MAX_EVENTS]:
-            kind   = ev.get("event_type", "")
-            player = ev.get("player",     "")
-            detail = ev.get("details",    "")
-            ts     = ev.get("timestamp",  "")
-            events.append({
-                "kind":    kind,
-                "player":  player,
-                "desc":    detail,
-                "ts":      ts,
-                "time_ago": _time_ago(ts),
-            })
-        return events
-
-    # ── Fallback: derived events ──────────────────────────────────────────
+    The sheet was historically only fed by INHOUSE log events, which made the
+    feed feel single-note. We now MERGE the sheet events with a set of derived
+    events — recent match highlights, ranking deltas, scout refresh, top
+    performances — so the feed always shows a variety of activity even when
+    only one event type is written to the sheet."""
     events = []
-    for row in (live.inhouse or []):
-        name  = row.get("player", "")
-        wins  = row.get("wins",   0)
-        losses= row.get("losses", 0)
-        wr_raw = str(row.get("wr", "0")).replace("%", "")
+
+    # ── Primary: real sheet events ────────────────────────────────────────
+    raw = list(live.activity or [])
+    for ev in raw[:MAX_EVENTS]:
+        kind   = ev.get("event_type", "")
+        player = ev.get("player",     "")
+        detail = ev.get("details",    "")
+        ts     = ev.get("timestamp",  "")
+        events.append({
+            "kind":    kind,
+            "player":  player,
+            "desc":    detail,
+            "ts":      ts,
+            "time_ago": _time_ago(ts),
+            "_synthetic": False,
+        })
+
+    # ── Derived: recent match highlights ──────────────────────────────────
+    # Surface the latest few matches with their carry & winner side. Each match
+    # appears once so the feed isn't drowned in matched copies of the same row.
+    matches = list(live.match_history or [])[:5]
+    for m in matches:
+        winner = (m.get("winner") or "").lower()
+        if not winner:
+            continue
+        ts = m.get("started_at") or ""
+        parts = m.get("participants") or []
+        # Pick the top fragger on the winning side.
+        best = None
+        for pt in parts:
+            if (pt.get("team") or "").lower() != winner:
+                continue
+            k = int(pt.get("kills") or 0)
+            a = int(pt.get("assists") or 0)
+            d = max(1, int(pt.get("deaths") or 0))
+            score = (k * 2.0 + a) / d
+            if best is None or score > best[0]:
+                best = (score, pt)
+        carry_name = ""
+        carry_champ = ""
+        kda = ""
+        if best:
+            pt = best[1]
+            carry_name = (pt.get("player") or "").strip()
+            carry_champ = (pt.get("champion") or "").strip()
+            kda = (f"{int(pt.get('kills') or 0)}/"
+                   f"{int(pt.get('deaths') or 0)}/"
+                   f"{int(pt.get('assists') or 0)}")
+        desc = (f"won as {winner.upper()} side"
+                if not carry_name else
+                f"carried on {carry_champ}  ·  {kda}")
+        events.append({
+            "kind":    "INHOUSE",
+            "player":  carry_name or winner.upper(),
+            "desc":    desc,
+            "ts":      ts,
+            "time_ago": _time_ago(ts),
+            "_synthetic": True,
+        })
+
+    # ── Derived: ranking shifts ───────────────────────────────────────────
+    try:
+        from ui.rankings import rankings as _rk
+        deltas = getattr(_rk, "deltas", {}) or {}
+    except Exception:
+        deltas = {}
+    movers = [(n, d) for n, d in deltas.items()
+              if isinstance(d, int) and d != 0]
+    movers.sort(key=lambda x: -abs(x[1]))
+    for n, d in movers[:3]:
+        direction = "climbed" if d > 0 else "dropped"
+        plural = "spot" if abs(d) == 1 else "spots"
+        events.append({
+            "kind":    "rank",
+            "player":  n,
+            "desc":    f"{direction} {abs(d)} {plural} in power rankings",
+            "ts":      "",
+            "time_ago": "",
+            "_synthetic": True,
+        })
+
+    # ── Derived: scout snapshot (top 3 by score) ──────────────────────────
+    scout = list(live.scout or [])[:3]
+    for s in scout:
+        name = s.get("name") or s.get("player") or ""
+        if not name:
+            continue
+        score = s.get("score") or s.get("final_score") or ""
         try:
-            wr = float(wr_raw)
+            score_s = f"score {float(score):.0f}"
         except (ValueError, TypeError):
-            wr = 0.0
-        games = row.get("games", 0)
-        if games > 0:
-            events.append({
-                "kind":    "INHOUSE",
-                "player":  name,
-                "desc":    f"played {games} inhouse game{'s' if games!=1 else ''}  —  {wins}W {losses}L  ({wr}% WR)",
-                "ts":      "",
-                "time_ago":"",
-            })
-    for row in (live.rankings or []):
+            score_s = ""
+        wr = s.get("wr") or s.get("ranked_wr") or ""
+        bits = [b for b in (score_s, f"{wr} WR" if wr else "") if b]
+        events.append({
+            "kind":    "SCOUT",
+            "player":  name,
+            "desc":    f"scouted  —  {'  ·  '.join(bits)}" if bits else "scouted",
+            "ts":      "",
+            "time_ago": "",
+            "_synthetic": True,
+        })
+
+    # ── Derived: rankings snapshot (top 3) ────────────────────────────────
+    for row in (live.rankings or [])[:3]:
         name  = row.get("name",  "")
         rank  = row.get("rank",  0)
         tier  = row.get("tier",  "")
@@ -199,11 +270,23 @@ def _build_events():
             events.append({
                 "kind":    "rank",
                 "player":  name,
-                "desc":    f"ranked #{rank} in power rankings  —  {tier}  (score {score_str})",
+                "desc":    f"ranked #{rank}  —  {tier}  (score {score_str})",
                 "ts":      "",
-                "time_ago":"",
+                "time_ago": "",
+                "_synthetic": True,
             })
-    return events[:MAX_EVENTS]
+
+    # De-duplicate by (kind, player, desc) so a tier-list submit + a recent
+    # match don't collapse into the same row twice across the merge.
+    seen = set()
+    out = []
+    for ev in events:
+        key = (ev.get("kind"), ev.get("player"), ev.get("desc"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(ev)
+    return out[:MAX_EVENTS]
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +305,9 @@ class FeedState:
         # Per-event "appeared at" timestamps — used to flash new events briefly
         self._seen_keys        = set()    # event keys we've already shown
         self._appear_at        = {}       # key → monotonic timestamp of first appearance
+        # Phase 3 — active filter chip (None = all). One of:
+        # None / "DRAFT" / "INHOUSE" / "SCOUT" / "RANK".
+        self.filter_kind       = None
 
     def refresh(self):
         """Refresh from in-memory fallback only (no network)."""
@@ -353,7 +439,27 @@ def draw_feed(dl, vw, vh, fonts=None):
                         color=(*C["gold"][:3], 200), rounding=4, parent=dl)
     _txt(dl, bx + 14, by + 8, "REFRESH", (*C["gold_lt"][:3], 240), 18, "raj_sb_18")
 
-    # Click — force a sheet refresh (same hit-test pattern as the rest of the app)
+    # Phase 3 — filter chips (left of REFRESH).
+    chips = (("ALL", None), ("DRAFTS", "DRAFT"), ("INHOUSE", "INHOUSE"),
+             ("SCOUT", "SCOUT"), ("RANK", "RANK"))
+    chip_w = 72
+    chip_h = 28
+    chip_gap = 4
+    total_chip_w = chip_w * len(chips) + chip_gap * (len(chips) - 1)
+    chip_x0 = bx - total_chip_w - 14
+    chip_y = (TOP_BAR_H - chip_h) // 2
+    for i, (lbl, val) in enumerate(chips):
+        cx0 = chip_x0 + i * (chip_w + chip_gap)
+        is_active = (_feed.filter_kind == val)
+        fill = (*C["gold_dk"][:3], 200) if is_active else (*C["card"][:3], 180)
+        bdr  = (*C["gold"][:3], 200)    if is_active else (*C["gold"][:3], 70)
+        lblc = (*C["gold_lt"][:3], 240) if is_active else (*C["txt2"][:3], 200)
+        dpg.draw_rectangle((cx0, chip_y), (cx0 + chip_w, chip_y + chip_h),
+                           fill=fill, color=bdr, rounding=3, parent=dl)
+        text_off = max(2, (chip_w - len(lbl) * 8) // 2)
+        _txt(dl, cx0 + text_off, chip_y + 6, lbl, lblc, 13, "raj_sb_14")
+
+    # Click — force a sheet refresh OR filter-chip toggle
     if dpg.is_mouse_button_clicked(0):
         mouse = dpg.get_mouse_pos(local=False)
         vp    = dpg.get_viewport_pos()
@@ -361,6 +467,14 @@ def draw_feed(dl, vw, vh, fonts=None):
         ry = mouse[1] - vp[1] - 52     # 52 = TITLE_H (app title bar)
         if bx <= rx <= bx + bw and by <= ry <= by + bh:
             _feed.refresh_from_sheet(force=True)
+        # Filter chips
+        if chip_y <= ry <= chip_y + chip_h:
+            for i, (_, val) in enumerate(chips):
+                cx0 = chip_x0 + i * (chip_w + chip_gap)
+                if cx0 <= rx <= cx0 + chip_w and _feed.filter_kind != val:
+                    _feed.filter_kind = val
+                    _feed.dirty = True
+                    break
 
     # Position the cards window flush BELOW our local top bar.
     # `vw` is content-area width; viewport sidebar width is (viewport_w - vw).
@@ -402,9 +516,27 @@ def _repopulate_feed():
     _populate_cards()
 
 
+def _kind_matches_filter(kind, filt):
+    """True if an event's kind matches the active filter chip. Treats SCOUT_NEW
+    and RESCOUTED as part of the SCOUT bucket; UPDATE as part of RANK."""
+    if not filt:
+        return True
+    k = (kind or "").upper()
+    if filt == "SCOUT":   return k in ("SCOUT", "SCOUT_NEW", "RESCOUTED")
+    if filt == "RANK":    return k in ("RANK", "UPDATE")
+    if filt == "INHOUSE": return k == "INHOUSE"
+    if filt == "DRAFT":   return k == "DRAFT"
+    return False
+
+
 def _populate_cards():
     events = _feed.events
     parent = "feed_card_group"
+
+    # Phase 3 — apply filter chip
+    if _feed.filter_kind:
+        events = [e for e in events
+                  if _kind_matches_filter(e.get("kind"), _feed.filter_kind)]
 
     if not events:
         _empty_state(parent)
@@ -421,10 +553,17 @@ def _populate_cards():
 
 
 def _empty_state(parent):
-    dpg.add_spacer(height=60, parent=parent)
+    # Loading → skeleton rows that morph into real cards once data lands.
     if _feed.loading and not _feed.sheet_loaded_once:
-        msg = "Loading activity from sheet…"
-    elif _feed.last_error and not _feed.sheet_loaded_once:
+        dpg.add_spacer(height=PAD, parent=parent)
+        w = _card_w[0] + PAD * 2
+        for _ in range(6):
+            with dpg.drawlist(width=w, height=CARD_H, parent=parent) as _skdl:
+                effects.draw_skeleton_row(_skdl, PAD, 4, w - PAD * 2, CARD_H - 8)
+            dpg.add_spacer(height=CARD_GAP, parent=parent)
+        return
+    dpg.add_spacer(height=60, parent=parent)
+    if _feed.last_error and not _feed.sheet_loaded_once:
         msg = "Could not reach the Activity sheet. Check your connection and click REFRESH."
     elif _feed.sheet_loaded_once:
         msg = "No activity yet — events will appear here after a SCOUT, DRAFT, or INHOUSE run."
@@ -534,7 +673,7 @@ def _draw_event_card(ev, parent):
             desc_disp = desc if len(desc) <= max_chars else desc[:max_chars - 1] + "…"
             desc_tag = dpg.draw_text(
                 (text_x, 42), desc_disp,
-                color=(*C["txt"][:3], 200), size=14,
+                color=(*C["txt"][:3], 235), size=15,
             )
             if "raj_r_14" in _F:
                 dpg.bind_item_font(desc_tag, _F["raj_r_14"])
@@ -544,7 +683,7 @@ def _draw_event_card(ev, parent):
             ta_w = len(time_ago) * 7
             ta_tag = dpg.draw_text(
                 (w - PAD - 14 - ta_w, 16), time_ago,
-                color=(*C["txt2"][:3], 200), size=13,
+                color=(*C["txt2"][:3], 235), size=14,
             )
             if "raj_sb_14" in _F:
                 dpg.bind_item_font(ta_tag, _F["raj_sb_14"])

@@ -1258,16 +1258,77 @@ def recommend_comps(
     beam_width: int = 16,
     scout_champs: Optional[Dict[str, List[Dict]]] = None,
 ) -> List[Dict[str, Any]]:
-    """Proxy → /api/engine/recommend_comps. See server/engine_core.py."""
-    from data import engine_api
-    return engine_api.recommend_comps(
-        list(players),
-        inhouse_champs=inhouse_champs,
-        primary_roles=primary_roles,
-        enemy_picks=list(enemy_picks),
-        n_results=n_results,
-        scout_champs=scout_champs,
-    ) or []
+    """
+    Returns ranked archetype recommendations. Each entry has:
+      archetype, label, viability, synergy (0..5 dot count), combined,
+      picks: [{champion, fit_score}], win_condition, spike, score_breakdown
+
+    `scout_champs` is the scout-sheet FULL CHAMPION POOL per player
+    (`{name: [{champ, games, wr, kda, ...}, ...]}`) — ranked + draft data
+    used as a secondary comfort source after customs.
+    """
+    inhouse_champs = inhouse_champs or {}
+    primary_roles  = primary_roles  or {}
+    scout_champs   = scout_champs   or {}
+
+    results: List[Dict[str, Any]] = []
+    for arch_name, arch_data in ARCHETYPES.items():
+        beam = beam_search_comp(players, inhouse_champs, primary_roles, arch_name,
+                                enemy_picks=enemy_picks, beam_width=beam_width,
+                                scout_champs=scout_champs)
+        if not beam:
+            continue
+        champs   = beam["champs"]
+        comforts = beam["comforts"]
+        s        = beam["score"]
+
+        # Viability buckets — anchored to total score. Phase 2: apply the
+        # archetype's `auto_pref` multiplier so meta-favored compositions
+        # (currently Teamfight ×1.05) tilt slightly upward when all else is
+        # roughly equal. Manual archetype selection isn't affected — only
+        # the auto-recommendation order is.
+        raw_total = s["total"]
+        pref = float(arch_data.get("auto_pref", 1.0))
+        total = min(1.0, raw_total * pref)
+        if   total >= 0.62: viab = "STRONG"
+        elif total >= 0.48: viab = "VIABLE"
+        elif total >= 0.32: viab = "WEAK"
+        else:               viab = "NOT RECOMMENDED"
+
+        picks = []
+        for c, k in zip(champs, comforts):
+            picks.append({
+                "champion": c if c else "?",
+                "fit_score": round(k, 2),
+            })
+
+        synergy_dots = max(1, min(5, int(round(total * 5))))
+
+        results.append({
+            "archetype":   arch_name,
+            "label":       arch_data["label"],
+            "viability":   viab,
+            "synergy":     synergy_dots,
+            "combined":    round(total * 100, 1),
+            "picks":       picks,
+            "win_condition": arch_data.get("win_condition", ""),
+            "spike":       arch_data.get("spike", ""),
+            "game_plan":   arch_data.get("game_plan", ""),
+            "score_breakdown": {
+                "identity":  round(s["identity"], 2),
+                "synergy":   round(s["synergy"], 2),
+                "damage":    round(s["damage"],   2),
+                "counter":   round(s["counter"],  2),
+                "comfort":   round(s["comfort"],  2),
+                "coherence": round(s["coherence"],2),
+                "ap_ratio":  round(s["ap_ratio"], 2),
+            },
+        })
+
+    # Filter obvious junk
+    results = [r for r in results if r["viability"] != "NOT RECOMMENDED" or len(results) <= 2]
+    results.sort(key=lambda x: -x["combined"])
+    return results[:n_results]
 
 
 # ============================================================================
@@ -1282,19 +1343,172 @@ def recommend_bans(
     n_bans: int = 5,
     scout_champs: Optional[Dict[str, List[Dict]]] = None,
 ) -> Tuple[List[str], List[Dict[str, Any]]]:
-    """Proxy → /api/engine/recommend_bans."""
-    from data import engine_api
-    r = engine_api.recommend_bans(
-        list(opposing_players),
-        inhouse_champs=inhouse_champs,
-        own_picks=list(own_picks),
-        primary_roles=primary_roles,
-        n_bans=n_bans,
-        scout_champs=scout_champs,
-    )
-    if not r:
-        return ([], [])
-    return (r.get("names") or [], r.get("info") or [])
+    """
+    Bans use Bayesian-shrunk threat, role-context, and counter-coverage.
+
+    threat = shrunk_wr × log(games+1) × kda_factor × rank_weight × role_factor
+    coverage_discount = up to -40% if your team strongly counters this champ
+
+    `scout_champs` (optional) augments customs data with the scout-sheet
+    FULL CHAMPION POOL (ranked + draft) so threats that show up in ranked
+    but not customs still get surfaced.
+    """
+    inhouse_champs = inhouse_champs or {}
+    primary_roles  = primary_roles  or {}
+    scout_champs   = scout_champs   or {}
+
+    seen: Dict[str, Dict[str, Any]] = {}
+    for p in opposing_players:
+        # v3.0.4: skip enemy players who have already locked a pick. Their
+        # remaining champion pool is irrelevant — they can't make another
+        # pick this draft, so banning to deny them is wasted. Filtering
+        # at the player level (vs. just at the candidate-champion level
+        # via `used_champs`) also avoids surfacing OTHER champions from
+        # the locked player's pool that aren't real threats.
+        if p.get("locked_champ"):
+            continue
+        pname = p.get("name", "")
+        rank_weight = max(0.5, min(2.0, parse_float(p.get("final_score",
+                                                           p.get("score", 50))) / 50.0))
+        form = p.get("form")
+        primary = primary_roles.get(pname)
+        prole = p.get("role", "")
+        # Only consider champions valid for the player's ASSIGNED role this draft.
+        # Stops e.g. recommending Yasuo ban for a player slotted SUP just because
+        # they have ranked Yasuo games from mid.
+        role_pool = ROLE_VALID.get(prole, set())
+
+        ih_list = inhouse_champs.get(pname, []) or []
+        any_data = False
+        for ch in ih_list:
+            cname = ch.get("champ")
+            if not cname:
+                continue
+            if role_pool and cname not in role_pool:
+                continue
+            g = parse_float(ch.get("games", 0))
+            if g < 3:
+                continue
+            any_data = True
+            wr   = parse_wr(ch.get("wr", "50%"))
+            kda  = parse_float(ch.get("kda"), 1.5)
+            wr_post = shrink_wr_from_pct(wr, g)
+            kda_factor = min(kda / 2.5, 1.6)
+            # Sample-size weight (sqrt-like but log-based, more conservative on big N)
+            ssz = math.log(1.0 + g) / math.log(11.0)   # 1.0 at 10 games
+            ssz = min(ssz * 1.2, 1.4)
+            role_factor = 1.0
+            if primary and primary == ROLE_NORM.get(prole, prole):
+                role_factor = 1.15
+            threat = wr_post * ssz * kda_factor * rank_weight * role_factor
+            threat *= form_multiplier(form)
+            if cname not in seen or threat > seen[cname]["threat_raw"]:
+                seen[cname] = {
+                    "champion": cname, "player": pname,
+                    "games": int(g), "wr": round(wr, 1),
+                    "kda": round(kda, 2),
+                    "threat_raw": threat,
+                    "phase_reason": "",
+                }
+
+        # Scout-sheet champion pool (ranked + draft). Real per-champ games/wr/kda
+        # — much stronger threat signal than the name-only top_champs fallback.
+        # Discount slightly vs customs since pool is across-role and lower stakes.
+        # Phase 2: when the scout sheet provides per-game `results` chronology
+        # (column M, last ~100 ranked+draft games), blend recency-weighted WR
+        # into the threat so a hot streak on a champion bumps its threat above
+        # a lifetime-aggregate equivalent.
+        for ch in (scout_champs.get(pname, []) or []):
+            cname = ch.get("champ")
+            if not cname:
+                continue
+            if role_pool and cname not in role_pool:
+                continue
+            g = parse_float(ch.get("games", 0))
+            if g < 3:
+                continue
+            wr   = parse_wr(ch.get("wr", "50%"))
+            kda  = parse_float(ch.get("kda"), 1.5)
+            wr_post = shrink_wr_from_pct(wr, g)
+            # Ranked recency: half-life 24 games (vs 18 for customs) reflects
+            # ranked being a lower-stakes signal that decays slower.
+            results = ch.get("results")
+            if results:
+                rec_wr, eff_n = recency_weighted_wr(results, half_life=24.0)
+                if rec_wr is not None and eff_n > 0:
+                    rec_post = shrink_wr(rec_wr * eff_n, eff_n)
+                    wr_post = 0.55 * rec_post + 0.45 * wr_post
+            kda_factor = min(kda / 2.5, 1.6)
+            ssz = math.log(1.0 + g) / math.log(11.0)
+            ssz = min(ssz * 1.2, 1.4)
+            role_factor = 1.0
+            if primary and primary == ROLE_NORM.get(prole, prole):
+                role_factor = 1.15
+            # 0.85 multiplier mirrors _SCOUT_CHAMPS_WEIGHT — customs threat wins
+            # on the same champion, but ranked-only threats still register.
+            threat = wr_post * ssz * kda_factor * rank_weight * role_factor * _SCOUT_CHAMPS_WEIGHT
+            threat *= form_multiplier(form)
+            any_data = True
+            if cname not in seen or threat > seen[cname]["threat_raw"]:
+                seen[cname] = {
+                    "champion": cname, "player": pname,
+                    "games": int(g), "wr": round(wr, 1),
+                    "kda": round(kda, 2),
+                    "threat_raw": threat,
+                    "phase_reason": "",
+                }
+
+        # Top champs fallback (player has no inhouse or scout-sheet history)
+        if not any_data:
+            for champ in (p.get("top_champs") or [])[:5]:
+                if not champ or champ in seen:
+                    continue
+                # Same role-pool filter — don't recommend ranked-champs that
+                # aren't a fit for the player's assigned role this draft.
+                if role_pool and champ not in role_pool:
+                    continue
+                seen[champ] = {
+                    "champion": champ, "player": pname,
+                    "games": 0, "wr": 50.0, "kda": 2.0,
+                    "threat_raw": 0.20 * rank_weight,
+                    "phase_reason": "",
+                }
+
+    # Apply coverage discount (your picks counter this champ → safer to leave open)
+    own_picks = [c for c in (own_picks or []) if c and c != "?"]
+    for cname, info in seen.items():
+        coverage = team_counter_coverage(own_picks, cname) if own_picks else 0.0
+        # Up to 40% threat reduction if perfectly countered
+        info["threat"] = info["threat_raw"] * (1.0 - 0.40 * min(coverage * 2.0, 1.0))
+        info["coverage"] = round(coverage, 2)
+
+    final = sorted(seen.values(), key=lambda x: -x["threat"])
+
+    # Add phase / priority labels
+    for i, b in enumerate(final[:n_bans]):
+        if   i < 2: b["priority"] = "HIGH"
+        elif i < 4: b["priority"] = "MEDIUM"
+        else:       b["priority"] = "LOW"
+
+        cov = b.get("coverage", 0.0)
+        g = b.get("games", 0)
+        wr = b.get("wr", 50.0)
+        if cov >= 0.30:
+            b["phase_reason"] = f"Threat exists but {b.get('player','team')} pick counters it"
+        elif g >= 8 and wr >= 65:
+            b["phase_reason"] = f"Must ban — {int(wr)}% WR over {g} games"
+        elif i < 3 and g >= 3:
+            b["phase_reason"] = f"High threat — {int(wr)}% WR / {b.get('kda',0):.1f} KDA"
+        elif g >= 3:
+            b["phase_reason"] = f"Counter-pick threat — {int(wr)}% WR"
+        else:
+            b["phase_reason"] = "Comfort pick — monitor this player"
+
+        b["threat"] = round(b["threat"], 2)
+        b.pop("threat_raw", None)
+
+    top = final[:n_bans]
+    return [b["champion"] for b in top], top
 
 
 # ============================================================================
@@ -1393,20 +1607,62 @@ def compute_matchups(
     blue_picks: Sequence[str] = (),
     red_picks: Sequence[str] = (),
 ) -> List[Tuple[str, str, str, float, str]]:
-    """Proxy → /api/engine/matchups. Returns list of tuples for the UI."""
-    from data import engine_api
-    r = engine_api.matchups(
-        list(blue), list(red),
-        primary_roles=primary_roles,
-        blue_picks=dict(blue_picks) if isinstance(blue_picks, dict) else None,
-        red_picks=dict(red_picks)  if isinstance(red_picks,  dict) else None,
-    )
-    if r is None:
-        return []
-    # The server returns the original list-of-tuples format JSON-serialized as
-    # a list of lists. Re-tuple for the callers that unpack positionally.
-    rows = r if isinstance(r, list) else (r.get("matchups") or r.get("rows") or [])
-    return [tuple(row) for row in rows]
+    """
+    Per-lane matchup. Player-score diff + role-main bonus + champion matchup +
+    form modifier. Returns list of (role, blue_name, red_name, blue_win_pct, note).
+    """
+    primary_roles = primary_roles or {}
+    rows: List[Tuple[str, str, str, float, str]] = []
+    for i, (bp, rp) in enumerate(zip(blue, red)):
+        role = ROLES_UPPER[i]
+        bs   = parse_float(bp.get("final_score", bp.get("score", 50)), 50)
+        rs   = parse_float(rp.get("final_score", rp.get("score", 50)), 50)
+        diff = bs - rs
+
+        blue_adv = 50.0 + diff * 0.5
+
+        bn = bp.get("name", "?")
+        rn = rp.get("name", "?")
+
+        b_main = primary_roles.get(bn)
+        r_main = primary_roles.get(rn)
+        role_norm = ROLE_NORM.get(role, role)
+        if b_main == role_norm: blue_adv += 4.0
+        if r_main == role_norm: blue_adv -= 4.0
+
+        # Champion matchup
+        bc = blue_picks[i] if i < len(blue_picks) and blue_picks[i] not in (None, "?") else None
+        rc = red_picks[i]  if i < len(red_picks)  and red_picks[i]  not in (None, "?") else None
+        cm = 0.0
+        if bc and rc:
+            cm += LANE_MATCHUPS.get((bc, rc), 0.0)
+            cm -= LANE_MATCHUPS.get((rc, bc), 0.0)
+        blue_adv += cm
+
+        # Form
+        bf = form_multiplier(bp.get("form")); rf = form_multiplier(rp.get("form"))
+        # Hot form adds ~3%, cold form subtracts ~3%
+        blue_adv += (bf - 1.0) * 30.0 - (rf - 1.0) * 30.0
+
+        blue_adv = max(20.0, min(80.0, blue_adv))
+
+        # Note generation
+        parts = []
+        if   abs(diff) >= 20: parts.append(f"{'Blue' if diff>0 else 'Red'} +{abs(diff):.0f} score")
+        elif abs(diff) >= 8:  parts.append("Close skill match")
+        else:                 parts.append("Even matchup")
+        if   b_main == role_norm:        parts.append(f"{bn} on main")
+        elif b_main and b_main != role_norm: parts.append(f"{bn} off-role ({b_main})")
+        if   r_main == role_norm:        parts.append(f"{rn} on main")
+        elif r_main and r_main != role_norm: parts.append(f"{rn} off-role ({r_main})")
+        if bc and rc and abs(cm) >= 3:
+            parts.append(f"{'Blue' if cm>0 else 'Red'} champ edge")
+        if bp.get("form","").upper() == "HOT": parts.append(f"{bn} HOT")
+        if rp.get("form","").upper() == "HOT": parts.append(f"{rn} HOT")
+
+        note = "  ·  ".join(parts[:3])
+        rows.append((role, bn, rn, round(blue_adv, 1), note))
+    return rows
 
 
 # ============================================================================
