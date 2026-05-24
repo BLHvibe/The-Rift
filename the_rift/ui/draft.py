@@ -1517,22 +1517,54 @@ def _lobby_begin_synced():
 
 
 def _board_begin_synced():
-    """Legacy callback retained for compatibility. The new join-flow uses
-    _lobby_begin_synced (above). This stays for any callsite that still
-    expects an immediate BOARD transition, and as the fallback when the
-    server reports it's already in BOARD/DONE (i.e. you joined late to an
-    in-progress draft)."""
-    placeholder = lambda side, i: {
-        "name": f"{side[0]}{i+1}",
-        "tier": "Unranked",
-        "final_score": 50.0,
-        "score": 50.0,
-        "role": _ROLES[i],
-    }
-    blue_players = [placeholder("BLUE", i) for i in range(5)]
-    red_players  = [placeholder("RED",  i) for i in range(5)]
-    draft.board = DraftBoardState(blue_players, red_players,
-                                  our_side=_sync_ui.my_side() or "BLUE")
+    """Transition from a pre-board phase (lobby / scouting / archetype) into
+    BOARD, or seed a fresh board for the late-join case (joining an already-
+    in-progress draft).
+
+    v4.0.6 bugfix: previously this *always* rebuilt draft.board with fresh
+    placeholders, discarding the real player rosters that sync_tick had
+    already mirrored during the lobby. Because sync_tick's per-frame mirror
+    is gated on a players-signature cache that didn't change across the
+    transition (server's player state was stable), the placeholders never
+    got re-mirrored — so every action on the board ran against B1/R1/...
+    with no top_champs, no scout data, and no inhouse history. The engine
+    returned empty suggestions and the TOP CALL hero rendered "NO STRONG
+    CALL" for the entire draft.
+
+    Now: preserve the existing board when one is present (the normal
+    lobby→board flow). Only build a fresh one for the cold late-join case,
+    and even then, seed players from the current server snapshot before
+    falling back to placeholders."""
+    if draft.board is None:
+        snap_players = {}
+        try:
+            from data import draft_sync as _ds
+            client = _ds.active()
+            if client is not None:
+                snap = client.state() or {}
+                snap_players = (snap.get("state") or {}).get("players") or {}
+        except Exception:
+            snap_players = {}
+
+        def _seed(side: str, i: int):
+            pl = snap_players.get(side) or []
+            if i < len(pl) and isinstance(pl[i], dict) and pl[i].get("name"):
+                p = dict(pl[i])
+                p["role"] = _ROLES[i]
+                return p
+            return {
+                "name": f"{side[0]}{i+1}",
+                "tier": "Unranked",
+                "final_score": 50.0,
+                "score": 50.0,
+                "role": _ROLES[i],
+            }
+
+        blue_players = [_seed("BLUE", i) for i in range(5)]
+        red_players  = [_seed("RED",  i) for i in range(5)]
+        draft.board = DraftBoardState(blue_players, red_players,
+                                      our_side=_sync_ui.my_side() or "BLUE")
+
     draft.board_pool_search = ""
     draft.board_pool_scroll = 0
     draft.board_target_arch = None
