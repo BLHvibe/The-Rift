@@ -365,6 +365,68 @@ def rivalries(name: str, limit: int = 50,
     return out[:int(limit)]
 
 
+def h2h_matrix(players: Iterable[str]) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Phase 3 (v4.0.5) — full head-to-head matrix for a roster, in one trip.
+
+    For each ordered pair (A, B) where A != B, returns the same shape that
+    `rivalries()` emits per opponent:
+        {games_vs, wins_vs, games_with, wins_with, last_played}
+
+    Result is keyed as `out[A][B]`. Pairs with zero shared games are omitted
+    from the inner dict so the client can render a "no data" cell. Matches
+    where neither side of the pair was present are skipped automatically by
+    the JOIN.
+    """
+    elig = _norm_eligible(players)
+    out: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    if not elig:
+        return out
+    for name in elig:
+        out[name] = {}
+    conn = _conn()
+    ph = ",".join("?" * len(elig))
+    args: List[Any] = list(elig) + list(elig)
+    rows = conn.execute(
+        f"""
+        SELECT
+            mine.player  AS me,
+            other.player AS opp,
+            mine.team    AS my_team,
+            other.team   AS their_team,
+            mine.win     AS my_win,
+            m.started_at AS started_at
+        FROM participants mine
+        JOIN participants other
+            ON other.match_id = mine.match_id
+           AND other.player   != mine.player
+        JOIN matches m ON m.id = mine.match_id
+        WHERE mine.player IN ({ph})
+          AND other.player IN ({ph})
+        """,
+        args).fetchall()
+    for r in rows:
+        me, opp = r["me"], r["opp"]
+        if not me or not opp:
+            continue
+        slot = out[me].setdefault(opp, {
+            "games_vs":    0, "wins_vs":   0,
+            "games_with":  0, "wins_with": 0,
+            "last_played": None,
+        })
+        same_team = (r["my_team"] == r["their_team"])
+        win = bool(r["my_win"])
+        if same_team:
+            slot["games_with"] += 1
+            if win: slot["wins_with"] += 1
+        else:
+            slot["games_vs"] += 1
+            if win: slot["wins_vs"] += 1
+        ts = r["started_at"]
+        if ts and (slot["last_played"] is None or ts > slot["last_played"]):
+            slot["last_played"] = ts
+    return out
+
+
 def records(eligible: Optional[Iterable[str]] = None) -> Dict[str, Any]:
     """Phase 3 — curated league records / superlatives. Each entry is None
     (no data yet) or a dict with the holder + numeric value + match context.

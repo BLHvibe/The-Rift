@@ -36,7 +36,8 @@ def _split_players(players: Optional[str]) -> Optional[list]:
     return out or None
 
 from db import (init as db_init, upsert_match, list_matches, get_match,
-                player_matches, rivalries, records, stats as db_stats,
+                player_matches, rivalries, h2h_matrix,
+                records, stats as db_stats,
                 export_all,
                 # Phase 4c — Seasons
                 list_seasons, create_season, season_standings, auto_seed_season,
@@ -121,6 +122,18 @@ async def api_player_rivalries(name: str, limit: int = 50,
     return JSONResponse({"player": name,
                          "rivalries": rivalries(name, limit=limit,
                                                 eligible=_split_players(players))})
+
+
+@router.get("/h2h-matrix")
+async def api_h2h_matrix(players: Optional[str] = None) -> JSONResponse:
+    """Full head-to-head matrix for a roster, in one trip. `players` is a
+    comma-separated list of riot summoner names (the value participants.player
+    holds). Returns {matrix: {A: {B: {games_vs, wins_vs, ...}, ...}, ...}}.
+
+    Omitting `players` returns an empty matrix — the client always knows its
+    roster and we want to avoid accidentally fanning out across every player
+    in the DB."""
+    return JSONResponse({"matrix": h2h_matrix(_split_players(players) or [])})
 
 
 @router.get("/records")

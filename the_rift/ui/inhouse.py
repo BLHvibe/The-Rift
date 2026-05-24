@@ -8,7 +8,7 @@ import math, time, random as _rnd, os, queue as _queue
 import dearpygui.dearpygui as dpg
 from theme import C, RANK_COLORS
 from core.animations import anim
-from data.reader import live, log_inhouse_games_from_client, get_most_games_logged, load_match_history, load_rivalries, load_records
+from data.reader import live, log_inhouse_games_from_client, get_most_games_logged, load_match_history, load_rivalries, load_records, load_h2h_matrix
 from data.tips import TIPS as _TIPS
 from ui.tierlist import _wheel_delta as _wheel_delta_shared
 from ui import effects, toast, fmt, audio
@@ -242,6 +242,12 @@ class InhouseState:
         # Phase 3 — rivalries view: anchor player + per-anchor scroll.
         self.rivalries_anchor    = None
         self.rivalries_scroll    = 0
+        # v4.0.5 — rivalries view is now the H2H MATRIX. Selected pair (row,
+        # col) drives the drill-down panel below the grid. Mode toggle picks
+        # which stats render in each cell.
+        self.matrix_mode         = "vs"      # "vs" | "with" | "combined"
+        self.matrix_selected     = None      # (row_display, col_display)
+        self.matrix_load_kicked  = False     # one-shot loader gate
 
     def reset(self):
         self.__init__()
@@ -576,20 +582,13 @@ def _set_view_mode(target):
             def _err(_msg): inhouse.history_loading = False
             load_match_history(on_done=_done, on_error=_err)
     elif target == "rivalries":
-        # Pick a default anchor if none set yet — prefer the rank-1 inhouse
-        # player (whose name matches the participants table), then fall back to
-        # the most-games-logged Riot ID if no leaderboard is loaded yet.
-        if not inhouse.rivalries_anchor:
-            anchor = None
-            if inhouse.players:
-                try:
-                    anchor = inhouse.players[0].get("player")
-                except (IndexError, AttributeError):
-                    anchor = None
-            if not anchor:
-                anchor = _most_games_player or None
-            if anchor:
-                _set_rivalries_anchor(anchor)
+        # v4.0.5 — fire the matrix loader on first entry. The grid is keyed
+        # on display names (loader resolves to riot summoner names under the
+        # hood), so the empty-state bug from the per-anchor view is gone.
+        if (not live.h2h_matrix_loaded
+                and not inhouse.matrix_load_kicked):
+            inhouse.matrix_load_kicked = True
+            load_h2h_matrix()
         inhouse.rivalries_scroll = 0
     elif target == "records":
         # Kick off load on first entry; cheap to recompute server-side.
@@ -840,228 +839,357 @@ def _draw_champ_strip(dl, x, y, w, players, side_color):
              (*C["txt"][:3], 230), 13, "raj_r_14")
 
 
-_RIV_COLS = (
-    ("OPPONENT",    0.30),
-    ("TOGETHER",    0.12),
-    ("VS RECORD",   0.20),
-    ("WITH RECORD", 0.20),
-    ("LAST PLAYED", 0.18),
-)
+# v4.0.5 — rivalries is now a full H2H matrix: rows × cols of every roster
+# player against every other, color-coded by win rate, with a VS / WITH /
+# COMBINED mode toggle and a click-to-drill panel below the grid.
+
+_MATRIX_MODES = (("VS", "vs"), ("WITH", "with"), ("COMBINED", "combined"))
+
+# Click hit rects emitted by _draw_rivalries each frame:
+#   (kind, x, y, w, h, payload)
+# kind = "matrix_mode" (payload = mode str) | "matrix_cell" (payload = (row, col))
+_matrix_hits: list = []
+
+
+def _inhouse_mouse_xy():
+    """v4.0.5 — content-drawlist mouse position. Replaces the old
+    `(mouse - vp - 68, mouse - vp - 52)` idiom that broke when the sidebar
+    animated open. Reads the actual content_dl rect_min."""
+    try:
+        mouse = dpg.get_mouse_pos(local=False)
+        vp = dpg.get_viewport_pos()
+        st = dpg.get_item_state("content_dl") or {}
+        rm = st.get("rect_min")
+        if rm and len(rm) >= 2:
+            return (mouse[0] - float(rm[0]),
+                    mouse[1] - float(rm[1]))
+        # Fallback: legacy collapsed-sidebar offsets.
+        return (mouse[0] - vp[0] - 68, mouse[1] - vp[1] - 52)
+    except Exception:
+        return (0.0, 0.0)
+
+
+def _matrix_cell_stats(stats, mode):
+    """Pick (wins, games) for a given mode out of a single cell's stat dict.
+    Returns (0, 0) when the slot is empty / missing."""
+    if not stats:
+        return 0, 0
+    gv = int(stats.get("games_vs") or 0)
+    wv = int(stats.get("wins_vs") or 0)
+    gw = int(stats.get("games_with") or 0)
+    ww = int(stats.get("wins_with") or 0)
+    if mode == "vs":
+        return wv, gv
+    if mode == "with":
+        return ww, gw
+    return wv + ww, gv + gw   # combined
+
+
+def _matrix_cell_color(wins, games):
+    """Map (wins, games) → (fill_rgb, txt_rgb, alpha). 50% lands on neutral
+    navy; brighter on the wing → fewer rows. Brightness scales with sample
+    size so 1-game outliers don't shout."""
+    if games <= 0:
+        return ((26, 38, 60), (110, 122, 140), 70)
+    wr = wins / games
+    # Sample-size confidence — fully saturated by 10 games.
+    conf = min(1.0, games / 10.0)
+    # Distance from 50%, scaled by conf, gives saturation.
+    sat = abs(wr - 0.5) * 2.0 * conf      # 0..1
+    if wr >= 0.5:
+        # Green wing — blend navy → win color.
+        base = (95, 201, 122)   # C["win"] approx
+    else:
+        base = (226, 106, 106)  # C["loss"] approx
+    navy = (28, 40, 64)
+    fill = tuple(int(navy[i] + (base[i] - navy[i]) * sat) for i in range(3))
+    # Text color: navy on bright cells, txt on faded.
+    if sat >= 0.45:
+        txt = (10, 20, 40)
+    else:
+        txt = (217, 222, 234)
+    return (fill, txt, 230)
 
 
 def _draw_rivalries(dl, tx, ty, tw, th, vw, vh):
-    """Phase 3 — RIVALRIES view: per-opponent head-to-head records for the
-    anchor player. Click an opponent to make them the new anchor."""
-    anchor = inhouse.rivalries_anchor
-    # Header strip
-    _txt(dl, tx, ty + 0, "RIVALRIES",
+    """v4.0.5 — H2H MATRIX. Replaces the per-anchor rivalries table with a
+    grid of every roster player against every other. Color = win rate. Click
+    a cell to drill into that pair below the grid. VS / WITH / COMBINED mode
+    toggle in the header.
+
+    Names are display-name on both axes — the loader resolves to riot
+    summoner names server-side, so the old empty-state bug is gone."""
+    _matrix_hits.clear()
+
+    # ── Header strip ───────────────────────────────────────────────────
+    _txt(dl, tx, ty + 0, "HEAD-TO-HEAD MATRIX",
          (*C["gold"][:3], 220), 21, "raj_sb_18")
-
-    if not anchor:
-        _txt(dl, tx, ty + 60,
-             "No anchor player yet — load inhouse data and try again.",
-             (*C["txt_dim"][:3], 200), 17, "raj_r_16")
-        return
-
-    rows = live.rivalries.get(anchor)
-    loaded = live.rivalries_loaded.get(anchor, False)
-    err = live.rivalries_error
-
-    _txt(dl, tx + 160, ty + 4,
-         f"anchor: {anchor}", (*C["gold_lt"][:3], 220), 17, "raj_sb_16")
-    _txt(dl, tx, ty + 28,
-         "Click an opponent to make them the new anchor.",
+    _txt(dl, tx, ty + 26,
+         "Row beats column. Color = win rate · brightness = sample size · click a cell to drill in.",
          (*C["txt_dim"][:3], 180), 14, "raj_r_14")
 
-    # Column header
-    hdr_y = ty + 56
-    col_cur = 0
-    col_xs  = []
-    for _, frac in _RIV_COLS:
-        cw = int(tw * frac)
-        col_xs.append((col_cur, cw))
-        col_cur += cw
-    dpg.draw_rectangle((tx, hdr_y - 4), (tx + tw, hdr_y + 22),
-                       fill=(*C["card"][:3], 160),
-                       color=(0, 0, 0, 0), rounding=3, parent=dl)
-    for (lbl, _), (cx, _) in zip(_RIV_COLS, col_xs):
-        _txt(dl, tx + cx + 10, hdr_y, lbl,
-             (*C["txt_dim"][:3], 220), 14, "raj_sb_14")
+    # Mode toggle (VS / WITH / COMBINED) — right-aligned on the header line.
+    pill_h = 26
+    pill_w = 92
+    pill_gap = 4
+    seg_x = tx + tw - (pill_w * len(_MATRIX_MODES) + pill_gap * (len(_MATRIX_MODES) - 1))
+    seg_y = ty - 2
+    for i, (lbl, mode) in enumerate(_MATRIX_MODES):
+        px = seg_x + i * (pill_w + pill_gap)
+        is_active = (inhouse.matrix_mode == mode)
+        fill = (*C["gold_dk"][:3], 200) if is_active else (*C["card"][:3], 200)
+        bdr  = (*C["gold"][:3], 220)    if is_active else (*C["gold"][:3], 80)
+        lblc = (*C["gold_lt"][:3], 240) if is_active else (*C["txt2"][:3], 200)
+        dpg.draw_rectangle((px, seg_y), (px + pill_w, seg_y + pill_h),
+                           fill=fill, color=bdr, rounding=4, parent=dl)
+        text_off = max(0, (pill_w - len(lbl) * 8) // 2)
+        _txt(dl, px + text_off, seg_y + 5, lbl, lblc, 14, "raj_sb_14")
+        _matrix_hits.append(("matrix_mode", px, seg_y, pill_w, pill_h, mode))
 
-    rows_top = hdr_y + 30
-    rows_bot = ty + th - 8
-
-    # Loading skeleton — visible until the per-anchor fetch resolves.
-    if not loaded:
-        for i in range(8):
-            effects.draw_skeleton_row(dl, tx, rows_top + i * 40, tw, 32)
-        return
-
-    # Error state — fetch failed entirely.
-    if err and not rows:
-        _txt(dl, tx, rows_top, f"Could not load rivalries: {err[:80]}",
-             (*C["loss"][:3], 220), 16, "raj_r_16")
-        _txt(dl, tx, rows_top + 24,
-             "Pick another anchor below, or check the server connection.",
-             (*C["txt_dim"][:3], 180), 14, "raj_r_14")
-        # Fall through to show the pick-anchor list of inhouse players.
-        rows = []
-
-    # Loaded but empty — typical when the anchor's display-name doesn't match
-    # the Riot ID stored on the server. Offer a pick-anchor list so the user
-    # can swap to any known inhouse player in one click.
-    if not rows:
-        _txt(dl, tx, rows_top,
-             f"No head-to-head data yet for {anchor.upper()}.",
-             (*C["txt_dim"][:3], 220), 16, "raj_sb_16")
-        _txt(dl, tx, rows_top + 24,
-             "Pick a different anchor — click any name below.",
-             (*C["txt_dim"][:3], 180), 14, "raj_r_14")
-        _draw_anchor_picker(dl, tx, rows_top + 56, tw, rows_bot, anchor)
-        return
-
-    # Apply search filter
+    # ── Roster ─────────────────────────────────────────────────────────
+    # The loader is keyed on live.players (display names). Filter via the
+    # top-bar search field too so the matrix obeys it.
+    roster = list(live.players or [])
     ft = inhouse.filter_text.strip().lower()
     if ft:
-        rows = [r for r in rows if ft in (r.get("opponent") or "").lower()]
+        roster = [n for n in roster if ft in n.lower()]
 
-    # Wheel-scroll
-    row_h = 34
-    row_gap = 6
-    visible_h = max(0, rows_bot - rows_top)
-    total_h = len(rows) * (row_h + row_gap)
-    max_scroll = max(0, total_h - visible_h)
-    if _wheel_delta_shared[0] != 0:
-        inhouse.rivalries_scroll = max(0, min(
-            inhouse.rivalries_scroll - _wheel_delta_shared[0] * 30, max_scroll))
-        _wheel_delta_shared[0] = 0
-    inhouse.rivalries_scroll = max(0, min(inhouse.rivalries_scroll, max_scroll))
-    scroll = int(inhouse.rivalries_scroll)
+    grid_top = ty + 60
 
-    # Cursor for hover / click
-    _m  = dpg.get_mouse_pos(local=False)
-    _vp = dpg.get_viewport_pos()
-    mrx = _m[0] - _vp[0] - 68
-    mry = _m[1] - _vp[1] - 52
-    clicked = dpg.is_mouse_button_clicked(0)
-
-    for i, r in enumerate(rows):
-        ry = rows_top + i * (row_h + row_gap) - scroll
-        if ry + row_h < rows_top or ry > rows_bot:
-            continue
-        opp = r.get("opponent") or "?"
-        is_hov = (tx <= mrx <= tx + tw and ry <= mry <= ry + row_h)
-        glow = effects.hover_amt(f"riv_{opp}", is_hov)
-        bg_a = 140 + int(60 * glow)
-        dpg.draw_rectangle((tx, ry), (tx + tw, ry + row_h),
-                           fill=(*C["card"][:3], bg_a),
-                           color=(*C["gold"][:3], 60 + int(120 * glow)),
-                           rounding=4, parent=dl)
-
-        # Compute per-row strings
-        gv = int(r.get("games_vs", 0));   wv = int(r.get("wins_vs", 0))
-        gw = int(r.get("games_with", 0)); ww = int(r.get("wins_with", 0))
-        total = gv + gw
-        lv = gv - wv; lw = gw - ww
-        vs_rec   = f"{wv}-{lv}" if gv else "—"
-        with_rec = f"{ww}-{lw}" if gw else "—"
-        vs_pct   = f"{fmt.pct(wv, of=gv)}" if gv else ""
-        with_pct = f"{fmt.pct(ww, of=gw)}" if gw else ""
-        last     = (r.get("last_played") or "—").replace("T", " ").replace("Z", "")
-        last     = last[:10] if last and last != "—" else "—"
-
-        # Colors per win-rate
-        def _wr_col(w, g):
-            if g <= 0: return C["txt_dim"]
-            pct_ = (w / g) * 100
-            return C["win"] if pct_ >= 52 else (C["loss"] if pct_ < 48 else C["txt"])
-
-        vs_col_   = _wr_col(wv, gv)
-        with_col_ = _wr_col(ww, gw)
-
-        # Render columns
-        cell_y = ry + 9
-        # OPPONENT
-        cx, _ = col_xs[0]
-        _txt(dl, tx + cx + 10, cell_y, opp.upper(),
-             (*C["gold_lt"][:3], 240), 16, "raj_sb_16")
-        # TOGETHER
-        cx, _ = col_xs[1]
-        _txt(dl, tx + cx + 10, cell_y, str(total),
-             (*C["txt"][:3], 220), 15, "raj_16")
-        # VS
-        cx, _ = col_xs[2]
-        _txt(dl, tx + cx + 10, cell_y, vs_rec,
-             (*vs_col_[:3], 230), 16, "raj_sb_16")
-        if vs_pct:
-            _txt(dl, tx + cx + 70, cell_y + 2, vs_pct,
-                 (*C["txt_dim"][:3], 180), 13, "raj_r_14")
-        # WITH
-        cx, _ = col_xs[3]
-        _txt(dl, tx + cx + 10, cell_y, with_rec,
-             (*with_col_[:3], 230), 16, "raj_sb_16")
-        if with_pct:
-            _txt(dl, tx + cx + 70, cell_y + 2, with_pct,
-                 (*C["txt_dim"][:3], 180), 13, "raj_r_14")
-        # LAST PLAYED
-        cx, _ = col_xs[4]
-        _txt(dl, tx + cx + 10, cell_y, last,
-             (*C["txt_dim"][:3], 200), 14, "raj_r_14")
-
-        # Click → swap anchor
-        if clicked and is_hov:
-            audio.play_click()
-            _set_rivalries_anchor(opp)
-            clicked = False
-            return  # rows about to change; bail this frame
-
-
-def _draw_anchor_picker(dl, tx, ty, tw, ty_bot, current_anchor):
-    """When the current anchor has no rivalry data, show a clickable grid of
-    every known inhouse player so the user can switch in one click instead of
-    being stuck on an empty state."""
-    names = []
-    seen = set()
-    for p in (inhouse.players or []):
-        nm = (p.get("player") or "").strip()
-        if nm and nm.lower() != (current_anchor or "").lower() and nm not in seen:
-            seen.add(nm)
-            names.append(nm)
-    if not names:
+    # Loading / empty / error states.
+    matrix = live.h2h_matrix or {}
+    if not live.h2h_matrix_loaded:
+        for i in range(8):
+            effects.draw_skeleton_row(dl, tx, grid_top + i * 40, tw, 32)
         return
-    chip_h = 30
-    chip_gap = 8
-    pad_x = 14
-    # Three columns of chips, responsive width.
-    cols = max(1, min(4, tw // 220))
-    chip_w = (tw - chip_gap * (cols - 1)) // cols
-    _m = dpg.get_mouse_pos(local=False)
-    _vp = dpg.get_viewport_pos()
-    mrx = _m[0] - _vp[0] - 68
-    mry = _m[1] - _vp[1] - 52
-    clicked = dpg.is_mouse_button_clicked(0)
-    for i, nm in enumerate(names):
-        col = i % cols
-        row = i // cols
-        cx = tx + col * (chip_w + chip_gap)
-        cy = ty + row * (chip_h + chip_gap)
-        if cy + chip_h > ty_bot:
-            break
-        is_hov = (cx <= mrx <= cx + chip_w and cy <= mry <= cy + chip_h)
-        glow = effects.hover_amt(f"anchor_chip_{nm}", is_hov)
-        fill_a = 160 + int(60 * glow)
-        bdr_a = 80 + int(140 * glow)
-        dpg.draw_rectangle((cx, cy), (cx + chip_w, cy + chip_h),
-                           fill=(*C["card"][:3], fill_a),
-                           color=(*C["gold"][:3], bdr_a),
-                           rounding=4, parent=dl)
-        _txt(dl, cx + pad_x, cy + 7, nm.upper(),
-             (*C["gold_lt"][:3], 230), 14, "raj_sb_14")
-        if clicked and is_hov:
-            audio.play_click()
-            _set_rivalries_anchor(nm)
-            clicked = False
-            return
+    if live.h2h_matrix_error and not matrix:
+        _txt(dl, tx, grid_top, f"Could not load matrix: {str(live.h2h_matrix_error)[:80]}",
+             (*C["loss"][:3], 230), 16, "raj_r_16")
+        return
+    if not roster:
+        _txt(dl, tx, grid_top, "No roster — load inhouse data first.",
+             (*C["txt_dim"][:3], 220), 16, "raj_sb_16")
+        return
+
+    # ── Geometry ──────────────────────────────────────────────────────
+    n = len(roster)
+    # Drill-down panel below grid takes ~150px; reserve that.
+    drill_h = 150
+    avail_w = tw - 20
+    avail_h = (ty + th) - grid_top - drill_h - 20
+    row_lbl_w = max(86, min(110, avail_w // (n + 3)))
+    col_hdr_h = 36
+    # Cell size — keep cells roughly square, bounded so tiny rosters don't
+    # explode and huge ones don't shrink past readability.
+    cell_w = max(38, min(64, (avail_w - row_lbl_w) // max(n, 1)))
+    cell_h = max(32, min(48, (avail_h - col_hdr_h) // max(n, 1)))
+    grid_x0 = tx + 8 + row_lbl_w
+    grid_y0 = grid_top + col_hdr_h
+    grid_x1 = grid_x0 + cell_w * n
+    grid_y1 = grid_y0 + cell_h * n
+
+    # ── Column headers (top, abbreviated) ─────────────────────────────
+    for j, col_name in enumerate(roster):
+        cx = grid_x0 + j * cell_w
+        # Highlight the selected column.
+        sel = inhouse.matrix_selected
+        is_sel_col = (sel is not None and sel[1] == col_name)
+        col_hdr_bg = (*C["card"][:3], 200 if is_sel_col else 130)
+        col_hdr_bdr = (*C["gold"][:3], 200 if is_sel_col else 60)
+        dpg.draw_rectangle((cx + 1, grid_top + 4),
+                           (cx + cell_w - 1, grid_y0 - 2),
+                           fill=col_hdr_bg, color=col_hdr_bdr,
+                           rounding=3, parent=dl)
+        # Abbreviated name centered in the column header.
+        abbr = col_name[:5].upper()
+        text_off = max(2, (cell_w - len(abbr) * 7) // 2)
+        _txt(dl, cx + text_off, grid_top + 14, abbr,
+             (*C["gold_lt"][:3], 235 if is_sel_col else 210), 13, "raj_sb_14")
+
+    # ── Row labels + cells ────────────────────────────────────────────
+    mode = inhouse.matrix_mode
+    mx, my = _inhouse_mouse_xy()
+    selected = inhouse.matrix_selected
+    for i, row_name in enumerate(roster):
+        ry = grid_y0 + i * cell_h
+        # Row label (right-aligned to the grid edge).
+        is_sel_row = (selected is not None and selected[0] == row_name)
+        row_bg = (*C["card"][:3], 200 if is_sel_row else 130)
+        row_bdr = (*C["gold"][:3], 200 if is_sel_row else 60)
+        dpg.draw_rectangle((tx + 4, ry + 1),
+                           (grid_x0 - 2, ry + cell_h - 1),
+                           fill=row_bg, color=row_bdr,
+                           rounding=3, parent=dl)
+        # Truncate to fit the column.
+        max_chars = max(4, row_lbl_w // 8)
+        rlbl = row_name[:max_chars].upper()
+        _txt(dl, tx + 12, ry + (cell_h - 14) // 2, rlbl,
+             (*C["gold_lt"][:3], 235 if is_sel_row else 215),
+             13, "raj_sb_14")
+
+        row_stats = matrix.get(row_name) or {}
+        for j, col_name in enumerate(roster):
+            cx = grid_x0 + j * cell_w
+            if row_name == col_name:
+                # Self-cell: dim diagonal slash.
+                dpg.draw_rectangle((cx + 1, ry + 1),
+                                   (cx + cell_w - 1, ry + cell_h - 1),
+                                   fill=(*C["bg"][:3], 200),
+                                   color=(0, 0, 0, 0), parent=dl)
+                _txt(dl, cx + cell_w // 2 - 4, ry + (cell_h - 12) // 2,
+                     "—", (*C["txt_dim"][:3], 150), 12, "raj_r_14")
+                continue
+            stats = row_stats.get(col_name)
+            wins, games = _matrix_cell_stats(stats, mode)
+            fill_rgb, txt_rgb, alpha = _matrix_cell_color(wins, games)
+            # Hover highlight.
+            is_hov = (cx <= mx <= cx + cell_w
+                      and ry <= my <= ry + cell_h)
+            border_a = 235 if is_hov else (180 if (
+                selected is not None and selected == (row_name, col_name))
+                else 70)
+            dpg.draw_rectangle((cx + 1, ry + 1),
+                               (cx + cell_w - 1, ry + cell_h - 1),
+                               fill=(*fill_rgb, alpha),
+                               color=(*C["gold"][:3], border_a),
+                               thickness=2 if (is_hov or border_a > 200) else 1,
+                               rounding=3, parent=dl)
+            if games > 0:
+                losses = games - wins
+                rec = f"{wins}-{losses}"
+                rec_off = max(2, (cell_w - len(rec) * 7) // 2)
+                _txt(dl, cx + rec_off, ry + (cell_h - 13) // 2,
+                     rec, (*txt_rgb, 240), 13, "raj_sb_14")
+            else:
+                _txt(dl, cx + cell_w // 2 - 4, ry + (cell_h - 12) // 2,
+                     "·", (*C["txt_dim"][:3], 130), 14, "raj_r_14")
+            _matrix_hits.append(("matrix_cell", cx, ry, cell_w, cell_h,
+                                 (row_name, col_name)))
+
+    # ── Legend (left) + summary chip (right) ─────────────────────────
+    leg_y = grid_y1 + 8
+    swatch_w = 16
+    swatches = [
+        ((226, 106, 106), "≤25%"),
+        ((178, 90, 100),  "40%"),
+        ((40, 56, 80),    "≈50%"),
+        ((150, 178, 110), "60%"),
+        ((95, 201, 122),  "≥75%"),
+    ]
+    lx = tx + 8
+    _txt(dl, lx, leg_y + 2, "WIN-RATE",
+         (*C["txt_dim"][:3], 200), 11, "raj_sb_12")
+    lx += 70
+    for col, lbl in swatches:
+        dpg.draw_rectangle((lx, leg_y),
+                           (lx + swatch_w, leg_y + 14),
+                           fill=(*col, 220), color=(0, 0, 0, 0),
+                           rounding=2, parent=dl)
+        _txt(dl, lx + swatch_w + 4, leg_y + 1, lbl,
+             (*C["txt"][:3], 220), 11, "raj_r_12")
+        lx += swatch_w + 4 + len(lbl) * 7 + 12
+
+    # ── Drill-down panel ─────────────────────────────────────────────
+    drill_y0 = leg_y + 24
+    drill_y1 = ty + th - 8
+    _draw_matrix_drilldown(dl, tx, drill_y0, tw, drill_y1, selected, matrix)
+
+    # ── Click handling (consume hits emitted above) ──────────────────
+    if dpg.is_mouse_button_clicked(0):
+        for kind, hx, hy, hw, hh, payload in list(_matrix_hits):
+            if not (hx <= mx <= hx + hw and hy <= my <= hy + hh):
+                continue
+            if kind == "matrix_mode":
+                if inhouse.matrix_mode != payload:
+                    inhouse.matrix_mode = payload
+                    audio.play_click()
+                break
+            if kind == "matrix_cell":
+                row_name, col_name = payload
+                if row_name == col_name:
+                    break
+                # Toggle off if same cell clicked again.
+                if inhouse.matrix_selected == payload:
+                    inhouse.matrix_selected = None
+                else:
+                    inhouse.matrix_selected = payload
+                audio.play_click()
+                break
+
+
+def _draw_matrix_drilldown(dl, tx, ty, tw, ty_bot, selected, matrix):
+    """The detail card that sits below the grid. Shows the stats for the
+    clicked cell (row vs col) — VS record, WITH record, last played, streaks.
+    Falls back to a hint when no cell is selected."""
+    panel_h = max(0, ty_bot - ty)
+    if panel_h < 40:
+        return
+    # Frame
+    dpg.draw_rectangle((tx, ty), (tx + tw, ty + panel_h),
+                       fill=(*C["card"][:3], 200),
+                       color=(*C["gold"][:3], 80),
+                       rounding=4, parent=dl)
+    if not selected:
+        _txt(dl, tx + 16, ty + 14, "CLICK A CELL TO DRILL IN",
+             (*C["gold_lt"][:3], 220), 13, "raj_sb_12")
+        _txt(dl, tx + 16, ty + 36,
+             "Each cell shows the row player's wins–losses against (or with) the column player.",
+             (*C["txt_dim"][:3], 200), 14, "raj_r_14")
+        _txt(dl, tx + 16, ty + 58,
+             "Toggle VS / WITH / COMBINED above to repaint the grid.",
+             (*C["txt_dim"][:3], 200), 14, "raj_r_14")
+        return
+    row_name, col_name = selected
+    stats = (matrix.get(row_name) or {}).get(col_name) or {}
+    gv = int(stats.get("games_vs") or 0)
+    wv = int(stats.get("wins_vs") or 0)
+    gw = int(stats.get("games_with") or 0)
+    ww = int(stats.get("wins_with") or 0)
+    last = (stats.get("last_played") or "").replace("T", " ").replace("Z", "")
+    last = _fmt_date(last) if last else "—"
+    lv = gv - wv; lw = gw - ww
+    total = gv + gw
+
+    # Title
+    _txt(dl, tx + 16, ty + 12,
+         f"{row_name.upper()}  ›  vs {col_name.upper()}",
+         (*C["gold_lt"][:3], 245), 19, "raj_sb_18")
+    _txt(dl, tx + 16, ty + 38,
+         f"{total} total customs together — last met {last}",
+         (*C["txt_dim"][:3], 200), 13, "raj_r_14")
+
+    # Mini-stat blocks across the bottom.
+    block_y = ty + 64
+    block_h = panel_h - (block_y - ty) - 12
+    if block_h < 30:
+        return
+    blocks = [
+        ("VS RECORD",  f"{wv}-{lv}" if gv else "—",
+         f"{fmt.pct(wv, of=gv)}" if gv else "no data",
+         "win" if (gv and wv * 2 > gv) else ("loss" if gv else "txt_dim")),
+        ("WITH RECORD", f"{ww}-{lw}" if gw else "—",
+         f"{fmt.pct(ww, of=gw)}" if gw else "no data",
+         "win" if (gw and ww * 2 > gw) else ("loss" if gw else "txt_dim")),
+        ("VS GAMES",    str(gv) if gv else "0", "head-to-head", "gold_lt"),
+        ("WITH GAMES",  str(gw) if gw else "0", "as teammates",  "gold_lt"),
+        ("LAST MET",    last or "—",                     "shared match",   "gold_lt"),
+    ]
+    bw = (tw - 32 - (len(blocks) - 1) * 10) // len(blocks)
+    bx = tx + 16
+    for label, big, sub, color_key in blocks:
+        col_main = C.get(color_key, C["gold_lt"])
+        # Block frame
+        dpg.draw_rectangle((bx, block_y), (bx + bw, block_y + block_h),
+                           fill=(*C["bg"][:3], 220),
+                           color=(*C["gold"][:3], 60),
+                           rounding=3, parent=dl)
+        _txt(dl, bx + 10, block_y + 6, label,
+             (*C["gold"][:3], 220), 11, "raj_sb_12")
+        _txt(dl, bx + 10, block_y + 22, str(big),
+             (*col_main[:3], 240), 22, "raj_sb_22")
+        _txt(dl, bx + 10, block_y + block_h - 22, str(sub)[:18],
+             (*C["txt_dim"][:3], 200), 12, "raj_r_12")
+        bx += bw + 10
 
 
 def _fmt_date(ts):

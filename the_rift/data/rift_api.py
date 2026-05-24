@@ -109,6 +109,19 @@ def get_rivalries(name: str, limit: int = 50,
     return (data or {}).get("rivalries", []) if data else []
 
 
+def get_h2h_matrix(players: Iterable[str]) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Full head-to-head matrix for a roster, in one trip. `players` must be
+    riot summoner names (whatever participants.player holds). Returns
+    `{player_a: {player_b: {games_vs, wins_vs, games_with, wins_with,
+    last_played}, ...}, ...}`. Empty pairs are omitted from the inner dict."""
+    qs = _players_qs(players)
+    if not qs:
+        return {}
+    path = "/api/h2h-matrix?" + qs[1:]   # strip leading "&"
+    data = _get(path)
+    return (data or {}).get("matrix", {}) if data else {}
+
+
 def get_records(players: Optional[Iterable[str]] = None) -> Dict[str, Any]:
     """League records / superlatives. Each named entry is None (no data
     yet) or a dict with the holder + numeric value + match context.

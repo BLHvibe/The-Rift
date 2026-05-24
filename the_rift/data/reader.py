@@ -59,6 +59,13 @@ class LiveData:
         self.rivalries_loaded = {}   # anchor_name → bool
         self.rivalries_error  = None
         self._rivalries_inflight = set()  # anchor names currently being fetched
+        # v4.0.5 — Full H2H matrix for the matrix UI. Keyed by display name on
+        # both axes (loader resolves display name ↔ riot summoner name on the
+        # boundary). Empty pairs are omitted from the inner dict.
+        self.h2h_matrix         = {}   # display_a → {display_b → stats dict}
+        self.h2h_matrix_loaded  = False
+        self.h2h_matrix_error   = None
+        self._h2h_matrix_inflight = False
         # Phase 3 — league records / superlatives (dict of named entries).
         self.records          = {}
         self.records_loaded   = False
@@ -2074,11 +2081,94 @@ def load_records(on_done=None, on_error=None):
     threading.Thread(target=_bg, daemon=True, name="records").start()
 
 
+def _display_to_riot_map():
+    """v4.0.5 — reverse of live.summoner_map. Maps display name → riot
+    game-name (the value participants.player stores). Empty when the Players
+    sheet hasn't loaded yet."""
+    sm = getattr(live, "summoner_map", None) or {}
+    return {disp: game for game, disp in sm.items() if game and disp}
+
+
+def _riot_to_display_map():
+    """v4.0.5 — straight pass-through of live.summoner_map. Lookup helper
+    for the matrix UI so opponent fields (riot names) render as display
+    names. Returns the actual dict — caller should not mutate."""
+    return getattr(live, "summoner_map", None) or {}
+
+
+def _resolve_riot_name(display_or_riot, d2r=None):
+    """Map a display name (e.g. "Ben") to its riot game-name ("Chupacabra117").
+    If the input is already a riot name (i.e. already a key in summoner_map),
+    return it unchanged. Falls back to the input string when no mapping
+    exists so the UI can still try whatever the user typed."""
+    if not display_or_riot:
+        return ""
+    d2r = d2r if d2r is not None else _display_to_riot_map()
+    if display_or_riot in d2r:
+        return d2r[display_or_riot]
+    # If it's already a riot name (present as a key in summoner_map) leave it.
+    sm = getattr(live, "summoner_map", None) or {}
+    if display_or_riot in sm:
+        return display_or_riot
+    return display_or_riot
+
+
+def load_h2h_matrix(on_done=None, on_error=None):
+    """v4.0.5 — fetch the full head-to-head matrix for the current roster in
+    one trip. Resolves display names → riot summoner names on the way out and
+    riot names → display names on the way back, so the cache (live.h2h_matrix)
+    is keyed entirely on display names — what the UI shows. Best-effort: on
+    failure leaves the cache empty and surfaces the error on live.h2h_matrix_error."""
+    if live._h2h_matrix_inflight:
+        return
+    live._h2h_matrix_inflight = True
+    def _bg():
+        try:
+            from data import rift_api
+            if not rift_api.is_configured():
+                live.h2h_matrix_error = "data API not configured"
+                if on_error: on_error(live.h2h_matrix_error)
+                return
+            displays = list(live.players or [])
+            d2r = _display_to_riot_map()
+            r2d = _riot_to_display_map()
+            # Resolve roster to riot names; fall back to display name itself
+            # so the server can try a string match either way.
+            riot_names = [_resolve_riot_name(n, d2r) for n in displays]
+            riot_names = [n for n in riot_names if n]
+            raw = rift_api.get_h2h_matrix(riot_names) or {}
+            # Translate the matrix back to display-name space.
+            translated: Dict[str, Dict[str, Dict[str, Any]]] = {}
+            for me_riot, opps in raw.items():
+                me_disp = r2d.get(me_riot, me_riot)
+                translated.setdefault(me_disp, {})
+                for opp_riot, stats in (opps or {}).items():
+                    opp_disp = r2d.get(opp_riot, opp_riot)
+                    translated[me_disp][opp_disp] = stats
+            with live._lock:
+                live.h2h_matrix = translated
+                live.h2h_matrix_loaded = True
+                live.h2h_matrix_error = None
+            if on_done: on_done(len(translated))
+        except Exception as e:
+            with live._lock:
+                live.h2h_matrix_error = str(e)
+                live.h2h_matrix_loaded = True   # render error state, don't spin
+            if on_error: on_error(str(e))
+        finally:
+            live._h2h_matrix_inflight = False
+    threading.Thread(target=_bg, daemon=True, name="h2h_matrix").start()
+
+
 def load_rivalries(anchor_name, on_done=None, on_error=None):
     """Phase 3 — fetch per-opponent h2h records for `anchor_name` from the
     REST data API and cache on `live.rivalries[anchor_name]`. Best-effort:
     on failure leaves the cache empty and the UI falls back to its empty
-    state."""
+    state.
+
+    v4.0.5: resolves the display name → riot summoner name on the way out and
+    riot names → display names on the way back. participants.player stores
+    riot names; if we query with the display name we get 0 rows."""
     if not anchor_name:
         if on_error: on_error("no anchor name")
         return
@@ -2092,8 +2182,23 @@ def load_rivalries(anchor_name, on_done=None, on_error=None):
                 live.rivalries_error = "data API not configured"
                 if on_error: on_error(live.rivalries_error)
                 return
-            rows = rift_api.get_rivalries(
-                anchor_name, players=_roster_names()) or []
+            d2r = _display_to_riot_map()
+            r2d = _riot_to_display_map()
+            riot_name = _resolve_riot_name(anchor_name, d2r)
+            roster_riot = [_resolve_riot_name(n, d2r)
+                           for n in (_roster_names() or [])]
+            roster_riot = [n for n in roster_riot if n]
+            raw = rift_api.get_rivalries(
+                riot_name, players=roster_riot or None) or []
+            # Translate opponent riot names back to display names so the
+            # rest of the UI can display + click them as display names.
+            rows = []
+            for r in raw:
+                rr = dict(r)
+                opp = rr.get("opponent")
+                if opp:
+                    rr["opponent"] = r2d.get(opp, opp)
+                rows.append(rr)
             with live._lock:
                 live.rivalries[anchor_name] = rows
                 live.rivalries_loaded[anchor_name] = True
