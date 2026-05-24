@@ -346,6 +346,7 @@ class DraftState:
         self._board_lock_pop_idx  = -1   # timeline cell idx that just locked
         self._board_lock_pop_anim = 1.0  # 0 = just popped, 1 = settled
         self._board_last_pointer  = 0    # detect a new lock
+        self._board_last_recompute_pointer = -1  # v4.0.4: which pointer board_rec was built for
         # v3.0.5: re-run recommend_action when async scout/inhouse data lands.
         # Tracks (#scout sheets loaded, len(inhouse_champs)) so the first-ban
         # call can refresh once the prefetch finishes — without this the
@@ -1373,6 +1374,15 @@ _enemy_tc_cache = {"sig": None, "value": {}}
 # both teams every frame; memoize by (side, role, player, board sig).
 _depth_cache = {}
 
+# v4.0.4: enemy-next-pick prediction cache. _draw_enemy_ghost_chip called
+# predict_enemy_next_pick (HTTP POST → /api/engine/predict_enemy_next) on
+# the main render thread every frame.
+_ghost_pred_cache = {"sig": None, "value": None}
+
+# v4.0.4: DONE-screen retrospective cache. _bans_retrospective makes two
+# blocking HTTP POSTs (recommend_comps × side) per frame on the recap.
+_retro_cache = {"sig": None, "value": {}}
+
 
 def _enemy_target_comp(b, act):
     """Run target_archetype for the team that ISN'T currently acting, so the
@@ -1599,6 +1609,10 @@ def _board_recompute():
             getattr(live, "primary_roles", {}) or {}, n=6,
             forced_arch=draft.board_target_arch,
             scout_champs=scout_map)
+        # v4.0.4: mark which pointer this recommendation was computed for so
+        # _draw_board can detect remote pointer changes (mirrored by the new
+        # top-level sync_tick) without re-comparing pre/post sync state.
+        draft._board_last_recompute_pointer = b.pointer
     except Exception as e:                       # pragma: no cover
         draft.board_rec = {
             "done": b.is_complete(), "action": b.current_action(),
@@ -3012,15 +3026,33 @@ def _draw_enemy_ghost_chip(dl, b):
     if b is None or not hasattr(b, "our_side"):
         return
     enemy_side = "RED" if b.our_side == "BLUE" else "BLUE"
+    # v4.0.4: cache prediction by board signature. predict_enemy_next_pick
+    # proxies to /api/engine/predict_enemy_next — a blocking HTTP POST on
+    # the main render thread. Without this cache, the call fires every
+    # frame and the draft board feels laggy / freezes on close.
     try:
-        from data.draft_board import predict_enemy_next_pick as _pen
-        inhouse = getattr(live, "inhouse_champs", {}) or {}
-        primary = getattr(live, "primary_roles", {}) or {}
-        scout = _scout_champs_for_players(
-            list(b.players.get("BLUE", [])) + list(b.players.get("RED", [])))
-        pred = _pen(b, inhouse, primary, scout)
+        sig = (b.our_side, b.pointer,
+               tuple(sorted(b.picks.get("BLUE", {}).items())),
+               tuple(sorted(b.picks.get("RED", {}).items())),
+               tuple(b.bans.get("BLUE", [])),
+               tuple(b.bans.get("RED", [])))
     except Exception:
-        pred = None
+        sig = None
+    if sig is not None and sig == _ghost_pred_cache["sig"]:
+        pred = _ghost_pred_cache["value"]
+    else:
+        try:
+            from data.draft_board import predict_enemy_next_pick as _pen
+            inhouse = getattr(live, "inhouse_champs", {}) or {}
+            primary = getattr(live, "primary_roles", {}) or {}
+            scout = _scout_champs_for_players(
+                list(b.players.get("BLUE", [])) + list(b.players.get("RED", [])))
+            pred = _pen(b, inhouse, primary, scout)
+        except Exception:
+            pred = None
+        if sig is not None:
+            _ghost_pred_cache["sig"] = sig
+            _ghost_pred_cache["value"] = pred
     if not pred:
         return
     pred_role = (pred.get("role") or "").upper()
@@ -3053,6 +3085,19 @@ def _bans_retrospective(b):
     """
     if b is None:
         return {}
+    # v4.0.4: cache by board signature. On the DONE screen this panel
+    # makes 2 blocking HTTP POSTs (recommend_comps × side) per frame,
+    # which makes the recap feel laggy.
+    try:
+        sig = (b.pointer,
+               tuple(sorted(b.picks.get("BLUE", {}).items())),
+               tuple(sorted(b.picks.get("RED", {}).items())),
+               tuple(b.bans.get("BLUE", [])),
+               tuple(b.bans.get("RED", [])))
+    except Exception:
+        sig = None
+    if sig is not None and sig == _retro_cache["sig"]:
+        return _retro_cache["value"]
     out = {}
     try:
         inhouse = getattr(live, "inhouse_champs", {}) or {}
@@ -3082,6 +3127,9 @@ def _bans_retrospective(b):
                     continue
                 per_role[role] = (champ, champ in enemy_bans[side])
         out[side] = per_role
+    if sig is not None:
+        _retro_cache["sig"] = sig
+        _retro_cache["value"] = out
     return out
 
 
@@ -3338,13 +3386,18 @@ def _compute_pivot_alert(b):
 
 
 def _draw_board(dl, vw, vh):
-    # Sync mirror first: if a session is active, fold the latest server
-    # snapshot into draft.board before we render. Recompute the recommender
-    # whenever a new revision lands so the suggestions follow remote actions.
-    _prev_pointer = draft.board.pointer if draft.board is not None else -1
-    _sync_ui.sync_tick(draft)
-    needs_recompute = (draft.board is not None
-                       and draft.board.pointer != _prev_pointer)
+    # v4.0.4: sync_tick now runs at the top of draw_draft (so the ARCHETYPE
+    # and other pre-board phases see the real roster). The pointer was
+    # already updated by the time we get here; compare against the last
+    # pointer we recomputed for instead of capturing it before the mirror.
+    _sync_ui.sync_tick(draft)   # idempotent — rev gating makes this cheap.
+    if draft.board is not None:
+        cur_ptr = draft.board.pointer
+        needs_recompute = (cur_ptr != getattr(draft,
+                                              "_board_last_recompute_pointer",
+                                              -1))
+    else:
+        needs_recompute = False
 
     # v3.0.5: also recompute when async scout / inhouse data lands. Without
     # this, _board_recompute() fired only at board-entry — before
@@ -5017,6 +5070,9 @@ def _sync_phase_watcher() -> None:
     if sp == "SCOUTING":
         if draft.phase != DraftPhase.SCOUTING:
             draft.phase = DraftPhase.SCOUTING
+        # v4.0.4: clear the briefing-ack guard so if we cycle back into
+        # BRIEFING from a server reset, the auto-skip fires again.
+        draft.briefing_done_sent = False
         _maybe_start_scout_prefetch()
         _maybe_send_scout_ready()
         return
@@ -5066,6 +5122,19 @@ def draw_draft(dl, vw, vh, fonts=None):
     draft.tick()
     dpg.delete_item(dl, children_only=True)
     dpg.draw_rectangle((0,0),(vw,vh), fill=C["bg"], color=(0,0,0,0), parent=dl)
+
+    # v4.0.4: mirror the server snapshot into draft.board BEFORE the phase
+    # dispatch. Previously sync_tick only ran inside _draw_board, so the
+    # ARCHETYPE screen (and any other synced pre-board phase) was reading
+    # the placeholder roster ("B1, B2...") that _lobby_begin_synced seeded.
+    # That made the engine fall back to generic templates → BLUE and RED
+    # clients saw identical archetype recommendations and the picks were
+    # for fictional players the user "never has." Mirror up front and every
+    # phase sees the real roster.
+    try:
+        _sync_ui.sync_tick(draft)
+    except Exception:
+        pass
 
     # Phase 1: if synced, watch the server's phase machine and transition
     # the local phase in lock-step. The server advances LOBBY→BOARD once
