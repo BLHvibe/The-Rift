@@ -2060,6 +2060,14 @@ def _maybe_start_scout_prefetch() -> None:
 # Safety net: if SCOUTING runs longer than this, advance regardless. Keeps a
 # hopelessly-broken fetch from blocking the lobby forever.
 _SCOUTING_TIMEOUT_S = 45.0
+# When the lobby snapshot has zero player names (sync hiccup, roster not yet
+# populated for our side), give it this long before we send ready anyway so
+# the draft isn't bricked at "FETCHING SCOUT DATA · 0/1".
+_SCOUTING_EMPTY_TIMEOUT_S = 15.0
+# Track when SCOUTING was first entered even before prefetch kicks. That's the
+# clock the empty-snapshot timeout runs against (scout_started_at is only set
+# by _maybe_start_scout_prefetch, which never runs when names is empty).
+_scouting_seen_at = [0.0]
 
 
 def _maybe_send_scout_ready() -> None:
@@ -2071,8 +2079,28 @@ def _maybe_send_scout_ready() -> None:
     skipped due to being in-flight from an earlier call still register as
     settled when their scout sheet lands. 45-second hard timeout as a final
     safety net.
-    """
-    if draft.scout_ready_sent or draft.scout_total <= 0:
+
+    v4.0.1: when scout_total is still 0 because the synced lobby snapshot has
+    no player names yet (the prior early-return), wait up to
+    _SCOUTING_EMPTY_TIMEOUT_S and then send ready anyway so the draft can
+    advance to BRIEFING — otherwise the lobby is bricked at "0/1 done"."""
+    if draft.scout_ready_sent:
+        return
+    # Track first time we see SCOUTING so the empty-snapshot timeout has a
+    # stable starting point.
+    if _scouting_seen_at[0] == 0.0:
+        _scouting_seen_at[0] = time.monotonic()
+
+    # Empty-snapshot branch — prefetch never kicked because no names.
+    if draft.scout_total <= 0:
+        elapsed = time.monotonic() - _scouting_seen_at[0]
+        if elapsed >= _SCOUTING_EMPTY_TIMEOUT_S:
+            draft.scout_ready_sent = True
+            _scouting_seen_at[0] = 0.0   # reset for the next SCOUTING entry
+            try:
+                _sync_ui.send_set_scout_ready(True)
+            except Exception:
+                pass
         return
     names = _scout_player_names()
     sheets = getattr(live, "scout_sheets", {}) or {}
@@ -2114,8 +2142,77 @@ def _draw_scouting(dl, vw, vh):
         subtitle=f"pulling ranked + draft pools  ·  {done}/{total} done",
         progress_0_1=frac)
 
+    # ── EXIT button — top-right corner. Always available on the SCOUTING
+    # screen so the user can bail back to lobby without killing the app if
+    # the draft hangs (sync hiccup, server cold-start, etc.).
+    try:
+        ex_w, ex_h = 96, 32
+        ex_x = vw - ex_w - 18
+        ex_y = 18
+        mrx, mry = _content_mouse()
+        ex_hov = ex_x <= mrx <= ex_x + ex_w and ex_y <= mry <= ex_y + ex_h
+        dpg.draw_rectangle((ex_x, ex_y), (ex_x + ex_w, ex_y + ex_h),
+                           fill=lol_theme._alpha(
+                               lol_theme.LOL.get("loss", (180, 60, 60)),
+                               220 if ex_hov else 150),
+                           color=lol_theme.LOL["gold_rule"],
+                           rounding=4, parent=dl)
+        _txt(dl, ex_x + 30, ex_y + 7, "EXIT",
+             (255, 255, 255, 240), 16, "raj_sb_16")
+        if ex_hov and dpg.is_mouse_button_clicked(0):
+            # Disconnect from sync and reset local draft state — mirrors the
+            # TEAM_BUILD EXIT handler.
+            try:
+                _sync_ui.disconnect_if_active()
+            except Exception:
+                pass
+            try:
+                _lobby_reset_pool()
+            except Exception:
+                pass
+            try:
+                draft.reset()
+            except Exception:
+                pass
+            _scouting_seen_at[0] = 0.0
+            return
+    except Exception:
+        pass
+
     # Per-player dots panel, anchored below the waiting screen
     if not names:
+        # No names means the synced lobby snapshot is empty or our side has
+        # no rosters set yet. Tell the user instead of silently spinning, and
+        # let _maybe_send_scout_ready time out after _SCOUTING_EMPTY_TIMEOUT_S.
+        msg = "Lobby roster not loaded yet — auto-advancing in a few seconds…"
+        mx = max(40, (vw - len(msg) * 7) // 2)
+        my = vh - 132
+        _txt(dl, mx, my, msg,
+             (*lol_theme.LOL["txt"][:3], 200), 16, "raj_sb_16")
+        # Manual skip — a SKIP button so the user can punt the wait if they
+        # know the lobby is intentionally incomplete (testing, etc.).
+        bw, bh = 140, 36
+        bx = (vw - bw) // 2
+        by = my + 36
+        try:
+            mrx, mry = _content_mouse()
+            is_hov = bx <= mrx <= bx + bw and by <= mry <= by + bh
+        except Exception:
+            is_hov = False
+        dpg.draw_rectangle((bx, by), (bx + bw, by + bh),
+                           fill=lol_theme._alpha(lol_theme.LOL["gold_rule"],
+                                                  220 if is_hov else 160),
+                           color=lol_theme.LOL["gold_rule"],
+                           rounding=4, parent=dl)
+        _txt(dl, bx + 36, by + 10, "SKIP WAIT",
+             (255, 255, 255, 240), 15, "raj_sb_16")
+        if is_hov and dpg.is_mouse_button_clicked(0):
+            draft.scout_ready_sent = True
+            _scouting_seen_at[0] = 0.0
+            try:
+                _sync_ui.send_set_scout_ready(True)
+            except Exception:
+                pass
         return
     panel_w = min(640, vw - 80)
     panel_x = (vw - panel_w) // 2

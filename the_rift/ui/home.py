@@ -640,11 +640,15 @@ _pulse_cache = {"sig": None, "items": None}
 
 
 def _match_history_signature():
-    """Cheap fingerprint to bust the pulse cache when matches change."""
+    """Cheap fingerprint to bust the pulse cache when matches change.
+    Includes the first match's participant count so cards rebuild when the
+    streaming `load_match_history` upgrades headers to full payloads."""
     mh = live.match_history or []
     if not mh:
         return ("empty", 0)
-    return (mh[0].get("id"), len(mh),
+    first = mh[0] or {}
+    return (first.get("id"), len(mh),
+            len(first.get("participants") or []),
             (live.records or {}).get("most_games", {}).get("value", 0))
 
 
@@ -883,10 +887,25 @@ def _build_latest_drama():
         head = f"{carry_name} popped off"
         if carry_champ:
             head += f"  ·  {carry_champ}"
-        detail = f"{carry_kda} carry  ·  team {bk}-{rk}" if (bk or rk) else f"{carry_kda} carry"
+        detail = (f"{carry_kda} carry  ·  team kills {bk}-{rk}"
+                  if (bk or rk) else f"{carry_kda} carry")
+        # Add the rest of the winning lineup so the card has a sense of the
+        # whole team, not just the carry.
+        other_winners = [n for n in winners
+                         if n.upper() != carry_name][:4]
+        if other_winners:
+            detail += "  ·  with " + "  ".join(other_winners)
+    elif winners:
+        # Participants exist but the carry pick was somehow None — fall back
+        # to listing the winning team.
+        head = f"{winners[0].upper()} on the winning side"
+        detail = (f"with {'  ·  '.join(winners[1:5])}"
+                  if len(winners) > 1 else "—")
     else:
-        head = f"Won by {winners[0].upper()}" if winners else "Latest match"
-        detail = "  ·  ".join(winners[:3]) if winners else "—"
+        # Header-only state (participants haven't streamed in yet). Show the
+        # most useful info we have: which side won + score is unknown.
+        head = f"{winner.upper()} side won"
+        detail = "loading lineup…" if not live.match_history_loaded else "no participants logged"
     context = _time_ago(m.get("started_at"))
     if mm:
         context = f"{mm}-minute game  ·  {context}"

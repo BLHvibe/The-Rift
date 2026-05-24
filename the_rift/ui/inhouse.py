@@ -617,8 +617,7 @@ def _draw_history(dl, tx, ty, tw, th, vw, vh):
             (not live.match_history_loaded and not live.match_history_error)):
         skel_y = ty + 20
         for i in range(4):
-            effects.draw_skeleton_row(dl, tx, skel_y + i*100, tw, 84,
-                                      cols=(0.20, 0.20, 0.50, 0.10))
+            effects.draw_skeleton_row(dl, tx, skel_y + i*100, tw, 84)
         _txt(dl, tx, ty + 0, "MATCH HISTORY", (*C["gold"][:3], 220), 21, "raj_sb_18")
         _txt(dl, tx + 200, ty + 4, "loading…",
              (*C["txt_dim"][:3], 200), 17, "raj_r_16")
@@ -645,7 +644,7 @@ def _draw_history(dl, tx, ty, tw, th, vw, vh):
          (*C["txt_dim"][:3], 180), 14, "raj_r_14")
 
     # Wheel-scroll
-    card_h = 148
+    card_h = 164
     card_gap = 12
     visible_h = th - 40
     total_h = len(matches) * (card_h + card_gap)
@@ -745,9 +744,9 @@ def _draw_match_card(dl, x, y, w, h, m, is_hov=False, is_sel=False):
 
     # ----- Team rows -----
     # Two rows of 5 cells each; each cell shows ROLE / CHAMP / PLAYER / KDA.
-    row_y_blue = y + 50
-    row_y_red  = y + 96
-    row_h = 42
+    row_y_blue = y + 52
+    row_y_red  = y + 104
+    row_h = 48
     inner_x = x + 14
     inner_w = w - 28
     cell_gap = 6
@@ -761,25 +760,24 @@ def _draw_match_card(dl, x, y, w, h, m, is_hov=False, is_sel=False):
 
 def _draw_match_team_row(dl, x, y, cell_w, cell_h, gap, players, side_color,
                           team_label, is_winner):
-    """One team's row of 5 player cells inside a match card."""
-    # Label gutter at the very left.
-    lbl_color = (255, 255, 255, 230) if is_winner else (*side_color, 220)
+    """One team's row of 5 player cells inside a match card.
+    Text bumped up + bold across the board per user feedback — the cells have
+    room and the layout now reads from across the screen."""
     dpg.draw_rectangle((x - 8, y), (x - 2, y + cell_h),
                        fill=(*side_color, 220 if is_winner else 130),
                        color=(0, 0, 0, 0), rounding=2, parent=dl)
     for i in range(5):
         cx = x + i * (cell_w + gap)
         p = players[i] if i < len(players) else None
-        # Cell bg.
         fill_a = 230 if p else 90
-        bdr_a  = 110 if is_winner else 70
+        bdr_a  = 130 if is_winner else 80
         dpg.draw_rectangle((cx, y), (cx + cell_w, y + cell_h),
                            fill=(*C["panel"][:3], fill_a),
                            color=(*side_color, bdr_a),
                            rounding=4, parent=dl)
         if not p:
-            _txt(dl, cx + 8, y + 12, "—",
-                 (*C["txt_dim"][:3], 130), 14, "raj_r_14")
+            _txt(dl, cx + 10, y + cell_h // 2 - 8, "—",
+                 (*C["txt_dim"][:3], 160), 16, "raj_sb_18")
             continue
         role = (p.get("role") or "").upper()[:3]
         champ = (p.get("champion") or "?").strip()
@@ -790,27 +788,27 @@ def _draw_match_team_row(dl, x, y, cell_w, cell_h, gap, players, side_color,
         win = bool(p.get("win"))
         # Role pill (top-left).
         if role:
-            role_w = 30
-            dpg.draw_rectangle((cx + 4, y + 4), (cx + 4 + role_w, y + 18),
-                               fill=(*side_color, 200),
+            role_w = 36
+            dpg.draw_rectangle((cx + 4, y + 4), (cx + 4 + role_w, y + 22),
+                               fill=(*side_color, 220),
                                color=(0, 0, 0, 0), rounding=2, parent=dl)
-            _txt(dl, cx + 8, y + 4, role,
-                 (255, 255, 255, 240), 11, "raj_sb_14")
+            _txt(dl, cx + 9, y + 6, role,
+                 (255, 255, 255, 250), 14, "raj_sb_16")
         # Champion (row 1, right of role pill).
-        max_c = max(6, (cell_w - 40) // 7)
+        max_c = max(6, (cell_w - 46) // 8)
         champ_disp = champ if len(champ) <= max_c else champ[:max_c-1] + "…"
-        _txt(dl, cx + 38, y + 4, champ_disp,
-             (*C["gold_lt"][:3], 240), 13, "raj_sb_14")
+        _txt(dl, cx + 46, y + 6, champ_disp,
+             (*C["gold_lt"][:3], 245), 16, "raj_sb_18")
         # Player name (row 2).
-        max_n = max(6, cell_w // 8)
+        max_n = max(6, cell_w // 9)
         name_disp = name if len(name) <= max_n else name[:max_n-1] + "…"
-        _txt(dl, cx + 4, y + 22, name_disp,
-             (*C["txt"][:3], 220), 12, "raj_r_14")
+        _txt(dl, cx + 6, y + 28, name_disp.upper(),
+             (*C["txt"][:3], 235), 14, "raj_sb_16")
         # KDA bottom-right.
         kda_str = f"{kills}/{deaths}/{assists}"
-        kda_x = cx + cell_w - len(kda_str) * 7 - 6
-        kda_color = (*C["txt"][:3], 240) if win else (*C["txt_dim"][:3], 200)
-        _txt(dl, kda_x, y + 22, kda_str, kda_color, 12, "raj_sb_14")
+        kda_x = cx + cell_w - len(kda_str) * 9 - 8
+        kda_color = (*C["gold_lt"][:3], 240) if win else (*C["txt_dim"][:3], 220)
+        _txt(dl, kda_x, y + 28, kda_str, kda_color, 15, "raj_sb_18")
 
 
 _ROLE_ORDER = {"TOP": 0, "JGL": 1, "MID": 2, "BOT": 3, "SUP": 4}
@@ -896,8 +894,7 @@ def _draw_rivalries(dl, tx, ty, tw, th, vw, vh):
     # Loading skeleton — visible until the per-anchor fetch resolves.
     if not loaded:
         for i in range(8):
-            effects.draw_skeleton_row(dl, tx, rows_top + i * 40, tw, 32,
-                                      cols=(0.30, 0.12, 0.20, 0.20, 0.18))
+            effects.draw_skeleton_row(dl, tx, rows_top + i * 40, tw, 32)
         return
 
     # Error state — fetch failed entirely.
@@ -1981,22 +1978,80 @@ def _draw_match_detail_panel(dl, vw, vh):
     sy += 12
     sy = _draw_match_predictions(dl, px, sy, panel_w, frac, mid, winner)
 
-    # ----- TIMELINE -----
+    # ----- TEAM TOTALS (replaces the old TIMELINE placeholder) -----
     sy += 6
     dpg.draw_line((px + 16, sy), (vw - 16, sy),
                   color=(*C["rule_dark"][:3], int(160*frac)),
                   thickness=1, parent=dl)
     sy += 12
-    _txt(dl, px + 20, sy, "TIMELINE",
+    _txt(dl, px + 20, sy, "TEAM TOTALS",
          (*C["gold"][:3], al), 16, "raj_sb_18")
-    sy += 24
-    _txt(dl, px + 20, sy,
-         "Per-minute timeline not yet captured for this match.",
-         (*C["txt2"][:3], al), 14, "raj_r_14")
-    sy += 20
-    _txt(dl, px + 20, sy,
-         "Coming with the next Riot-API pass — full minute-by-minute curves.",
-         (*C["txt2"][:3], int(al * 0.85)), 13, "raj_r_14")
+    sy += 26
+
+    # Aggregate per team from the participants array.
+    bk = bd = bg = bv = 0
+    rk = rd = rg = rv = 0
+    for pt in parts:
+        side = (pt.get("team") or "").lower()
+        if side == "blue":
+            bk += int(pt.get("kills") or 0)
+            bd += int(pt.get("damage") or 0)
+            bg += int(pt.get("gold") or 0)
+            bv += int(pt.get("vision") or 0)
+        elif side == "red":
+            rk += int(pt.get("kills") or 0)
+            rd += int(pt.get("damage") or 0)
+            rg += int(pt.get("gold") or 0)
+            rv += int(pt.get("vision") or 0)
+
+    bar_x = px + 20
+    bar_w = vw - bar_x - 24
+    bar_h = 18
+    label_w = 90
+    val_w = 80
+    inner_x = bar_x + label_w
+    inner_w = bar_w - label_w - val_w * 2 - 16
+
+    def _row(label, b_val, r_val, fmt_fn):
+        nonlocal sy
+        _txt(dl, bar_x, sy + 1, label.upper(),
+             (*C["txt_dim"][:3], int(al * 0.95)), 13, "raj_sb_14")
+        # Right-align the blue value just before the bar; red value just after.
+        b_str = fmt_fn(b_val)
+        r_str = fmt_fn(r_val)
+        _txt(dl, inner_x - len(b_str) * 8 - 6, sy + 1, b_str,
+             (*_BLUE_COL, al), 14, "raj_sb_16")
+        _txt(dl, inner_x + inner_w + 8, sy + 1, r_str,
+             (*_RED_COL, al), 14, "raj_sb_16")
+        # Divided bar: blue's slice on the left, red's on the right, prop to share.
+        total = b_val + r_val
+        if total > 0:
+            blue_w = int(inner_w * (b_val / total))
+        else:
+            blue_w = inner_w // 2
+        red_w = inner_w - blue_w
+        # Bar bg
+        dpg.draw_rectangle((inner_x, sy), (inner_x + inner_w, sy + bar_h),
+                           fill=(*C["panel"][:3], int(160 * frac)),
+                           color=(0, 0, 0, 0), rounding=4, parent=dl)
+        if blue_w > 0:
+            dpg.draw_rectangle((inner_x, sy),
+                               (inner_x + blue_w, sy + bar_h),
+                               fill=(*_BLUE_COL, int(220 * frac)),
+                               color=(0, 0, 0, 0),
+                               rounding=4, parent=dl)
+        if red_w > 0:
+            dpg.draw_rectangle((inner_x + blue_w, sy),
+                               (inner_x + inner_w, sy + bar_h),
+                               fill=(*_RED_COL, int(220 * frac)),
+                               color=(0, 0, 0, 0),
+                               rounding=4, parent=dl)
+        sy += bar_h + 10
+
+    _row("Kills",   bk, rk, lambda v: str(int(v)))
+    _row("Damage",  bd, rd, lambda v: fmt.compact(v))
+    _row("Gold",    bg, rg, lambda v: fmt.compact(v))
+    _row("Vision",  bv, rv, lambda v: str(int(v)))
 
     # SHARE button — bottom-right of panel
     sb_w = 90; sb_h = 28
