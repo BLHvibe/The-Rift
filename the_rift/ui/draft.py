@@ -1361,21 +1361,53 @@ def _draw_arch_picker(dl, x, y, w, current):
     return chip_h + 12
 
 
+# v4.0.3: cache for _enemy_target_comp. The underlying call proxies to the
+# Fly server's /api/engine/target_archetype, so doing it per-frame from the
+# main render thread blocked the UI and made the draft board feel laggy
+# (and made the OS show "not responding" when closing). Recompute only when
+# the relevant inputs actually change.
+_enemy_tc_cache = {"sig": None, "value": {}}
+
+# v4.0.3: per-slot pool-depth cache. _draw_board_team's depth capsule called
+# _candidates_for_player + _scout_champs_for_players for every empty slot on
+# both teams every frame; memoize by (side, role, player, board sig).
+_depth_cache = {}
+
+
 def _enemy_target_comp(b, act):
     """Run target_archetype for the team that ISN'T currently acting, so the
-    STRATEGIC sub-panel can show their wincon alongside ours."""
+    STRATEGIC sub-panel can show their wincon alongside ours. Cached on a
+    signature of (enemy_side, picks, bans, pointer, roster) so we don't make
+    a network call every frame."""
     if b is None or act is None:
         return {}
     enemy_side = "RED" if act.side == "BLUE" else "BLUE"
     try:
         enemy_players = list(b.players.get(enemy_side, []))
-        return target_archetype(
+        roster_sig = tuple((p or {}).get("name", "") for p in enemy_players)
+        sig = (enemy_side, b.pointer, roster_sig,
+               tuple(sorted(b.picks.get("BLUE", {}).items())),
+               tuple(sorted(b.picks.get("RED", {}).items())),
+               tuple(b.bans.get("BLUE", [])),
+               tuple(b.bans.get("RED", [])))
+        if sig == _enemy_tc_cache["sig"]:
+            return _enemy_tc_cache["value"]
+        val = target_archetype(
             b, enemy_side,
             getattr(live, "inhouse_champs", {}) or {},
             getattr(live, "primary_roles", {}) or {},
-            scout_champs=_scout_champs_for_players(enemy_players))
+            scout_champs=_scout_champs_for_players(enemy_players)) or {}
+        _enemy_tc_cache["sig"] = sig
+        _enemy_tc_cache["value"] = val
+        return val
     except Exception:
         return {}
+
+
+# v4.0.3: cache for _enemy_pick_preview — engine candidate-search runs every
+# frame for every open enemy role; cache by board signature so it only
+# recomputes when something changed.
+_enemy_preview_cache = {"sig": None, "value": []}
 
 
 def _enemy_pick_preview(b, side, n=3):
@@ -1383,6 +1415,18 @@ def _enemy_pick_preview(b, side, n=3):
     Used by the bottom-of-team-column 'next-pick' ribbon."""
     if b is None:
         return []
+    try:
+        roster_sig = tuple((p or {}).get("name", "")
+                           for p in (b.players.get(side, []) or []))
+        sig = (side, b.pointer, n, roster_sig,
+               tuple(sorted(b.picks.get("BLUE", {}).items())),
+               tuple(sorted(b.picks.get("RED", {}).items())),
+               tuple(b.bans.get("BLUE", [])),
+               tuple(b.bans.get("RED", [])))
+    except Exception:
+        sig = None
+    if sig is not None and sig == _enemy_preview_cache["sig"]:
+        return _enemy_preview_cache["value"]
     used = b.used_champs() if hasattr(b, "used_champs") else set()
     icmp = getattr(live, "inhouse_champs", {}) or {}
     proles = getattr(live, "primary_roles", {}) or {}
@@ -1401,6 +1445,9 @@ def _enemy_pick_preview(b, side, n=3):
             cands = []
         names = [c[0] for c in cands][:n]
         out.append((role, pl.get("name", "?"), names))
+    if sig is not None:
+        _enemy_preview_cache["sig"] = sig
+        _enemy_preview_cache["value"] = out
     return out
 
 
@@ -1649,7 +1696,50 @@ def _draw_sync_lobby(dl, vw, vh):
     if status:
         col = (lol_theme.LOL["win"] if status == "synced"
                else lol_theme.LOL["warning"])
-        _txt(dl, 320, 18, status[:80], (*col[:3], 230), 16, "raj_sb_16")
+        _txt(dl, 220, 18, status[:32], (*col[:3], 230), 16, "raj_sb_16")
+
+    # v4.0.3: clear "OPPONENT CONNECTED?" badge in the header. Without this,
+    # users on the team-builder screen had no quick way to tell whether the
+    # other side had joined — they'd see only their own slot on the WHO'S
+    # CONNECTED rail and not realize it was waiting on the opponent.
+    sides_map = (snap or {}).get("sides") or {}
+    my_side_for_badge = (client.you() or {}).get("side", "") if client else ""
+    opp_side = ("RED" if my_side_for_badge == "BLUE"
+                else "BLUE" if my_side_for_badge == "RED" else "")
+    opp_name = sides_map.get(opp_side) if opp_side else None
+    if opp_name:
+        badge_text = f"OPPONENT: {str(opp_name)[:12]}"
+        badge_col = lol_theme.LOL["win"]
+        dot_col = lol_theme.LOL["win"]
+    elif my_side_for_badge in ("BLUE", "RED"):
+        badge_text = "WAITING FOR OPPONENT"
+        badge_col = lol_theme.LOL["warning"]
+        dot_col = lol_theme.LOL["warning"]
+    else:
+        badge_text = ""
+        badge_col = lol_theme.LOL["gold_rule"]
+        dot_col = lol_theme.LOL["gold_rule"]
+    if badge_text:
+        bw = max(170, len(badge_text) * 9 + 38)
+        bh = 30
+        bx = 460
+        by = (hdr_h - bh) // 2
+        lol_theme.draw_navy_panel(
+            dl, bx, by, bx + bw, by + bh,
+            fill=lol_theme._alpha(lol_theme.LOL["navy_panel"], 200),
+            border_color=badge_col,
+            border_thickness=1, rounding=4)
+        # Status dot — pulses gently when waiting so it draws the eye.
+        if opp_name:
+            dot_a = 235
+        else:
+            pulse = (math.sin(time.monotonic() * 2.4 * 2 * math.pi) + 1) / 2
+            dot_a = int(140 + pulse * 110)
+        dpg.draw_circle((bx + 14, by + bh // 2), 5,
+                        fill=(*dot_col[:3], dot_a),
+                        color=(0, 0, 0, 0), parent=dl)
+        _txt(dl, bx + 26, by + 6, badge_text,
+             (*badge_col[:3], 240), 15, "raj_sb_16")
 
     # EXIT button (top-right) — registers a hit
     cb_w, cb_h = 100, 38
@@ -2595,6 +2685,13 @@ def _draw_archetype(dl, vw, vh):
     locks via set_archetype()."""
     side = _sync_ui.my_side() or "BLUE"
     accent_key = "blue_side" if side == "BLUE" else "red_side"
+
+    # v4.0.3: register any champion icons / splash art that finished downloading
+    # since the last frame. Without this, every portrait on this screen stays
+    # stuck on the letter-placeholder forever (the textures only get registered
+    # on the BOARD screen, which the user hasn't reached yet).
+    champion_icons.flush_pending()
+    splash_art.flush_pending()
 
     # ── Backdrop: solid navy + subtle vignette (LoL-client feel) ─────
     dpg.draw_rectangle((0, 0), (vw, vh),
@@ -3675,12 +3772,30 @@ def _draw_board_team(dl, x, y, w, h, b, side, act):
              cstr, cc, lock_sz, lock_key)
         # §3 #7 — pool-depth capsule: viable comfort picks left (pre-pick)
         if not champ:
+            # v4.0.3: cache the per-slot candidate-search result on a board
+            # signature. Without this we re-run _candidates_for_player for
+            # every empty slot on both teams every frame, which (combined
+            # with the rest of the board work) made the screen feel laggy.
             try:
-                depth = len(_candidates_for_player(
-                    pl, role, getattr(live, "inhouse_champs", {}) or {},
-                    getattr(live, "primary_roles", {}) or {},
-                    b.used_champs(), k=10,
-                    scout_champs=_scout_champs_for_players([pl])))
+                pname = (pl or {}).get("name", "")
+                key = (side, role, pname, b.pointer,
+                       tuple(sorted(b.picks.get("BLUE", {}).items())),
+                       tuple(sorted(b.picks.get("RED", {}).items())),
+                       tuple(b.bans.get("BLUE", [])),
+                       tuple(b.bans.get("RED", [])))
+                depth = _depth_cache.get(key)
+                if depth is None:
+                    depth = len(_candidates_for_player(
+                        pl, role, getattr(live, "inhouse_champs", {}) or {},
+                        getattr(live, "primary_roles", {}) or {},
+                        b.used_champs(), k=10,
+                        scout_champs=_scout_champs_for_players([pl])))
+                    _depth_cache[key] = depth
+                    # Bound cache size — a draft tops out at ~200 distinct
+                    # signatures; this stays well under that.
+                    if len(_depth_cache) > 512:
+                        _depth_cache.clear()
+                        _depth_cache[key] = depth
             except Exception:
                 depth = 0
             cap_x = x + w - 13
@@ -4906,15 +5021,17 @@ def _sync_phase_watcher() -> None:
         _maybe_send_scout_ready()
         return
 
-    # BRIEFING — show the projected-comps snapshot card for 5s, then auto-
-    # advance via set_briefing_done.
+    # v4.0.3: BRIEFING is now skipped. The team-comp overview was redundant
+    # with the archetype picker that immediately follows it. We auto-ack the
+    # briefing the moment the server enters that phase, so the user goes
+    # straight from SCOUTING to ARCHETYPE.
     if sp == "BRIEFING":
-        if draft.phase != DraftPhase.BRIEFING:
-            draft.phase = DraftPhase.BRIEFING
-            draft.briefing_started_at = time.monotonic()
-            draft.briefing_done_sent = False
-            draft.briefing_data = _compute_briefing_data()
-        _maybe_send_briefing_done()
+        if not draft.briefing_done_sent:
+            draft.briefing_done_sent = True
+            try:
+                _sync_ui.send_set_briefing_done(True)
+            except Exception:
+                pass
         return
 
     # ARCHETYPE — show the 7-card hidden picker for OUR side.
