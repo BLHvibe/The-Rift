@@ -554,40 +554,10 @@ def _draw_rater_bar(dl, vw, rater_y, rater_h):
         st_col = C["loss"] if status.startswith("✗") else C["txt_dim"]
         _txt(dl, bx + bw + 14, by + 6, status[:70], (*st_col[:3], 200), 16, "raj_r_16")
 
-    # Phase 3 — LEAGUE PULSE: rotating insight from cross-rater meta.
-    # Lazy-load on first draw; cached on `live` so subsequent draws are cheap.
-    from data.reader import live as _live, load_tier_meta as _ltm
-    if (not _live.tier_meta_loaded and not _live._tier_meta_inflight
-            and not _live.tier_meta_error):
-        _ltm()
-    pulse_x = vw - PAD - 380
-    if pulse_x > bx + bw + 200:
-        _txt(dl, pulse_x, ty - 1, "LEAGUE PULSE",
-             (*C["gold"][:3], 200), 12, "raj_sb_14")
-        if _live.tier_meta_loaded and (_live.tier_hot_takes or _live.tier_consensus):
-            # Pick one of: top hot take, or most-controversial consensus pick.
-            import time as _t
-            tick = int(_t.monotonic() / 6) % 2
-            line = ""
-            if tick == 0 and _live.tier_hot_takes:
-                ht = _live.tier_hot_takes[0]
-                line = f"{ht['rater']} rates {ht['player']} as {ht['rated']} (group avg {ht['avg']})"
-            elif _live.tier_consensus:
-                top = sorted(_live.tier_consensus, key=lambda x: -x.get("std", 0))[0]
-                line = f"Most controversial: {top['name']} — {top.get('verdict','')}"
-            elif _live.tier_hot_takes:
-                ht = _live.tier_hot_takes[0]
-                line = f"{ht['rater']} rates {ht['player']} as {ht['rated']} (group avg {ht['avg']})"
-            if line:
-                _txt(dl, pulse_x + 110, ty, line[:78],
-                     (*C["txt_dim"][:3], 220), 14, "raj_r_14")
-        elif _live._tier_meta_inflight:
-            _txt(dl, pulse_x + 110, ty, "loading…",
-                 (*C["txt_dim"][:3], 160), 14, "raj_r_14")
-        else:
-            _txt(dl, pulse_x + 110, ty,
-                 "run fetch_ranks to populate cross-rater meta",
-                 (*C["txt_dim"][:3], 140), 13, "raj_r_14")
+    # D1 (sheet decommission): the LEAGUE PULSE strip — which rotated
+    # cross-rater meta sourced from the Consensus / Hot Takes / Rater Bias
+    # sheets — was removed alongside those sheets. The rater bar now ends
+    # at the IDENTIFY button.
 
     if not busy and dpg.is_mouse_button_clicked(0):
         mouse = dpg.get_mouse_pos(local=False)

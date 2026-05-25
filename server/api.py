@@ -44,7 +44,23 @@ from db import (init as db_init, upsert_match, list_matches, get_match,
                 # Phase 5a — Achievements
                 list_achievements, player_achievements,
                 # Phase 5b — Predictions
-                add_prediction, match_predictions, prediction_leaderboard)
+                add_prediction, match_predictions, prediction_leaderboard,
+                # Phase A (sheet decommission) — roster + derived aggregates
+                upsert_players, get_players,
+                inhouse_aggregates, inhouse_champs, primary_roles,
+                # Phase B (sheet decommission) — rankings + scout storage
+                upsert_rankings, get_rankings,
+                upsert_scout_stats, get_scout,
+                append_rank_history, get_rank_history,
+                # D1 (sheet decommission) — tier-list voting
+                upsert_tier_votes, upsert_tier_votes_grid, get_tier_votes,
+                tier_aggregate, delete_tier_votes,
+                recompute_rankings_blend,
+                # D3 (sheet decommission) — activity feed
+                insert_activity_event, insert_activity_events, list_activity,
+                # D2 (sheet decommission) — per-player scout sheets
+                upsert_scout_sheet, upsert_scout_sheets_bulk,
+                get_scout_sheet, get_scout_sheets_batch)
 
 # Phase 2 — server-side draft engine. Imports are wrapped in a try/except so a
 # bug in the engine package can never break the existing data API or the
@@ -151,6 +167,337 @@ async def api_records(players: Optional[str] = None) -> JSONResponse:
 async def api_export() -> JSONResponse:
     """Full DB dump — feeds the Sheet-mirror backup job."""
     return JSONResponse(export_all())
+
+
+# ---------------------------------------------------------------------------
+# Phase A (sheet decommission) — players roster + derive-from-participants
+# ---------------------------------------------------------------------------
+#
+# These endpoints exist so the client can stop reading the "Players" and
+# "_InhouseGameLog" Google Sheets. The leaderboard / customs comfort / role
+# data is derived live from `participants` joined against the `players`
+# roster. Read endpoints are open (consistent with the rest of the data
+# read surface); the roster write endpoint is token-gated.
+
+@router.get("/players")
+async def api_get_players() -> JSONResponse:
+    """Roster + summoner_map (game_name → display_name). Replaces the
+    "Players" sheet's role for the client's load_live_data()."""
+    return JSONResponse(get_players())
+
+
+@router.post("/players")
+async def api_upsert_players(payload: Dict[str, Any],
+                             authorization: Optional[str] = Header(default=None)
+                             ) -> JSONResponse:
+    """Bulk-upsert the roster. Body: `{"players": [{display_name, riot_id},
+    ...]}`. Single-row form: `{"display_name": "...", "riot_id": "..."}`."""
+    _check_token(authorization)
+    body = payload or {}
+    rows = body.get("players")
+    if rows is None and body.get("display_name"):
+        rows = [body]
+    if not isinstance(rows, list) or not rows:
+        raise HTTPException(status_code=400, detail="no players in payload")
+    n = upsert_players(rows)
+    return JSONResponse({"ok": True, "written": n})
+
+
+@router.get("/inhouse-aggregates")
+async def api_inhouse_aggregates(players: Optional[str] = None) -> JSONResponse:
+    """Per-player customs leaderboard (the shape ui/inhouse.py and home.py
+    consume as `live.inhouse`). Pass `?players=a,b,c` to restrict to a
+    roster — otherwise every display name with games is returned."""
+    return JSONResponse(
+        {"inhouse": inhouse_aggregates(eligible=_split_players(players))})
+
+
+@router.get("/inhouse-champs")
+async def api_inhouse_champs(players: Optional[str] = None) -> JSONResponse:
+    """Per-player customs champion-comfort dict (the engine's #1 comfort
+    signal, currently consumed as `live.inhouse_champs`)."""
+    return JSONResponse(
+        {"inhouse_champs": inhouse_champs(eligible=_split_players(players))})
+
+
+@router.get("/primary-roles")
+async def api_primary_roles(players: Optional[str] = None) -> JSONResponse:
+    """Per-player most-played role from customs. Used by the engine for
+    role-fit scoring and by the scout UI for role tags."""
+    return JSONResponse(
+        {"primary_roles": primary_roles(eligible=_split_players(players))})
+
+
+# ---------------------------------------------------------------------------
+# Phase B (sheet decommission) — rankings + scout stats + rank history
+# ---------------------------------------------------------------------------
+#
+# Read endpoints feed the client's `live.rankings` and `live.scout`. Write
+# endpoints take the Riot-API-derived per-player aggregates the fetcher
+# used to push into "Final Rankings" / "Player Stats" sheets. Bulk-upsert
+# semantics: one POST replaces the whole roster snapshot.
+
+@router.get("/rankings")
+async def api_get_rankings(players: Optional[str] = None) -> JSONResponse:
+    """Per-player rankings list (replaces the 'Final Rankings' sheet read).
+    Shape matches what reader.py's old `_read_final_rankings` produced."""
+    return JSONResponse(
+        {"rankings": get_rankings(eligible=_split_players(players))})
+
+
+@router.post("/rankings")
+async def api_upsert_rankings(payload: Dict[str, Any],
+                              authorization: Optional[str] = Header(default=None)
+                              ) -> JSONResponse:
+    """Bulk-upsert rankings. Body: `{"rankings": [{name, rank, tier, ...}]}`."""
+    _check_token(authorization)
+    body = payload or {}
+    rows = body.get("rankings")
+    if rows is None and (body.get("name") or body.get("display_name")):
+        rows = [body]
+    if not isinstance(rows, list) or not rows:
+        raise HTTPException(status_code=400, detail="no rankings in payload")
+    n = upsert_rankings(rows)
+    return JSONResponse({"ok": True, "written": n})
+
+
+@router.get("/scout")
+async def api_get_scout(players: Optional[str] = None) -> JSONResponse:
+    """Per-player scout stats (replaces the 'Player Stats' sheet read).
+    Joins rankings + scout_stats so the client sees one merged row per
+    player, same shape as reader.py's old `_read_player_stats` output."""
+    return JSONResponse(
+        {"scout": get_scout(eligible=_split_players(players))})
+
+
+@router.post("/scout")
+async def api_upsert_scout(payload: Dict[str, Any],
+                           authorization: Optional[str] = Header(default=None)
+                           ) -> JSONResponse:
+    """Bulk-upsert scout stats. Body:
+    `{"scout": [{name, kda, form, top_champs, ...}]}`."""
+    _check_token(authorization)
+    body = payload or {}
+    rows = body.get("scout")
+    if rows is None and (body.get("name") or body.get("display_name")):
+        rows = [body]
+    if not isinstance(rows, list) or not rows:
+        raise HTTPException(status_code=400, detail="no scout rows in payload")
+    n = upsert_scout_stats(rows)
+    return JSONResponse({"ok": True, "written": n})
+
+
+@router.get("/rank-history")
+async def api_get_rank_history(players: Optional[str] = None,
+                               limit: int = 30) -> JSONResponse:
+    """Per-player rank-value time series (newest last). Powers the rankings
+    sparkline + the home tab's biggest-mover callouts."""
+    return JSONResponse(
+        {"rank_history": get_rank_history(
+            eligible=_split_players(players),
+            limit_per_player=int(limit))})
+
+
+@router.post("/rank-history")
+async def api_post_rank_history(payload: Dict[str, Any],
+                                authorization: Optional[str] = Header(default=None)
+                                ) -> JSONResponse:
+    """Snapshot one rank-history sample per player into the time series.
+    Body: `{"sampled_at": "ISO ts", "rows": [{name, value, tier, division}]}`.
+    `sampled_at` is optional — server fills in `now` if omitted."""
+    _check_token(authorization)
+    body = payload or {}
+    rows = body.get("rows") or body.get("rankings") or []
+    if not isinstance(rows, list) or not rows:
+        raise HTTPException(status_code=400, detail="no rows in payload")
+    n = append_rank_history(rows, sampled_at=body.get("sampled_at"))
+    return JSONResponse({"ok": True, "written": n})
+
+
+# ---------------------------------------------------------------------------
+# D1 (sheet decommission) — tier-list voting
+# ---------------------------------------------------------------------------
+
+@router.get("/tier-votes")
+async def api_get_tier_votes(rater: Optional[str] = None,
+                             player: Optional[str] = None) -> JSONResponse:
+    """List the raw (rater, player, rating) tuples. Optionally filter by
+    rater or player. Used for backfill verification + the rater's own
+    'what did I rate?' view in the tier-list UI."""
+    return JSONResponse({"votes": get_tier_votes(rater=rater, player=player)})
+
+
+@router.post("/tier-votes")
+async def api_post_tier_votes(payload: Dict[str, Any],
+                              authorization: Optional[str] = Header(default=None)
+                              ) -> JSONResponse:
+    """Submit one rater's full ballot. Body:
+        {"rater": "Ben", "placements": {"S": [...], "A": [...], ...}}
+    Replaces the rater's prior ballot entirely (drop a player from your
+    submission = their old rating is removed). Use the `grid` form below
+    for bulk-import / backfill."""
+    _check_token(authorization)
+    body = payload or {}
+    rater = (body.get("rater") or "").strip()
+    placements = body.get("placements") or {}
+    if not rater or not isinstance(placements, dict):
+        raise HTTPException(status_code=400,
+                            detail="rater + placements required")
+    n = upsert_tier_votes(rater, placements, replace_rater=True)
+    # New ballot → recompute the rankings blend so the leaderboard reflects
+    # the change immediately. Cheap (~20 rows of UPDATE).
+    try:
+        recompute_rankings_blend()
+    except Exception as _e:                                    # pragma: no cover
+        print(f"[rift-api] blend recompute after ballot failed: {_e}")
+    return JSONResponse({"ok": True, "written": n, "rater": rater})
+
+
+@router.post("/tier-votes/bulk")
+async def api_post_tier_votes_bulk(payload: Dict[str, Any],
+                                   authorization: Optional[str] = Header(default=None)
+                                   ) -> JSONResponse:
+    """Bulk import for the one-time sheet → DB backfill. Body:
+        {"votes": [{"rater": "Ben", "player": "Luke", "rating": "A"}, ...]}
+    Each row inserts-or-replaces a single (rater, player) cell — does NOT
+    clear other ratings (unlike POST /tier-votes which replaces a rater's
+    whole ballot)."""
+    _check_token(authorization)
+    body = payload or {}
+    grid = body.get("votes") or body.get("rows") or []
+    if not isinstance(grid, list) or not grid:
+        raise HTTPException(status_code=400, detail="no votes in payload")
+    n = upsert_tier_votes_grid(grid)
+    try:
+        recompute_rankings_blend()
+    except Exception as _e:                                    # pragma: no cover
+        print(f"[rift-api] blend recompute after bulk import failed: {_e}")
+    return JSONResponse({"ok": True, "written": n})
+
+
+@router.post("/rankings/recompute")
+async def api_rankings_recompute(authorization: Optional[str] = Header(default=None)
+                                 ) -> JSONResponse:
+    """Force a re-application of the tier_score + rank_score blend across
+    every player in the rankings table. Called automatically on tier-vote
+    submit + Riot fetcher push; this endpoint exists for manual reruns
+    when tuning the blend formula."""
+    _check_token(authorization)
+    n = recompute_rankings_blend()
+    return JSONResponse({"ok": True, "updated": n})
+
+
+# ---------------------------------------------------------------------------
+# D3 (sheet decommission) — activity feed
+# ---------------------------------------------------------------------------
+
+@router.get("/activity")
+async def api_get_activity(limit: int = 200,
+                           event_type: Optional[str] = None,
+                           actor: Optional[str] = None) -> JSONResponse:
+    """Newest-first activity events for the feed UI."""
+    return JSONResponse({"events": list_activity(
+        limit=int(limit), event_type=event_type, actor=actor)})
+
+
+@router.post("/activity")
+async def api_post_activity(payload: Dict[str, Any],
+                            authorization: Optional[str] = Header(default=None)
+                            ) -> JSONResponse:
+    """Append one activity event. Body:
+        {"event_type": "INHOUSE", "actor": "Ben",
+         "details": "logged game W", "related": "Luke"}
+    Or bulk form: {"events": [{...}, ...]} for backfill."""
+    _check_token(authorization)
+    body = payload or {}
+    bulk = body.get("events")
+    if isinstance(bulk, list):
+        n = insert_activity_events(bulk)
+        return JSONResponse({"ok": True, "written": n})
+    et = body.get("event_type")
+    if not et:
+        raise HTTPException(status_code=400, detail="event_type required")
+    new_id = insert_activity_event(
+        event_type=et,
+        actor=body.get("actor") or body.get("player"),
+        details=body.get("details"),
+        related=body.get("related") or body.get("related_player"),
+        occurred_at=body.get("occurred_at") or body.get("timestamp"))
+    return JSONResponse({"ok": True, "id": new_id})
+
+
+# ---------------------------------------------------------------------------
+# D2 (sheet decommission) — per-player scout sheets
+# ---------------------------------------------------------------------------
+
+@router.get("/scout-sheets/{display_name}")
+async def api_get_scout_sheet(display_name: str) -> JSONResponse:
+    """Cached scout-sheet payload for one player (champ_pool, must_bans,
+    power_rating, overview, roles, matches, …). Returns 404 when there's
+    no payload yet."""
+    out = get_scout_sheet(display_name)
+    if out is None:
+        raise HTTPException(status_code=404, detail="no scout sheet")
+    return JSONResponse({"scout_sheet": out})
+
+
+@router.get("/scout-sheets")
+async def api_get_scout_sheets_batch(players: str) -> JSONResponse:
+    """Bulk fetch — same effect as the old Sheets `values_batch_get`.
+    `?players=a,b,c` is required so we don't accidentally fan out across
+    every player. Missing players come back as `null`."""
+    names = _split_players(players) or []
+    if not names:
+        raise HTTPException(status_code=400,
+                            detail="players query param required")
+    return JSONResponse({"scout_sheets": get_scout_sheets_batch(names)})
+
+
+@router.post("/scout-sheets")
+async def api_post_scout_sheets(payload: Dict[str, Any],
+                                authorization: Optional[str] = Header(default=None)
+                                ) -> JSONResponse:
+    """Write one or many scout-sheet payloads. Single form:
+        {"display_name": "Ben", "payload": {...parsed dict...}}
+    Bulk form:
+        {"sheets": [{"display_name": "Ben", "payload": {...}}, ...]}"""
+    _check_token(authorization)
+    body = payload or {}
+    sheets = body.get("sheets")
+    if isinstance(sheets, list) and sheets:
+        n = upsert_scout_sheets_bulk(sheets)
+        return JSONResponse({"ok": True, "written": n})
+    name = body.get("display_name") or body.get("name")
+    if not name or "payload" not in body:
+        raise HTTPException(status_code=400,
+                            detail="display_name + payload required")
+    upsert_scout_sheet(name, body.get("payload") or {})
+    return JSONResponse({"ok": True, "written": 1})
+
+
+@router.get("/tier-aggregate")
+async def api_tier_aggregate(players: Optional[str] = None,
+                             min_votes: int = 1) -> JSONResponse:
+    """Per-player tier-list aggregate (avg on the 1..6 S..F scale, vote
+    count, std, voters). This is the value the rankings blend consumes."""
+    return JSONResponse({"tier_aggregate":
+        tier_aggregate(eligible=_split_players(players),
+                       min_votes=int(min_votes))})
+
+
+@router.delete("/tier-votes")
+async def api_delete_tier_votes(rater: Optional[str] = None,
+                                player: Optional[str] = None,
+                                authorization: Optional[str] = Header(default=None)
+                                ) -> JSONResponse:
+    """Drop votes by rater or player. At least one filter is required so we
+    can't accidentally wipe the whole table."""
+    _check_token(authorization)
+    if not rater and not player:
+        raise HTTPException(status_code=400,
+                            detail="rater or player query param required")
+    deleted = delete_tier_votes(rater=rater, player=player)
+    return JSONResponse({"ok": True, "deleted": deleted})
 
 
 @router.post("/matches")

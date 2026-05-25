@@ -154,19 +154,16 @@ def _build_settings_window(sb_w, vw, vh):
                                      password=True, width=440, hint="RGAPI-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
         dpg.add_spacer(height=10)
 
-        _field_label("Google Sheets URL or Sheet Name")
-        dpg.add_input_text(tag="set_sheet_url", default_value=settings.sheet_url,
-                            width=560, hint="https://docs.google.com/spreadsheets/d/... or sheet name")
-        dpg.add_spacer(height=6)
-        with dpg.group(horizontal=True):
-            test_btn = dpg.add_button(label="TEST CONNECTION", callback=_test_connection,
-                                       width=160, height=28)
-            if "raj_sb_14" in _F:
-                dpg.bind_item_font(test_btn, _F["raj_sb_14"])
-            dpg.add_spacer(width=12)
-            dpg.add_text(tag="set_conn_status", default_value="",
-                         color=C["txt_dim"][:3])
-        dpg.add_spacer(height=6)
+        # Phase E (sheet decommission): the "Google Sheets URL" + "Credentials
+        # JSON" config fields are gone — every data path goes through the
+        # Fly REST API now. Region/routing stay, since the Riot fetcher
+        # still needs them. Hidden inputs preserve the old tags so
+        # _save_settings can read them without crashing the form.
+        dpg.add_input_text(tag="set_sheet_url",  show=False,
+                           default_value=settings.sheet_url)
+        dpg.add_input_text(tag="set_creds_path", show=False,
+                           default_value=settings.creds_path)
+        dpg.add_text(tag="set_conn_status", show=False, default_value="")
 
         with dpg.group(horizontal=True):
             with dpg.group():
@@ -179,16 +176,6 @@ def _build_settings_window(sb_w, vw, vh):
                 dpg.add_combo(tag="set_routing", items=ROUTINGS,
                               default_value=settings.routing, width=160)
 
-        dpg.add_spacer(height=10)
-
-        _field_label("Google Credentials JSON Path")
-        with dpg.group(horizontal=True):
-            dpg.add_input_text(tag="set_creds_path", default_value=settings.creds_path,
-                                width=480, hint="C:\\path\\to\\credentials.json")
-            dpg.add_spacer(width=8)
-            dpg.add_button(label="Browse…", callback=_browse_creds,
-                           width=90, height=28)
-
         dpg.add_spacer(height=28)
         dpg.add_separator()
         dpg.add_spacer(height=20)
@@ -198,7 +185,7 @@ def _build_settings_window(sb_w, vw, vh):
 
         with dpg.group():
             dpg.add_text(
-                "Upload your avatar — it syncs to Google Sheets so every group member sees it.",
+                "Upload your avatar — every group member sees it next time their app refreshes.",
                 color=C["txt_dim"][:3])
             dpg.add_spacer(height=10)
 

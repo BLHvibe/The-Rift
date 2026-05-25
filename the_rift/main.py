@@ -32,7 +32,7 @@ from ui import audio, effects, toast
 from data.reader import live, load_live_data, check_for_update
 from data import patch_ticker
 
-__version__ = "4.0.6"   # bump this on each release
+__version__ = "4.1.0"   # bump this on each release
 
 WIN_W, WIN_H = 1280, 800
 TITLE_H      = 52    # titlebar height
@@ -840,15 +840,24 @@ def main():
     except Exception:
         pass
 
-    # One-time sheet → DB backfill. The Fly DB is empty on first launch even
-    # when the user has years of `_InhouseGameLog` in their sheet. Push them
-    # all through `/api/matches` so the new Home / Profile / Inhouse history
-    # surfaces have something to show. Idempotent server-side (INSERT OR REPLACE
-    # on match id), gated by a config flag so it never re-runs.
+    # One-time sheet → DB backfill, retained for users on older configs
+    # whose `backfilled_from_sheet` flag isn't yet set. The Phase E EXE no
+    # longer bundles gspread, so this block silently no-ops when gspread
+    # isn't importable — the only remaining users who'd hit this path
+    # are dev installs with gspread on the venv.
     try:
         from data.config import load_config as _lc2, save_config as _sc2
         _cfg2 = _lc2()
         if not _cfg2.get("backfilled_from_sheet"):
+            try:
+                import gspread as _check_gspread  # noqa: F401
+            except Exception:
+                # gspread unavailable — mark the flag so we don't keep
+                # trying. Any prior sheet data is already in the DB from
+                # the migration backfill we ran during Phase A-D.
+                _cfg2["backfilled_from_sheet"] = True
+                _sc2(_cfg2)
+                raise ImportError("gspread not available; backfill skipped")
             from data import sheet_mirror as _sm
             def _on_backfill_done(counts):
                 _cfg2["backfilled_from_sheet"] = True

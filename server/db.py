@@ -94,11 +94,81 @@ CREATE TABLE IF NOT EXISTS achievements (
     payload    TEXT,
     PRIMARY KEY (player, code)
 );
+CREATE TABLE IF NOT EXISTS players (
+    display_name TEXT PRIMARY KEY COLLATE NOCASE,
+    riot_id      TEXT,
+    game_name    TEXT COLLATE NOCASE,
+    tagline      TEXT,
+    updated_at   TEXT
+);
+CREATE TABLE IF NOT EXISTS rankings (
+    display_name  TEXT PRIMARY KEY COLLATE NOCASE,
+    rank_position INTEGER,
+    tier          TEXT,
+    division      TEXT,
+    avg_tier      TEXT,
+    tier_score    TEXT,
+    rank_score    TEXT,
+    final_score   TEXT,
+    rating        TEXT,
+    lp            INTEGER,
+    wins          INTEGER,
+    losses        INTEGER,
+    games         INTEGER,
+    wr            REAL,
+    updated_at    TEXT
+);
+CREATE TABLE IF NOT EXISTS scout_stats (
+    display_name   TEXT PRIMARY KEY COLLATE NOCASE,
+    kda            REAL,
+    form           TEXT,
+    top_champs     TEXT,       -- JSON array of champion names
+    wr_from_stats  INTEGER,
+    games_fallback INTEGER,
+    wins_fallback  INTEGER,
+    avg_kills      REAL,
+    avg_deaths     REAL,
+    avg_assists    REAL,
+    updated_at     TEXT
+);
+CREATE TABLE IF NOT EXISTS rank_history (
+    display_name TEXT,
+    sampled_at   TEXT,
+    value        INTEGER,
+    tier         TEXT,
+    division     TEXT,
+    PRIMARY KEY (display_name, sampled_at)
+);
+CREATE TABLE IF NOT EXISTS tier_votes (
+    rater_name  TEXT NOT NULL COLLATE NOCASE,
+    player_name TEXT NOT NULL COLLATE NOCASE,
+    rating      TEXT NOT NULL,        -- 'S','A','B','C','D','F'
+    updated_at  TEXT,
+    PRIMARY KEY (rater_name, player_name)
+);
+CREATE INDEX IF NOT EXISTS ix_tier_votes_player ON tier_votes(player_name COLLATE NOCASE);
+CREATE INDEX IF NOT EXISTS ix_tier_votes_rater  ON tier_votes(rater_name  COLLATE NOCASE);
+CREATE TABLE IF NOT EXISTS activity_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    occurred_at TEXT NOT NULL,
+    event_type  TEXT NOT NULL,
+    actor       TEXT,
+    details     TEXT,
+    related     TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_activity_occurred ON activity_events(occurred_at DESC);
+CREATE INDEX IF NOT EXISTS ix_activity_actor    ON activity_events(actor);
+CREATE TABLE IF NOT EXISTS scout_sheets (
+    display_name TEXT PRIMARY KEY COLLATE NOCASE,
+    payload      TEXT,
+    updated_at   TEXT
+);
 CREATE INDEX IF NOT EXISTS ix_participants_player ON participants(player);
 CREATE INDEX IF NOT EXISTS ix_participants_champ  ON participants(champion);
 CREATE INDEX IF NOT EXISTS ix_matches_source      ON matches(source);
 CREATE INDEX IF NOT EXISTS ix_matches_started     ON matches(started_at);
 CREATE INDEX IF NOT EXISTS ix_predictions_match   ON predictions(match_id);
+CREATE INDEX IF NOT EXISTS ix_players_game_name   ON players(game_name COLLATE NOCASE);
 """
 
 
@@ -574,6 +644,1107 @@ def stats() -> Dict[str, Any]:
     last  = conn.execute("SELECT MAX(ingested_at) FROM matches").fetchone()[0]
     return {"matches": nm, "participants": npart, "last_ingest": last,
             "db_path": _db_path()}
+
+
+# ---------------------------------------------------------------------------
+# Phase A (sheet decommission) — players roster + inhouse-from-participants
+# ---------------------------------------------------------------------------
+#
+# Goal: eliminate the client's dependency on the "Players" + "_InhouseGameLog"
+# Google Sheets. The Fly DB already has match-granular data in `participants`;
+# the per-player aggregates the UI consumes (leaderboard, customs champ
+# stats, primary role) are all derivable from that. The `players` table
+# provides the display-name ↔ riot-game-name mapping that lets us resolve
+# participants (stored as riot game names like "Chupacabra117") back to the
+# group's display names (e.g. "Ben").
+
+def upsert_players(rows: Iterable[Dict[str, Any]]) -> int:
+    """Bulk replace the players roster. Each row needs at minimum a
+    `display_name`; `riot_id` ("GameName#Tagline") is split into
+    game_name/tagline. Returns the count written. Idempotent — same input
+    leaves the table unchanged. Backfill from sheets calls this once."""
+    conn = _conn()
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    n = 0
+    with _LOCK:
+        for r in (rows or []):
+            if not isinstance(r, dict):
+                continue
+            dn = (r.get("display_name") or r.get("name") or "").strip()
+            if not dn:
+                continue
+            riot = (r.get("riot_id") or "").strip()
+            game_name = (r.get("game_name") or "").strip()
+            tagline   = (r.get("tagline")   or "").strip()
+            if not game_name and "#" in riot:
+                game_name, _, tagline = riot.partition("#")
+                game_name = game_name.strip()
+                tagline   = tagline.strip()
+            conn.execute(
+                "INSERT OR REPLACE INTO players "
+                "(display_name, riot_id, game_name, tagline, updated_at) "
+                "VALUES (?,?,?,?,?)",
+                (dn, riot or None, game_name or None, tagline or None, now))
+            n += 1
+        conn.commit()
+    return n
+
+
+def get_players() -> Dict[str, Any]:
+    """Return the roster in the shape the client's reader.py was building from
+    the Players sheet:
+        {"players": [display_name, ...],
+         "summoner_map": {game_name: display_name, ...}}
+    Order preserves insertion (latest update bumps to the end)."""
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT display_name, game_name FROM players "
+        "ORDER BY updated_at ASC, display_name ASC"
+    ).fetchall()
+    players: List[str] = []
+    summoner_map: Dict[str, str] = {}
+    for r in rows:
+        dn = r["display_name"]
+        gn = r["game_name"]
+        if dn:
+            players.append(dn)
+        if gn and dn:
+            summoner_map[gn] = dn
+    return {"players": players, "summoner_map": summoner_map}
+
+
+def _resolved_display_case_sql() -> str:
+    """SQL fragment that turns `participants.player` (a riot game name) into
+    the corresponding display name via the players table. Falls back to the
+    raw participant name when no mapping exists, so off-roster players still
+    appear under their raw name rather than being dropped."""
+    # NOCASE collation on game_name index gives us a cheap case-insensitive
+    # join without LOWER() wrapping (which would defeat the index).
+    return (
+        "COALESCE("
+        "  (SELECT pl.display_name FROM players pl "
+        "   WHERE pl.game_name = pa.player COLLATE NOCASE LIMIT 1),"
+        "  pa.player"
+        ")"
+    )
+
+
+def inhouse_aggregates(
+    eligible: Optional[Iterable[str]] = None,
+    min_team_size: int = 2,
+    max_team_size: int = 10,
+) -> List[Dict[str, Any]]:
+    """Per-player customs leaderboard, derived from `participants` joined
+    against `players` for display-name resolution.
+
+    Matches the shape `reader.py::_read_inhouse` returned for `live.inhouse`
+    so the UI rendering stays identical:
+        {player, games, wins, losses, wr ("xx.x%"), kda,
+         cs_min, damage ("12,345"), gold ("8,765"),
+         recent_results (last 10, 1=win/0=loss), rank}
+
+    Filtering rules mirror the old sheet path:
+      * Only matches with `source = 'inhouse'` count (skips Riot-API scout).
+      * Games where the participant count is outside [min_team_size,
+        max_team_size] are excluded (defends against partial/garbage rows).
+      * `eligible`, when provided, restricts the output to that roster.
+    """
+    conn = _conn()
+    disp = _resolved_display_case_sql()
+
+    # Step 1: collect per-match (match_id, display, win, k/d/a/dmg/gold) for
+    # matches whose participant count is in range and source is inhouse.
+    rows = conn.execute(
+        f"""
+        WITH match_sizes AS (
+            SELECT match_id, COUNT(*) AS n
+            FROM participants
+            GROUP BY match_id
+        )
+        SELECT
+            pa.match_id      AS match_id,
+            {disp}           AS display,
+            pa.win           AS win,
+            pa.kills         AS kills,
+            pa.deaths        AS deaths,
+            pa.assists       AS assists,
+            pa.damage        AS damage,
+            pa.gold          AS gold,
+            m.started_at     AS started_at
+        FROM participants pa
+        JOIN matches m ON m.id = pa.match_id
+        JOIN match_sizes ms ON ms.match_id = pa.match_id
+        WHERE m.source = 'inhouse'
+          AND ms.n BETWEEN ? AND ?
+        ORDER BY m.started_at ASC, pa.match_id ASC
+        """,
+        (int(min_team_size), int(max_team_size))
+    ).fetchall()
+
+    agg: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        name = r["display"]
+        if not name:
+            continue
+        slot = agg.setdefault(name, {
+            "player": name, "games": 0, "wins": 0,
+            "kills": 0, "deaths": 0, "assists": 0,
+            "damage": 0, "gold": 0,
+            "recent_results": [],
+        })
+        slot["games"]   += 1
+        slot["wins"]    += 1 if r["win"] else 0
+        slot["kills"]   += int(r["kills"] or 0)
+        slot["deaths"]  += int(r["deaths"] or 0)
+        slot["assists"] += int(r["assists"] or 0)
+        slot["damage"]  += int(r["damage"] or 0)
+        slot["gold"]    += int(r["gold"] or 0)
+        slot["recent_results"].append(1 if r["win"] else 0)
+
+    elig_set = None
+    if eligible is not None:
+        elig_set = {s.strip() for s in eligible if s}
+
+    out: List[Dict[str, Any]] = []
+    for name, slot in agg.items():
+        if elig_set is not None and name not in elig_set:
+            continue
+        g = slot["games"]
+        if g == 0:
+            continue
+        w = slot["wins"]
+        l = g - w
+        wr_pct = round(w / g * 100, 1)
+        kda = round((slot["kills"] + slot["assists"])
+                    / max(slot["deaths"], 1), 1)
+        avg_dmg  = round(slot["damage"] / g)
+        avg_gold = round(slot["gold"]   / g)
+        out.append({
+            "player":         name,
+            "games":          g,
+            "wins":           w,
+            "losses":         l,
+            "wr":             f"{wr_pct}%",
+            "kda":            kda,
+            "cs_min":         "—",        # not stored at participant level
+            "damage":         f"{avg_dmg:,}",
+            "gold":           f"{avg_gold:,}",
+            "recent_results": slot["recent_results"][-10:],
+        })
+
+    def _wr_key(p):
+        try:
+            return float(str(p["wr"]).replace("%", ""))
+        except (ValueError, TypeError):
+            return 0.0
+
+    out.sort(key=lambda p: (_wr_key(p), p["games"]), reverse=True)
+    for i, p in enumerate(out):
+        p["rank"] = i + 1
+    return out
+
+
+def inhouse_champs(
+    eligible: Optional[Iterable[str]] = None,
+    min_team_size: int = 2,
+    max_team_size: int = 10,
+    recency_cap: int = 100,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Per-player champion-comfort dict, derived from `participants`. Shape:
+        {display_name: [{champ, games, wins, losses, wr, kda,
+                         kills, deaths, assists, damage,
+                         results (last `recency_cap` chronological 1/0),
+                         recent_results (last 20),
+                         roles {role: count}}]}
+
+    This is the most important consumer of the data layer — the draft
+    engine reads it as `inhouse_champs` and turns customs play into the
+    strongest comfort signal. Sort: most games first, like the sheet path.
+    """
+    conn = _conn()
+    disp = _resolved_display_case_sql()
+    rows = conn.execute(
+        f"""
+        WITH match_sizes AS (
+            SELECT match_id, COUNT(*) AS n
+            FROM participants GROUP BY match_id
+        )
+        SELECT
+            {disp}     AS display,
+            pa.champion AS champion,
+            pa.role     AS role,
+            pa.win      AS win,
+            pa.kills    AS kills,
+            pa.deaths   AS deaths,
+            pa.assists  AS assists,
+            pa.damage   AS damage,
+            m.started_at AS started_at
+        FROM participants pa
+        JOIN matches m ON m.id = pa.match_id
+        JOIN match_sizes ms ON ms.match_id = pa.match_id
+        WHERE m.source = 'inhouse'
+          AND ms.n BETWEEN ? AND ?
+          AND pa.champion IS NOT NULL AND pa.champion <> ''
+        ORDER BY m.started_at ASC
+        """,
+        (int(min_team_size), int(max_team_size))
+    ).fetchall()
+
+    elig_set = None
+    if eligible is not None:
+        elig_set = {s.strip() for s in eligible if s}
+
+    nested: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for r in rows:
+        name = r["display"]
+        if not name:
+            continue
+        if elig_set is not None and name not in elig_set:
+            continue
+        champ = r["champion"]
+        if not champ:
+            continue
+        by_champ = nested.setdefault(name, {})
+        slot = by_champ.setdefault(champ, {
+            "champ": champ, "games": 0, "wins": 0,
+            "kills": 0, "deaths": 0, "assists": 0,
+            "damage": 0,
+            "results": [],
+            "roles":   {},
+        })
+        slot["games"]   += 1
+        slot["wins"]    += 1 if r["win"] else 0
+        slot["kills"]   += int(r["kills"]   or 0)
+        slot["deaths"]  += int(r["deaths"]  or 0)
+        slot["assists"] += int(r["assists"] or 0)
+        slot["damage"]  += int(r["damage"]  or 0)
+        slot["results"].append(1 if r["win"] else 0)
+        role = (r["role"] or "").upper()
+        if role in ("TOP", "JGL", "MID", "BOT", "SUP"):
+            slot["roles"][role] = slot["roles"].get(role, 0) + 1
+
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for name, by_champ in nested.items():
+        champs: List[Dict[str, Any]] = []
+        for champ_name, slot in by_champ.items():
+            g = slot["games"]
+            if g == 0:
+                continue
+            wr = round(slot["wins"] / g * 100, 1)
+            kda = round((slot["kills"] + slot["assists"])
+                        / max(slot["deaths"], 1), 1)
+            champs.append({
+                "champ":          champ_name,
+                "games":          g,
+                "wins":           slot["wins"],
+                "losses":         g - slot["wins"],
+                "wr":             f"{wr}%",
+                "kda":            kda,
+                "kills":          round(slot["kills"]   / g, 1),
+                "deaths":         round(slot["deaths"]  / g, 1),
+                "assists":        round(slot["assists"] / g, 1),
+                "damage":         f"{round(slot['damage'] / g):,}",
+                "results":        slot["results"][-int(recency_cap):],
+                "recent_results": slot["results"][-20:],
+                "roles":          dict(slot["roles"]),
+            })
+        champs.sort(key=lambda x: x["games"], reverse=True)
+        out[name] = champs
+    return out
+
+
+def primary_roles(
+    eligible: Optional[Iterable[str]] = None,
+    min_team_size: int = 2,
+    max_team_size: int = 10,
+) -> Dict[str, str]:
+    """Per-player primary role (most-played role across customs). Shape
+    `{display_name: "TOP"|"JGL"|"MID"|"BOT"|"SUP"}`. Players with no role
+    data are omitted."""
+    conn = _conn()
+    disp = _resolved_display_case_sql()
+    rows = conn.execute(
+        f"""
+        WITH match_sizes AS (
+            SELECT match_id, COUNT(*) AS n
+            FROM participants GROUP BY match_id
+        )
+        SELECT
+            {disp}  AS display,
+            pa.role AS role,
+            COUNT(*) AS n
+        FROM participants pa
+        JOIN matches m ON m.id = pa.match_id
+        JOIN match_sizes ms ON ms.match_id = pa.match_id
+        WHERE m.source = 'inhouse'
+          AND ms.n BETWEEN ? AND ?
+          AND pa.role IN ('TOP','JGL','MID','BOT','SUP')
+        GROUP BY display, pa.role
+        """,
+        (int(min_team_size), int(max_team_size))
+    ).fetchall()
+
+    elig_set = None
+    if eligible is not None:
+        elig_set = {s.strip() for s in eligible if s}
+
+    by_player: Dict[str, Dict[str, int]] = {}
+    for r in rows:
+        name = r["display"]
+        if not name:
+            continue
+        if elig_set is not None and name not in elig_set:
+            continue
+        by_player.setdefault(name, {})[r["role"]] = int(r["n"] or 0)
+
+    out: Dict[str, str] = {}
+    for name, roles in by_player.items():
+        if not roles:
+            continue
+        out[name] = max(roles, key=roles.get)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Phase B (sheet decommission) — rankings + scout stats storage
+# ---------------------------------------------------------------------------
+#
+# These are the per-player aggregates the Riot-API fetcher used to write into
+# the "Final Rankings" + "Player Stats" Google Sheets. Storing them here
+# lets the client read them via REST instead of via gspread.
+#
+# Schemas intentionally store the "score" fields as text — the existing sheet
+# pipeline keeps them as formatted strings (e.g. "5.08" for avg_tier) and the
+# UI reads them that way. Migrating to typed numerics is a future cleanup.
+
+def upsert_rankings(rows: Iterable[Dict[str, Any]]) -> int:
+    """Bulk replace the per-player ranking aggregates. Each row maps to the
+    'Final Rankings' sheet's columns plus the underlying rank info (LP /
+    wins / losses) from 'Rank Data'.
+
+    Required: `name` (or `display_name`).
+    Optional: rank, tier, division, avg_tier, tier_score, rank_score,
+              final_score (or score), rating, lp, wins, losses, games, wr."""
+    conn = _conn()
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    n = 0
+    with _LOCK:
+        for r in (rows or []):
+            if not isinstance(r, dict):
+                continue
+            name = (r.get("display_name") or r.get("name") or "").strip()
+            if not name:
+                continue
+
+            def _i(v):
+                try:    return int(float(v))
+                except (TypeError, ValueError): return None
+
+            def _f(v):
+                try:    return float(v)
+                except (TypeError, ValueError): return None
+
+            def _s(v):
+                return None if v is None else str(v)
+
+            conn.execute(
+                "INSERT OR REPLACE INTO rankings "
+                "(display_name, rank_position, tier, division, avg_tier, "
+                " tier_score, rank_score, final_score, rating, lp, "
+                " wins, losses, games, wr, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (name,
+                 _i(r.get("rank") or r.get("rank_position")),
+                 _s(r.get("tier")), _s(r.get("division")),
+                 _s(r.get("avg_tier")), _s(r.get("tier_score")),
+                 _s(r.get("rank_score")),
+                 _s(r.get("final_score") if r.get("final_score") is not None
+                    else r.get("score")),
+                 _s(r.get("rating")),
+                 _i(r.get("lp")), _i(r.get("wins")), _i(r.get("losses")),
+                 _i(r.get("games")), _f(r.get("wr")),
+                 now))
+            n += 1
+        conn.commit()
+    return n
+
+
+def get_rankings(eligible: Optional[Iterable[str]] = None) -> List[Dict[str, Any]]:
+    """Per-player rankings list, sorted by rank_position (ascending). Mirrors
+    the shape `reader.py::_read_final_rankings` produces for `live.rankings`,
+    so a Phase D consumer can drop it in directly."""
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT display_name, rank_position, tier, division, avg_tier, "
+        "       tier_score, rank_score, final_score, rating, lp, "
+        "       wins, losses, games, wr "
+        "FROM rankings "
+        "ORDER BY rank_position IS NULL, rank_position ASC, display_name ASC"
+    ).fetchall()
+    elig_set = None
+    if eligible is not None:
+        elig_set = {s.strip() for s in eligible if s}
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        name = r["display_name"]
+        if elig_set is not None and name not in elig_set:
+            continue
+        out.append({
+            "rank":        r["rank_position"] or 0,
+            "name":        name,
+            "tier":        r["tier"] or "Unranked",
+            "division":    r["division"] or "",
+            "avg_tier":    r["avg_tier"] or "",
+            "tier_score":  r["tier_score"] or "",
+            "rank_score":  r["rank_score"] or "",
+            "final_score": r["final_score"] or "",
+            "score":       r["final_score"] or "",
+            "rating":      r["rating"] or "?",
+            "lp":          r["lp"] or 0,
+            "wins":        r["wins"] or 0,
+            "losses":      r["losses"] or 0,
+            "games":       r["games"] or 0,
+            "wr":          r["wr"] or 0,
+        })
+    return out
+
+
+def upsert_scout_stats(rows: Iterable[Dict[str, Any]]) -> int:
+    """Bulk replace per-player scout stats (Player Stats sheet content).
+    Required: `name` (or `display_name`).
+    Optional: kda, form, top_champs (list[str]), wr_from_stats,
+              games_fallback, wins_fallback, avg_kills/deaths/assists."""
+    conn = _conn()
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    n = 0
+    with _LOCK:
+        for r in (rows or []):
+            if not isinstance(r, dict):
+                continue
+            name = (r.get("display_name") or r.get("name") or "").strip()
+            if not name:
+                continue
+            tc_raw = r.get("top_champs") or []
+            if not isinstance(tc_raw, list):
+                tc_raw = []
+            tc = [str(x) for x in tc_raw if x]
+            def _f(v, default=None):
+                try:    return float(v)
+                except (TypeError, ValueError): return default
+            def _i(v, default=None):
+                try:    return int(float(v))
+                except (TypeError, ValueError): return default
+            conn.execute(
+                "INSERT OR REPLACE INTO scout_stats "
+                "(display_name, kda, form, top_champs, "
+                " wr_from_stats, games_fallback, wins_fallback, "
+                " avg_kills, avg_deaths, avg_assists, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (name, _f(r.get("kda")), (r.get("form") or "MIXED"),
+                 json.dumps(tc),
+                 _i(r.get("wr_from_stats")),
+                 _i(r.get("games_fallback")),
+                 _i(r.get("wins_fallback")),
+                 _f(r.get("avg_kills")), _f(r.get("avg_deaths")),
+                 _f(r.get("avg_assists")),
+                 now))
+            n += 1
+        conn.commit()
+    return n
+
+
+def get_scout(eligible: Optional[Iterable[str]] = None) -> List[Dict[str, Any]]:
+    """Per-player scout-tab data, returned in the shape `reader.py` produced
+    by merging rankings + Player Stats. JOIN rankings ↔ scout_stats so the
+    UI sees one row per player with all fields populated where possible."""
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT r.display_name AS name, "
+        "       r.rank_position, r.tier, r.division, r.avg_tier, "
+        "       r.tier_score, r.rank_score, r.final_score, r.rating, "
+        "       r.lp, r.wins, r.losses, r.games, r.wr, "
+        "       s.kda, s.form, s.top_champs, "
+        "       s.wr_from_stats, s.games_fallback "
+        "FROM rankings r "
+        "LEFT JOIN scout_stats s ON s.display_name = r.display_name "
+        "ORDER BY r.rank_position IS NULL, r.rank_position ASC, r.display_name ASC"
+    ).fetchall()
+    elig_set = None
+    if eligible is not None:
+        elig_set = {s.strip() for s in eligible if s}
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        name = r["name"]
+        if elig_set is not None and name not in elig_set:
+            continue
+        # Resolve wr / games with the same precedence reader.py used:
+        #   wr  = rankings.wr → scout.wr_from_stats → 0
+        #   games = rankings.games → scout.games_fallback → 0
+        wr = r["wr"] or 0
+        if not wr:
+            wr = r["wr_from_stats"] or 0
+        games_val = r["games"] or r["games_fallback"] or 0
+        # final_score is text in the DB; surface as a float for the UI
+        try:
+            score_f = float(r["final_score"]) if r["final_score"] else 0.0
+        except (ValueError, TypeError):
+            score_f = 0.0
+        try:
+            top_champs = json.loads(r["top_champs"]) if r["top_champs"] else []
+        except (json.JSONDecodeError, TypeError):
+            top_champs = []
+        out.append({
+            "name":        name,
+            "tier":        r["tier"] or "Unranked",
+            "score":       score_f,
+            "final_score": r["final_score"] or "",
+            "tier_score":  r["tier_score"]  or "",
+            "rank_score":  r["rank_score"]  or "",
+            "rating":      r["rating"] or "?",
+            "rank":        r["rank_position"] or 0,
+            "wr":          int(wr) if wr else 0,
+            "kda":         round(float(r["kda"] or 0.0), 1),
+            "games":       int(games_val) if games_val else 0,
+            "top_champs":  top_champs,
+            "form":        r["form"] or "MIXED",
+        })
+    return out
+
+
+def append_rank_history(
+    rows: Iterable[Dict[str, Any]],
+    sampled_at: Optional[str] = None,
+) -> int:
+    """Snapshot the current rank values into the time-series table. Each
+    snapshot is keyed (display_name, sampled_at) so the UI can read the per-
+    player sparkline. Pass `value` (the chart-friendly int 0..31) plus
+    optional tier/division for label display."""
+    conn = _conn()
+    ts = sampled_at or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    n = 0
+    with _LOCK:
+        for r in (rows or []):
+            if not isinstance(r, dict):
+                continue
+            name = (r.get("display_name") or r.get("name") or "").strip()
+            if not name:
+                continue
+            try:    value = int(float(r.get("value") or 0))
+            except (TypeError, ValueError): value = 0
+            conn.execute(
+                "INSERT OR REPLACE INTO rank_history "
+                "(display_name, sampled_at, value, tier, division) "
+                "VALUES (?,?,?,?,?)",
+                (name, ts, value,
+                 r.get("tier") or None, r.get("division") or None))
+            n += 1
+        conn.commit()
+    return n
+
+
+def get_rank_history(
+    eligible: Optional[Iterable[str]] = None,
+    limit_per_player: int = 30,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Per-player time-series of rank values (newest sample last). Returns
+    `{display_name: [{sampled_at, value, tier, division}, ...]}` for sparkline
+    rendering. `limit_per_player` caps the most recent samples (cheap when
+    the table grows)."""
+    conn = _conn()
+    elig = _norm_eligible(eligible)
+    if elig is None:
+        rows = conn.execute(
+            "SELECT display_name, sampled_at, value, tier, division "
+            "FROM rank_history ORDER BY display_name ASC, sampled_at ASC"
+        ).fetchall()
+    else:
+        ph = ",".join("?" * len(elig))
+        rows = conn.execute(
+            f"SELECT display_name, sampled_at, value, tier, division "
+            f"FROM rank_history WHERE display_name IN ({ph}) "
+            f"ORDER BY display_name ASC, sampled_at ASC", elig
+        ).fetchall()
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for r in rows:
+        out.setdefault(r["display_name"], []).append({
+            "sampled_at": r["sampled_at"],
+            "value":      r["value"],
+            "tier":       r["tier"] or "",
+            "division":   r["division"] or "",
+        })
+    # Cap to most recent N per player
+    if limit_per_player and limit_per_player > 0:
+        for k, lst in out.items():
+            if len(lst) > limit_per_player:
+                out[k] = lst[-int(limit_per_player):]
+    return out
+
+
+# ---------------------------------------------------------------------------
+# D1 (sheet decommission) — tier-list voting
+# ---------------------------------------------------------------------------
+#
+# Replaces the Google "Tier Lists" sheet — a 2D table where rows are players
+# being rated and columns are raters who submitted ratings. Each rater
+# rates each player on the S/A/B/C/D/F scale. The per-player average (on
+# the 1..6 numeric scale) is the `avg_tier` that historically blended into
+# the Final Rankings score formula in the sheet.
+#
+# Drop in this migration: the legacy "Consensus & Controversy", "Hot Takes",
+# and "Rater Bias" derived feeds (the tier list tab's secondary UI). The
+# primary rankings blend still uses the per-player average computed here.
+
+# S=6, A=5, B=4, C=3, D=2, F=1 — matches fetch_ranks.constants.TIER_TO_NUM.
+_TIER_TO_NUM: Dict[str, int] = {"S": 6, "A": 5, "B": 4, "C": 3, "D": 2, "F": 1}
+_NUM_TO_TIER: Dict[int, str] = {v: k for k, v in _TIER_TO_NUM.items()}
+
+
+def upsert_tier_votes(rater_name: str,
+                      placements: Dict[str, Iterable[str]],
+                      replace_rater: bool = True) -> int:
+    """Persist one rater's full ballot.
+
+    `placements` is the shape the client UI produces:
+        {"S": [player1, player2], "A": [...], ..., "F": [...]}
+
+    When `replace_rater` is True (the normal submit path) we delete every
+    prior vote from this rater first so removing a player from the ballot
+    drops their old rating. Set False for partial-update flows."""
+    rater = (rater_name or "").strip()
+    if not rater:
+        raise ValueError("rater_name required")
+    conn = _conn()
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    n = 0
+    with _LOCK:
+        if replace_rater:
+            conn.execute("DELETE FROM tier_votes WHERE rater_name = ?",
+                         (rater,))
+        for letter, names in (placements or {}).items():
+            tier = str(letter or "").strip().upper()
+            if tier not in _TIER_TO_NUM:
+                continue
+            for raw in (names or []):
+                pname = str(raw or "").strip()
+                if not pname:
+                    continue
+                conn.execute(
+                    "INSERT OR REPLACE INTO tier_votes "
+                    "(rater_name, player_name, rating, updated_at) "
+                    "VALUES (?,?,?,?)",
+                    (rater, pname, tier, now))
+                n += 1
+        conn.commit()
+    return n
+
+
+def upsert_tier_votes_grid(grid: Iterable[Dict[str, Any]]) -> int:
+    """Bulk-import the existing Tier Lists sheet as a list of cells:
+        [{"rater": "Ben", "player": "Luke", "rating": "A"}, ...]
+    Used by the one-time backfill so nobody re-rates. Returns the row count."""
+    conn = _conn()
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    n = 0
+    with _LOCK:
+        for row in (grid or []):
+            if not isinstance(row, dict):
+                continue
+            rater = str(row.get("rater") or "").strip()
+            player = str(row.get("player") or "").strip()
+            rating = str(row.get("rating") or "").strip().upper()
+            if not rater or not player or rating not in _TIER_TO_NUM:
+                continue
+            conn.execute(
+                "INSERT OR REPLACE INTO tier_votes "
+                "(rater_name, player_name, rating, updated_at) "
+                "VALUES (?,?,?,?)",
+                (rater, player, rating, now))
+            n += 1
+        conn.commit()
+    return n
+
+
+def get_tier_votes(rater: Optional[str] = None,
+                   player: Optional[str] = None,
+                   ) -> List[Dict[str, Any]]:
+    """List every (rater, player, rating) tuple, optionally filtered."""
+    conn = _conn()
+    where, args = [], []
+    if rater:
+        where.append("rater_name = ?")
+        args.append(rater.strip())
+    if player:
+        where.append("player_name = ?")
+        args.append(player.strip())
+    sql = ("SELECT rater_name, player_name, rating, updated_at FROM tier_votes"
+           + (" WHERE " + " AND ".join(where) if where else "")
+           + " ORDER BY player_name ASC, rater_name ASC")
+    rows = conn.execute(sql, args).fetchall()
+    return [{"rater":  r["rater_name"],
+             "player": r["player_name"],
+             "rating": r["rating"],
+             "updated_at": r["updated_at"]} for r in rows]
+
+
+def tier_aggregate(eligible: Optional[Iterable[str]] = None,
+                   min_votes: int = 1) -> Dict[str, Dict[str, Any]]:
+    """Per-player aggregate: {player: {avg, avg_tier, votes, min, max,
+                                       std, voters}}.
+
+    `avg` is on the 1..6 numeric scale (S=6 .. F=1) — that's the `avg_tier`
+    the old Final Rankings sheet formula consumed. `avg_tier` returned here
+    is the rounded letter, for display. `voters` is the raters who rated
+    this player. `std` (population) gives a controversy proxy.
+    """
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT player_name, rater_name, rating FROM tier_votes "
+        "ORDER BY player_name ASC"
+    ).fetchall()
+    elig_set = None
+    if eligible is not None:
+        elig_set = {s.strip() for s in eligible if s}
+    by_player: Dict[str, List[Dict[str, Any]]] = {}
+    for r in rows:
+        pname = r["player_name"]
+        if elig_set is not None and pname not in elig_set:
+            continue
+        by_player.setdefault(pname, []).append({
+            "rater": r["rater_name"],
+            "rating": r["rating"],
+            "num":    _TIER_TO_NUM.get(r["rating"], 0),
+        })
+    out: Dict[str, Dict[str, Any]] = {}
+    for pname, ballots in by_player.items():
+        if len(ballots) < int(min_votes):
+            continue
+        nums = [b["num"] for b in ballots if b["num"] > 0]
+        if not nums:
+            continue
+        n = len(nums)
+        avg = sum(nums) / n
+        mean = avg
+        variance = sum((x - mean) ** 2 for x in nums) / n
+        std = variance ** 0.5
+        out[pname] = {
+            "avg":      round(avg, 3),
+            "avg_tier": _NUM_TO_TIER.get(round(avg), "?"),
+            "votes":    n,
+            "min":      _NUM_TO_TIER.get(min(nums), "?"),
+            "max":      _NUM_TO_TIER.get(max(nums), "?"),
+            "std":      round(std, 3),
+            "voters":   [b["rater"] for b in ballots],
+        }
+    return out
+
+
+def delete_tier_votes(rater: Optional[str] = None,
+                      player: Optional[str] = None) -> int:
+    """Remove votes by rater or player (or both). Returns rows deleted."""
+    conn = _conn()
+    where, args = [], []
+    if rater:
+        where.append("rater_name = ?")
+        args.append(rater.strip())
+    if player:
+        where.append("player_name = ?")
+        args.append(player.strip())
+    if not where:
+        raise ValueError("delete_tier_votes needs rater or player")
+    with _LOCK:
+        cur = conn.execute(
+            "DELETE FROM tier_votes WHERE " + " AND ".join(where), args)
+        conn.commit()
+        return cur.rowcount or 0
+
+
+# ---------------------------------------------------------------------------
+# D1 — rankings recompute  (community votes + Riot rank → final_score)
+# ---------------------------------------------------------------------------
+#
+# Formula reverse-engineered from the current "Final Rankings" sheet:
+#   tier_score  = avg_tier × 10     (community vote avg 1..6 → 10..60)
+#   rank_score  = riot_score × 4    (Riot rank 2.5..10 → 10..40)
+#   final_score = tier_score + rank_score          (0..100 blend)
+#   rating      = S / A / B / C / D / F            (final_score thresholds)
+#
+# This keeps the rankings page numerically identical to what the sheet was
+# producing, just without the sheet round-trip. Called whenever a ballot is
+# submitted (tier_score changes) or the Riot fetcher pushes new rank data.
+
+# Tier base scores — matches fetch_ranks.constants.RANK_SCORES exactly so the
+# Riot fetcher's `compute_score` and this server-side recompute agree.
+_RIOT_RANK_BASE: Dict[str, float] = {
+    "Challenger": 10.0, "Grandmaster": 9.5, "Master": 9.0,
+    "Diamond": 8.0, "Emerald": 6.25, "Platinum": 5.5,
+    "Gold": 4.75, "Silver": 4.0, "Bronze": 3.25, "Iron": 2.5,
+    "Unranked": 4.75,  # treated as Gold I for scoring fairness
+}
+_DIV_OFFSET: Dict[str, float] = {"I": 0.0, "II": -0.25, "III": -0.5, "IV": -0.75}
+_NO_DIV_TIERS = {"Challenger", "Grandmaster", "Master", "Unranked"}
+
+
+def _riot_score(tier: str, division: str) -> float:
+    base = _RIOT_RANK_BASE.get(tier or "Unranked", 1.0)
+    if (tier or "") in _NO_DIV_TIERS:
+        return round(base, 2)
+    return round(base + _DIV_OFFSET.get(division or "", 0.0), 2)
+
+
+def _rating_letter(final_score: float) -> str:
+    s = float(final_score or 0.0)
+    if s >= 85: return "S"
+    if s >= 70: return "A"
+    if s >= 55: return "B"
+    if s >= 40: return "C"
+    if s >= 25: return "D"
+    return "F"
+
+
+# ---------------------------------------------------------------------------
+# D3 (sheet decommission) — activity feed events
+# ---------------------------------------------------------------------------
+
+def insert_activity_event(event_type: str,
+                          actor: Optional[str] = None,
+                          details: Optional[str] = None,
+                          related: Optional[str] = None,
+                          occurred_at: Optional[str] = None) -> int:
+    """Append a single activity event. Returns the new row id."""
+    et = (event_type or "").strip().upper()
+    if not et:
+        raise ValueError("event_type required")
+    ts = occurred_at or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    conn = _conn()
+    with _LOCK:
+        cur = conn.execute(
+            "INSERT INTO activity_events "
+            "(occurred_at, event_type, actor, details, related) "
+            "VALUES (?,?,?,?,?)",
+            (ts, et, actor or None, details or None, related or None))
+        conn.commit()
+        return int(cur.lastrowid or 0)
+
+
+def insert_activity_events(rows: Iterable[Dict[str, Any]]) -> int:
+    """Bulk-insert events — backfill path. Each row: {event_type, actor,
+    details, related, occurred_at}. Skips rows missing event_type."""
+    conn = _conn()
+    n = 0
+    with _LOCK:
+        for r in (rows or []):
+            if not isinstance(r, dict):
+                continue
+            et = str(r.get("event_type") or "").strip().upper()
+            if not et:
+                continue
+            ts = (r.get("occurred_at")
+                  or r.get("timestamp")
+                  or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+            conn.execute(
+                "INSERT INTO activity_events "
+                "(occurred_at, event_type, actor, details, related) "
+                "VALUES (?,?,?,?,?)",
+                (ts, et,
+                 (r.get("actor") or r.get("player") or None),
+                 (r.get("details") or None),
+                 (r.get("related") or r.get("related_player") or None)))
+            n += 1
+        conn.commit()
+    return n
+
+
+def upsert_scout_sheet(display_name: str,
+                       payload: Dict[str, Any]) -> bool:
+    """Replace the cached scout-sheet payload for one player. `payload` is
+    the parsed dict the client's `_parse_scouting_sheet` used to return:
+    {player, subtitle, power_rating, overview_headers, overview_values,
+     must_bans, ban_impact, champ_pool, roles, form_state, matches, ...}.
+    Stored as JSON so we don't have to schema every nested field."""
+    name = (display_name or "").strip()
+    if not name:
+        raise ValueError("display_name required")
+    conn = _conn()
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    with _LOCK:
+        conn.execute(
+            "INSERT OR REPLACE INTO scout_sheets "
+            "(display_name, payload, updated_at) VALUES (?,?,?)",
+            (name, json.dumps(payload or {}), now))
+        conn.commit()
+    return True
+
+
+def upsert_scout_sheets_bulk(rows: Iterable[Dict[str, Any]]) -> int:
+    """Bulk replace many scout-sheet payloads. Each row: {name, payload}."""
+    conn = _conn()
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    n = 0
+    with _LOCK:
+        for r in (rows or []):
+            if not isinstance(r, dict):
+                continue
+            name = (r.get("display_name") or r.get("name") or "").strip()
+            if not name:
+                continue
+            payload = r.get("payload") or {}
+            conn.execute(
+                "INSERT OR REPLACE INTO scout_sheets "
+                "(display_name, payload, updated_at) VALUES (?,?,?)",
+                (name, json.dumps(payload), now))
+            n += 1
+        conn.commit()
+    return n
+
+
+def get_scout_sheet(display_name: str) -> Optional[Dict[str, Any]]:
+    """Return the cached scout-sheet payload for one player, or None."""
+    name = (display_name or "").strip()
+    if not name:
+        return None
+    conn = _conn()
+    r = conn.execute(
+        "SELECT payload, updated_at FROM scout_sheets WHERE display_name = ?",
+        (name,)).fetchone()
+    if r is None or not r["payload"]:
+        return None
+    try:
+        out = json.loads(r["payload"])
+    except (json.JSONDecodeError, TypeError):
+        return None
+    out["updated_at"] = r["updated_at"]
+    return out
+
+
+def get_scout_sheets_batch(names: Iterable[str]
+                           ) -> Dict[str, Optional[Dict[str, Any]]]:
+    """Return many scout-sheet payloads in one round-trip. Missing names
+    map to None so callers can detect 'no scout sheet yet for this player'."""
+    elig = _norm_eligible(names)
+    out: Dict[str, Optional[Dict[str, Any]]] = {}
+    if not elig:
+        return out
+    conn = _conn()
+    ph = ",".join("?" * len(elig))
+    rows = conn.execute(
+        f"SELECT display_name, payload, updated_at FROM scout_sheets "
+        f"WHERE display_name IN ({ph})",
+        elig).fetchall()
+    found: Dict[str, Optional[Dict[str, Any]]] = {}
+    for r in rows:
+        try:
+            d = json.loads(r["payload"]) if r["payload"] else None
+        except (json.JSONDecodeError, TypeError):
+            d = None
+        if isinstance(d, dict):
+            d["updated_at"] = r["updated_at"]
+        found[r["display_name"]] = d
+    for name in elig:
+        out[name] = found.get(name)
+    return out
+
+
+def list_activity(limit: int = 200,
+                  event_type: Optional[str] = None,
+                  actor: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Newest-first list of events for the activity feed UI. Returns the
+    shape `reader.py::_read_activity` used to produce so the feed.py
+    consumer keeps working unchanged: keys `timestamp`, `event_type`,
+    `player`, `details`, `related_player`."""
+    conn = _conn()
+    where, args = [], []
+    if event_type:
+        where.append("event_type = ?")
+        args.append(event_type.strip().upper())
+    if actor:
+        where.append("actor = ?")
+        args.append(actor.strip())
+    sql = ("SELECT occurred_at, event_type, actor, details, related "
+           "FROM activity_events "
+           + (" WHERE " + " AND ".join(where) if where else "")
+           + " ORDER BY occurred_at DESC, id DESC LIMIT ?")
+    args.append(int(limit))
+    rows = conn.execute(sql, args).fetchall()
+    return [{
+        "timestamp":      r["occurred_at"],
+        "event_type":     r["event_type"],
+        "player":         r["actor"] or "",
+        "details":        r["details"] or "",
+        "related_player": r["related"] or "",
+    } for r in rows]
+
+
+def recompute_rankings_blend() -> int:
+    """Re-apply the tier_score + rank_score blend to every row in the
+    rankings table, using the current tier_votes aggregate. Returns the
+    number of rows updated.
+
+    Triggered automatically on tier-vote submit + on Riot fetcher push, and
+    exposed at POST /api/rankings/recompute for manual reruns."""
+    conn = _conn()
+    # Pull current ranks
+    rank_rows = conn.execute(
+        "SELECT display_name, tier, division FROM rankings"
+    ).fetchall()
+    if not rank_rows:
+        return 0
+    # Pull current per-player vote avg (1..6 scale)
+    agg = tier_aggregate(min_votes=1)
+    avg_by: Dict[str, float] = {name: float(d.get("avg") or 0.0)
+                                for name, d in agg.items()}
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    # Compute new values
+    new_rows: List[Tuple[Any, ...]] = []
+    for r in rank_rows:
+        name = r["display_name"]
+        tier = r["tier"] or "Unranked"
+        div  = r["division"] or ""
+        riot = _riot_score(tier, div)
+        rank_score = round(riot * 4.0, 2)
+        avg = avg_by.get(name, 0.0)
+        if avg > 0:
+            tier_score = round(avg * 10.0, 2)
+        else:
+            tier_score = 0.0
+        final = round(tier_score + rank_score, 2)
+        rating = _rating_letter(final)
+        new_rows.append((
+            f"{avg:.2f}" if avg > 0 else "",
+            f"{tier_score:.2f}" if tier_score else "",
+            f"{rank_score:.2f}",
+            f"{final:.2f}",
+            rating, now, name,
+        ))
+
+    # Apply
+    n = 0
+    with _LOCK:
+        for tup in new_rows:
+            cur = conn.execute(
+                "UPDATE rankings SET avg_tier=?, tier_score=?, rank_score=?, "
+                "       final_score=?, rating=?, updated_at=? "
+                "WHERE display_name=?", tup)
+            n += cur.rowcount or 0
+        # Re-sort rank_position by final_score desc so the leaderboard is right.
+        # Pull names ordered by final_score (text -> float for sort).
+        ordered = conn.execute(
+            "SELECT display_name, final_score FROM rankings"
+        ).fetchall()
+        scored = []
+        for r in ordered:
+            try:
+                s = float(r["final_score"]) if r["final_score"] else 0.0
+            except (ValueError, TypeError):
+                s = 0.0
+            scored.append((r["display_name"], s))
+        scored.sort(key=lambda x: -x[1])
+        for pos, (name, _s) in enumerate(scored, 1):
+            conn.execute(
+                "UPDATE rankings SET rank_position=? WHERE display_name=?",
+                (pos, name))
+        conn.commit()
+    return n
 
 
 # ---------------------------------------------------------------------------

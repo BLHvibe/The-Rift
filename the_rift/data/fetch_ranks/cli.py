@@ -12,8 +12,13 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 import requests
-import gspread
-from google.oauth2.service_account import Credentials
+# Phase E (sheet decommission): gspread imports are optional now.
+try:
+    import gspread  # noqa: F401
+    from google.oauth2.service_account import Credentials  # noqa: F401
+except Exception:
+    gspread = None        # type: ignore
+    Credentials = None    # type: ignore
 
 import os
 
@@ -217,6 +222,16 @@ def main():
         write_rank_history(spreadsheet, results, ts)
         append_activity_event(spreadsheet, "UPDATE", "",
                               f"{len(results)} players updated")
+
+        # Phase C (sheet decommission): mirror the same data into the Fly
+        # REST API. Best-effort — failures here are logged but never block
+        # the sheet write path. Once Phase D flips the client over to read
+        # from the API, the sheet writes above become safety net only.
+        try:
+            from . import api_writer
+            api_writer.push_all(players, results, consensus=consensus)
+        except Exception as _e:                                # pragma: no cover
+            print(f"  [api] push_all failed: {_e}")
     else:
         results = []
 
@@ -289,6 +304,15 @@ def main():
                 player_inhouse = inhouse_db.get(riot_name)
 
             write_scouting_sheet(spreadsheet, player["name"], rs, plp, analysis, ranking_info, player_inhouse)
+            # D2 (sheet decommission): mirror to /api/scout-sheets too.
+            try:
+                from . import api_writer
+                api_writer.push_scout_sheet(
+                    player["name"], rs, plp, analysis,
+                    ranking_info=ranking_info,
+                    inhouse_data={"champs": player_inhouse} if player_inhouse else None)
+            except Exception as _e:                            # pragma: no cover
+                print(f"  [api] push_scout_sheet failed: {_e}")
 
         # Create Draft Tool sheet with dropdowns
         print(f"\nCreating Draft Tool...")
@@ -372,6 +396,15 @@ def main():
                 player_inhouse = inhouse_db.get(riot_name)
 
             write_scouting_sheet(spreadsheet, player["name"], rs, plp, analysis, ranking_info, player_inhouse)
+            # D2 (sheet decommission): mirror to /api/scout-sheets too.
+            try:
+                from . import api_writer
+                api_writer.push_scout_sheet(
+                    player["name"], rs, plp, analysis,
+                    ranking_info=ranking_info,
+                    inhouse_data={"champs": player_inhouse} if player_inhouse else None)
+            except Exception as _e:                            # pragma: no cover
+                print(f"  [api] push_scout_sheet failed: {_e}")
 
         if not new_scouting:
             print("\nNo new players could be scouted.")

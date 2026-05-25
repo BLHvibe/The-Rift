@@ -254,3 +254,192 @@ def post_prediction(match_id: str, voter: str,
         return {"ok": False, "status": r.status_code, "detail": r.text[:200]}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Phase A/B (sheet decommission) — roster + derived aggregates + rankings/scout
+# ---------------------------------------------------------------------------
+#
+# These getters replace `reader.py::_read_sheets` once `load_live_data` is
+# flipped over to the REST path. Same return shapes the sheet readers used so
+# the rest of the data layer keeps working unchanged.
+
+def get_players_roster() -> Dict[str, Any]:
+    """{`players`: [display_name, ...], `summoner_map`: {game_name: display}}.
+    Empty dict on failure so callers can fall back to the sheet path."""
+    data = _get("/api/players")
+    return data or {}
+
+
+def get_rankings_api(players: Optional[Iterable[str]] = None
+                     ) -> List[Dict[str, Any]]:
+    """Per-player rankings list (replaces the Final Rankings sheet)."""
+    qs = _players_qs(players)
+    path = "/api/rankings" + (("?" + qs[1:]) if qs else "")
+    data = _get(path)
+    return (data or {}).get("rankings", []) if data else []
+
+
+def get_scout_api(players: Optional[Iterable[str]] = None
+                  ) -> List[Dict[str, Any]]:
+    """Per-player scout list (replaces the Player Stats sheet read)."""
+    qs = _players_qs(players)
+    path = "/api/scout" + (("?" + qs[1:]) if qs else "")
+    data = _get(path)
+    return (data or {}).get("scout", []) if data else []
+
+
+def get_inhouse_aggregates_api(players: Optional[Iterable[str]] = None
+                               ) -> List[Dict[str, Any]]:
+    """Per-player customs leaderboard (replaces _InhouseGameLog aggregation)."""
+    qs = _players_qs(players)
+    path = "/api/inhouse-aggregates" + (("?" + qs[1:]) if qs else "")
+    data = _get(path)
+    return (data or {}).get("inhouse", []) if data else []
+
+
+def get_inhouse_champs_api(players: Optional[Iterable[str]] = None
+                           ) -> Dict[str, List[Dict[str, Any]]]:
+    """Per-player customs champion dict (the engine's #1 comfort signal)."""
+    qs = _players_qs(players)
+    path = "/api/inhouse-champs" + (("?" + qs[1:]) if qs else "")
+    data = _get(path)
+    return (data or {}).get("inhouse_champs", {}) if data else {}
+
+
+def get_primary_roles_api(players: Optional[Iterable[str]] = None
+                          ) -> Dict[str, str]:
+    """Per-player most-played role from customs."""
+    qs = _players_qs(players)
+    path = "/api/primary-roles" + (("?" + qs[1:]) if qs else "")
+    data = _get(path)
+    return (data or {}).get("primary_roles", {}) if data else {}
+
+
+def get_rank_history_api(players: Optional[Iterable[str]] = None,
+                         limit: int = 30
+                         ) -> Dict[str, List[Dict[str, Any]]]:
+    """Per-player rank-value time series for the sparkline."""
+    qs = _players_qs(players)
+    path = (f"/api/rank-history?limit={int(limit)}"
+            + (qs if qs else ""))
+    data = _get(path)
+    return (data or {}).get("rank_history", {}) if data else {}
+
+
+def get_activity_api(limit: int = 200,
+                     event_type: Optional[str] = None,
+                     actor: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Newest-first activity events for the feed (replaces _Activity sheet)."""
+    parts = [f"limit={int(limit)}"]
+    if event_type:
+        parts.append(f"event_type={event_type}")
+    if actor:
+        parts.append(f"actor={actor}")
+    path = "/api/activity?" + "&".join(parts)
+    data = _get(path)
+    return (data or {}).get("events", []) if data else []
+
+
+def post_activity_event(event_type: str,
+                        actor: Optional[str] = None,
+                        details: Optional[str] = None,
+                        related: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Append one event to the activity feed."""
+    if not is_configured() or not event_type:
+        return None
+    headers: Dict[str, str] = {}
+    tok = _token()
+    if tok:
+        headers["Authorization"] = f"Bearer {tok}"
+    body = {"event_type": event_type,
+            "actor": actor, "details": details, "related": related}
+    try:
+        r = requests.post(f"{_base_url()}/api/activity",
+                          json=body, headers=headers, timeout=_TIMEOUT)
+        if r.status_code == 200:
+            return r.json()
+        return {"ok": False, "status": r.status_code, "detail": r.text[:200]}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def get_scout_sheet_api(display_name: str) -> Optional[Dict[str, Any]]:
+    """One player's full scout-sheet payload (None if missing)."""
+    if not display_name:
+        return None
+    data = _get(f"/api/scout-sheets/{display_name}")
+    return (data or {}).get("scout_sheet") if data else None
+
+
+def get_scout_sheets_batch_api(players: Iterable[str]
+                               ) -> Dict[str, Optional[Dict[str, Any]]]:
+    """Bulk-fetch many scout-sheet payloads. Missing players come back
+    keyed to None so callers can detect 'no scout sheet yet'."""
+    qs = _players_qs(players)
+    if not qs:
+        return {}
+    # endpoint expects `?players=…`, _players_qs returns `&players=…`
+    data = _get("/api/scout-sheets?" + qs[1:])
+    return (data or {}).get("scout_sheets", {}) if data else {}
+
+
+def post_scout_sheet(display_name: str,
+                     payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Replace one player's scout-sheet payload."""
+    if not is_configured() or not display_name:
+        return None
+    headers: Dict[str, str] = {}
+    tok = _token()
+    if tok:
+        headers["Authorization"] = f"Bearer {tok}"
+    try:
+        r = requests.post(f"{_base_url()}/api/scout-sheets",
+                          json={"display_name": display_name,
+                                "payload": payload or {}},
+                          headers=headers, timeout=_TIMEOUT)
+        if r.status_code == 200:
+            return r.json()
+        return {"ok": False, "status": r.status_code, "detail": r.text[:200]}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def post_scout_sheets_bulk(rows: List[Dict[str, Any]]
+                           ) -> Optional[Dict[str, Any]]:
+    """Bulk-write scout-sheet payloads. Each row: {display_name, payload}."""
+    if not is_configured() or not rows:
+        return None
+    headers: Dict[str, str] = {}
+    tok = _token()
+    if tok:
+        headers["Authorization"] = f"Bearer {tok}"
+    try:
+        r = requests.post(f"{_base_url()}/api/scout-sheets",
+                          json={"sheets": rows},
+                          headers=headers, timeout=_TIMEOUT)
+        if r.status_code == 200:
+            return r.json()
+        return {"ok": False, "status": r.status_code, "detail": r.text[:200]}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def post_tier_votes_bulk(votes: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Bulk-import tier votes (one-time backfill from the old Tier Lists
+    sheet). Each row: {rater, player, rating}."""
+    if not is_configured() or not votes:
+        return None
+    headers: Dict[str, str] = {}
+    tok = _token()
+    if tok:
+        headers["Authorization"] = f"Bearer {tok}"
+    try:
+        r = requests.post(f"{_base_url()}/api/tier-votes/bulk",
+                          json={"votes": votes},
+                          headers=headers, timeout=_TIMEOUT)
+        if r.status_code == 200:
+            return r.json()
+        return {"ok": False, "status": r.status_code, "detail": r.text[:200]}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}

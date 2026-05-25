@@ -12,8 +12,17 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 import requests
-import gspread
-from google.oauth2.service_account import Credentials
+
+# Phase E (sheet decommission): gspread imports are now optional. The
+# functions that touch sheets (write_scouting_sheet, write_scouting_database)
+# still need gspread when invoked, but `analyze_player` and the data-only
+# helpers can run from gspread-free callers (api-only ranking refresh).
+try:
+    import gspread  # noqa: F401
+    from google.oauth2.service_account import Credentials  # noqa: F401
+except Exception:                                              # pragma: no cover
+    gspread = None        # type: ignore
+    Credentials = None    # type: ignore
 
 # Optional engine import for shared synergy + counter data.
 try:
@@ -25,7 +34,10 @@ except Exception:
         _eng = None
 
 from .constants import *
-from .sheets import get_or_create_sheet, fmt_title, fmt_header, sheets_retry
+try:
+    from .sheets import get_or_create_sheet, fmt_title, fmt_header, sheets_retry
+except Exception:                                              # pragma: no cover
+    get_or_create_sheet = fmt_title = fmt_header = sheets_retry = None  # type: ignore
 from .scoring import compute_score, rank_to_chart_value
 from .riot import riot_get, fetch_scouting_matches
 

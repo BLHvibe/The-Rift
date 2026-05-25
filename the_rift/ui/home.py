@@ -920,28 +920,18 @@ def _build_latest_drama():
     }
 
 
+# D1 (sheet decommission): _build_hot_take and _build_controversial were
+# removed alongside the Consensus / Hot Takes / Rater Bias sheets they fed
+# on. The home-tab pulse rotation falls back to the remaining card builders.
+
 def _build_hot_take():
-    if not live.tier_hot_takes:
-        return None
-    ht = live.tier_hot_takes[0]
-    rater = (ht.get("rater") or "—").upper()
-    player = ht.get("player") or "—"
-    direction = (ht.get("direction") or "").upper() or "OFF AVG"
-    diff = abs(float(ht.get("diff", 0) or 0))
-    return {
-        "label":    "HOT TAKE",
-        "accent":   _AC_VIOLET,
-        "headline": f"{rater} rates {player}",
-        "detail":   f"{direction}  ·  {diff:.1f} off the consensus",
-        "context":  "from the cross-rater bias report",
-        "visual":   None,
-    }
+    return None
 
 
 def _build_controversial():
-    if not live.tier_consensus:
-        return None
-    top = max(live.tier_consensus,
+    return None
+    # Legacy implementation kept below for reference; unreachable.
+    top = max(live.tier_consensus or [],
               key=lambda p: float(p.get("std", 0) or 0),
               default=None)
     if not top:
@@ -984,8 +974,6 @@ _PULSE_BUILDERS = (
     _build_grinder,
     _build_climber,
     _build_latest_drama,
-    _build_hot_take,
-    _build_controversial,
     _build_sharpest_predictor,
 )
 

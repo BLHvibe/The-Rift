@@ -12,8 +12,16 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 import requests
-import gspread
-from google.oauth2.service_account import Credentials
+
+# Phase E (sheet decommission): gspread is optional now. The functions
+# below all need it when called — they raise at runtime if it's missing —
+# but importing this module no longer requires gspread.
+try:
+    import gspread  # noqa: F401
+    from google.oauth2.service_account import Credentials  # noqa: F401
+except Exception:                                              # pragma: no cover
+    gspread = None        # type: ignore
+    Credentials = None    # type: ignore
 
 from .constants import SCOPES
 

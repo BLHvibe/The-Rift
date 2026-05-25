@@ -29,7 +29,11 @@ a = Analysis(
         (os.path.join(HERE, 'assets'),       'assets'),
         (os.path.join(HERE, 'fonts'),        'fonts'),
         (os.path.join(HERE, 'data'),         'data'),
-        (os.path.join(HERE, '..', 'credentials.json'), '.'),
+        # Phase E (sheet decommission): credentials.json no longer bundled
+        # — every data path goes through the Fly REST API now. Source-tree
+        # `data/fetch_ranks/*` retains gspread imports for the Riot fetcher
+        # CLI's optional `--scout` sheet writes, but those modules are not
+        # exercised by the EXE entry point any longer.
     ],
     hiddenimports=[
         # Third-party
@@ -38,12 +42,6 @@ a = Analysis(
         'PIL',
         'PIL.Image',
         'numpy',
-        'gspread',
-        'google.oauth2',
-        'google.oauth2.service_account',
-        'google.auth',
-        'google.auth.transport',
-        'google.auth.transport.requests',
         'requests',
         'urllib3',
         # Project modules

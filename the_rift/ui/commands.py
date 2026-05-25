@@ -534,16 +534,89 @@ def _stop_process():
         cmds.running = False
 
 
+def _run_api_refresh(label, do_scout=False, ts_key="fetch_ranks_gsheets.py"):
+    """Phase E (sheet decommission): the REFRESH RANKINGS / SCOUT buttons
+    now run the gspread-free `data.rankings_refresh_api` orchestrator
+    instead of shelling out to `data.fetch_ranks_gsheets`. Roster comes
+    from /api/players, Riot results push directly to the Fly DB."""
+    if cmds.running:
+        _log("[!] A command is already running.", C["loss"][:3])
+        return
+    cfg = load_config()
+    if not cfg.get("api_key"):
+        _log("[!] No Riot API key set — configure it in Settings.", C["loss"][:3])
+        return
+
+    cmds.running = True
+    cmds.progress = 0.0
+    if dpg.does_item_exist("cmd_progress"):
+        dpg.set_value("cmd_progress", 0.0)
+    _log(f">  {label}", C["gold"][:3])
+
+    if do_scout:
+        ts_key = "fetch_ranks_gsheets.py--scout"
+
+    def _progress(msg, pct):
+        _log(msg, C["txt"][:3])
+        try:
+            cmds.progress = float(pct)
+            if dpg.does_item_exist("cmd_progress"):
+                dpg.set_value("cmd_progress", float(pct))
+        except Exception:
+            pass
+
+    def _done(summary):
+        cmds.running = False
+        if summary and summary.get("ok"):
+            _log(f"✓  {label} complete ({summary.get('refreshed')} players).",
+                 C["win"][:3])
+            cmds.progress = 1.0
+            if dpg.does_item_exist("cmd_progress"):
+                dpg.set_value("cmd_progress", 1.0)
+            ts_str = time.strftime("Last run: %H:%M:%S")
+            cmds._last_run[ts_key] = ts_str
+            tag = _TS_TAG.get(ts_key)
+            if tag and dpg.does_item_exist(tag):
+                dpg.configure_item(tag, default_value=ts_str)
+        else:
+            reason = (summary or {}).get("reason", "unknown")
+            _log(f"[!] {label} failed: {reason}", C["loss"][:3])
+            cmds.progress = 0.0
+            if dpg.does_item_exist("cmd_progress"):
+                dpg.set_value("cmd_progress", 0.0)
+
+    def _err(msg):
+        cmds.running = False
+        _log(f"[ERR] {msg}", C["loss"][:3])
+        cmds.progress = 0.0
+        if dpg.does_item_exist("cmd_progress"):
+            dpg.set_value("cmd_progress", 0.0)
+
+    from data.rankings_refresh_api import refresh_rankings
+    refresh_rankings(
+        api_key=cfg["api_key"],
+        region=cfg.get("region", "na1"),
+        routing=cfg.get("routing", "americas"),
+        do_scout=do_scout,
+        on_progress=_progress,
+        on_done=_done,
+        on_error=_err,
+    )
+
+
 def _run_fetch_ranks():
-    _run_script("Fetching ranks…", "fetch_ranks_gsheets.py")
+    _run_api_refresh("Fetching ranks…", do_scout=False)
 
 
 def _run_scout():
-    _run_script("Running full scout…", "fetch_ranks_gsheets.py", extra_args=["--scout"])
+    _run_api_refresh("Running full scout…", do_scout=True)
 
 
 def _run_setup_draft():
-    _run_script("Setting up draft…", "fetch_ranks_gsheets.py", extra_args=["--setup-draft"])
+    # Phase E: the legacy "Setup Draft Tool" sheet-population flow is gone;
+    # the draft tool lobby builds its own roster from /api/players now.
+    _log("[!] Setup-draft is no longer needed — the draft lobby builds "
+         "its roster from the server directly.", C["txt_dim"][:3])
 
 
 def _run_inhouse():
@@ -551,9 +624,8 @@ def _run_inhouse():
         _log("[!] A command is already running.", C["loss"][:3])
         return
     cfg = load_config()
-    if not cfg.get("sheet_url"):
-        _log("[!] No Google Sheet URL set — configure it in Settings.", C["loss"][:3])
-        return
+    # Phase E (sheet decommission): the sheet URL is no longer required —
+    # the LCU custom-game scrape pushes directly to /api/matches.
     cmds.running  = True
     cmds.progress = 0.0
     if dpg.does_item_exist("cmd_progress"):

@@ -177,9 +177,16 @@ live = LiveData()
 
 def load_live_data(on_done=None, on_error=None):
     """
-    Kick off a background thread to read sheets data.
-    on_done() is called on the main thread when data is ready.
-    on_error(msg) is called on failure.
+    Kick off a background thread to populate the `live` data layer.
+
+    Phase E (sheet decommission): the Fly REST API is the sole source —
+    the prior Google Sheets fallback has been removed. If the server is
+    unreachable the `live` layer surfaces an empty state; the UI tabs
+    degrade gracefully (skeletons / 'no data yet' messaging).
+
+    `on_done()` and `on_error(msg)` fire from the worker thread when the
+    load finishes; callers must marshal to the main thread themselves if
+    they touch DPG state.
     """
     if live.loading:
         return
@@ -188,9 +195,13 @@ def load_live_data(on_done=None, on_error=None):
 
     def _bg():
         try:
-            cfg = load_config()
-            rankings, scout, inhouse, inhouse_champs, primary_roles, players, summoner_map = _read_sheets(cfg)
-            live.set(rankings, scout, inhouse, inhouse_champs, primary_roles,
+            tup = _read_from_api()
+            if tup is None:
+                # Server down or empty — present an empty state rather
+                # than blocking the UI on a phantom retry loop.
+                tup = ([], [], [], {}, {}, [], {})
+            rankings, scout, inhouse, ih_ch, prim_roles, players, summoner_map = tup
+            live.set(rankings, scout, inhouse, ih_ch, prim_roles,
                      players=players, summoner_map=summoner_map)
             if on_done:
                 on_done()
@@ -200,6 +211,40 @@ def load_live_data(on_done=None, on_error=None):
                 on_error(str(e))
 
     threading.Thread(target=_bg, daemon=True, name="live_data_loader").start()
+
+
+def _read_from_api():
+    """REST-backed replacement for `_read_sheets`. Returns the same 7-tuple
+    (rankings, scout, inhouse, inhouse_champs, primary_roles, players,
+    summoner_map) so the caller is shape-compatible.
+
+    Returns None when:
+      * `rift_api` isn't configured (no sync.url in config), OR
+      * The roster + rankings are *both* empty (server cold / not populated).
+    Either case signals the caller to fall back to the sheet path during the
+    Phase D transition.
+    """
+    from data import rift_api
+    if not rift_api.is_configured():
+        return None
+    # Roster is the cheapest call; if this fails the server is down.
+    roster = rift_api.get_players_roster()
+    players = list(roster.get("players") or [])
+    summoner_map = dict(roster.get("summoner_map") or {})
+    # Restrict every downstream call to the roster so off-roster ranked
+    # account names don't leak through.
+    rankings = rift_api.get_rankings_api(players=players or None)
+    if not players and not rankings:
+        # Nothing populated — let the caller fall back. (Avoids the case
+        # where a misconfigured deploy returns 200 with empty payloads and
+        # the client silently presents a blank app.)
+        return None
+    scout          = rift_api.get_scout_api(players=players or None)
+    inhouse        = rift_api.get_inhouse_aggregates_api(players=players or None)
+    inhouse_champs = rift_api.get_inhouse_champs_api(players=players or None)
+    primary_roles  = rift_api.get_primary_roles_api(players=players or None)
+    return (rankings, scout, inhouse, inhouse_champs, primary_roles,
+            players, summoner_map)
 
 
 def _read_sheets(cfg):
@@ -986,11 +1031,22 @@ def load_prediction_data(blue_names, red_names, on_done=None):
     On failure, blue_prob / red_prob will be 50.0 and 'error' key will be set.
     """
     def _bg():
-        cfg = load_config()
+        # D4 (sheet decommission): the "Rank History" sheet read is replaced
+        # by the existing /api/rank-history endpoint (already populated by
+        # the Riot fetcher's api_writer push). Falls back to an empty dict
+        # if the server is unreachable — the win-meter degrades to a pure
+        # final_score ratio, same as the old code path's empty-rank fallback.
         rank_vals = {}
         try:
-            sh        = _gspread_connect(cfg)
-            rank_vals = _read_rank_history_latest(sh)
+            from data import rift_api
+            history = rift_api.get_rank_history_api(limit=1) or {}
+            for name, samples in history.items():
+                if samples:
+                    last = samples[-1]
+                    try:
+                        rank_vals[name] = int(last.get("value") or 0)
+                    except (TypeError, ValueError):
+                        pass
         except Exception:
             pass  # silent fallback — local score ratio used instead
 
@@ -1268,30 +1324,35 @@ def read_draft_results(sh, on_done=None, on_error=None):
 # ---------------------------------------------------------------------------
 
 def load_scout_sheet(player_name, on_done=None, on_error=None):
-    """
-    Background fetch of 'Scout - {player_name}' sheet + 'Rank History' column.
-    on_done(data, history) — data = parsed scout dict, history = [(date_str, float), ...]
-    on_error(msg)          — called if sheet is missing or auth fails
-    Falls back gracefully: if Rank History unavailable, history=[]
-    """
+    """D2 (sheet decommission): fetch the cached scout-sheet payload from
+    /api/scout-sheets/{name} and the rank-history sparkline from
+    /api/rank-history. Replaces the per-player 'Scout - <Name>' sheet read."""
     def _bg():
         try:
-            cfg  = load_config()
-            sh   = _gspread_connect(cfg)
-            sheet_name = f"Scout - {player_name}"[:30]
-            try:
-                ws = sh.worksheet(sheet_name)
-            except Exception:
+            from data import rift_api
+            data = rift_api.get_scout_sheet_api(player_name)
+            if data is None:
                 if on_error:
                     on_error(
-                        f"No scouting sheet found for {player_name}.\n"
+                        f"No scouting data on the server for {player_name}.\n"
                         f"Run 'Full Scout' from the Commands tab first."
                     )
                 return
-
-            data    = _parse_scouting_sheet(ws.get_all_values())
-            history = _read_rank_history_for_player(sh, player_name)
-
+            # Rank-history shape the legacy caller expects:
+            # list of (date_str, float_value) tuples, oldest first.
+            history = []
+            try:
+                rh = rift_api.get_rank_history_api(players=[player_name],
+                                                   limit=200) or {}
+                for sample in (rh.get(player_name) or []):
+                    ts = sample.get("sampled_at") or ""
+                    try:
+                        val = float(sample.get("value") or 0)
+                    except (TypeError, ValueError):
+                        val = 0.0
+                    history.append((ts, val))
+            except Exception:
+                history = []
             if on_done:
                 on_done(data, history)
         except Exception as e:
@@ -1345,64 +1406,35 @@ def prefetch_scout_sheets(names, on_progress=None, on_done=None):
         return
 
     def _bg():
-        results = {}
+        # D2 (sheet decommission): single bulk REST call replaces the old
+        # Sheets `values_batch_get`. Server returns {name: payload | None}
+        # so missing players stay None (no retry loop on misses).
+        results: Dict[str, Any] = {}
         try:
-            cfg = load_config()
-            sh = _gspread_connect(cfg)
+            from data import rift_api
+            batch = rift_api.get_scout_sheets_batch_api(targets) or {}
         except Exception as e:
             with live._lock:
                 for n in targets:
                     live._scout_inflight.discard(n)
             if on_done:
-                try: on_done({"error": f"sheets connect failed: {e}"})
+                try: on_done({"error": f"scout batch fetch failed: {e}"})
                 except Exception: pass
             return
 
-        # One metadata call: which 'Scout - X' worksheets actually exist.
-        try:
-            existing = {ws.title for ws in sh.worksheets()}
-        except Exception:
-            existing = set()
-
-        sheet_for = {}   # player_name -> worksheet title
-        ranges = []      # parallel to sheet_for.keys(), preserves order
-        order = []
         for n in targets:
-            title = f"Scout - {n}"[:30]
-            if title in existing:
-                sheet_for[n] = title
-                ranges.append(f"'{title}'!A1:Z200")
-                order.append(n)
+            data = batch.get(n)
+            if isinstance(data, dict):
+                cache_scout_sheet(n, data)
+                results[n] = data
+                if on_progress:
+                    try: on_progress(n, True)
+                    except Exception: pass
             else:
-                results[n] = None  # no scout sheet for this player
-
-        # Single batchGet for every player's scout sheet.
-        if ranges:
-            try:
-                batch = sh.values_batch_get(ranges)
-                value_ranges = batch.get("valueRanges", [])
-                for idx, n in enumerate(order):
-                    if idx >= len(value_ranges):
-                        results[n] = None
-                        continue
-                    values = value_ranges[idx].get("values", []) or []
-                    try:
-                        data = _parse_scouting_sheet(values)
-                    except Exception:
-                        data = None
-                    if data:
-                        cache_scout_sheet(n, data)
-                        results[n] = data
-                        if on_progress:
-                            try: on_progress(n, True)
-                            except Exception: pass
-                    else:
-                        results[n] = None
-                        if on_progress:
-                            try: on_progress(n, False)
-                            except Exception: pass
-            except Exception as e:
-                results["error"] = f"batchGet failed: {e}"
+                results[n] = None
+                if on_progress:
+                    try: on_progress(n, False)
+                    except Exception: pass
 
         # Clear inflight for everyone (cached or not — don't retry-loop on misses).
         with live._lock:
@@ -1850,12 +1882,12 @@ def _read_activity(sh):
 
 
 def load_activity(on_done=None, on_error=None):
-    """Background load of _Activity sheet into live.activity."""
+    """D3 (sheet decommission): load activity events from /api/activity
+    (replaces the _Activity sheet read)."""
     def _bg():
         try:
-            cfg    = load_config()
-            sh     = _gspread_connect(cfg)
-            events = _read_activity(sh)
+            from data import rift_api
+            events = rift_api.get_activity_api(limit=200)
             with live._lock:
                 live.activity = events
             if on_done:
@@ -1867,23 +1899,21 @@ def load_activity(on_done=None, on_error=None):
 
 
 def write_activity_event(event_type, player, details, on_done=None, on_error=None):
-    """Append one event row to _Activity sheet and refresh live.activity."""
-    from datetime import datetime as _dt
+    """D3 (sheet decommission): append one event via /api/activity, then
+    refresh the cached `live.activity` list so the feed UI updates."""
     def _bg():
         try:
-            cfg = load_config()
-            sh  = _gspread_connect(cfg)
-            try:
-                ws = sh.worksheet("_Activity")
-            except Exception:
-                ws = sh.add_worksheet(title="_Activity", rows=500, cols=5)
-                ws.update(values=[["Timestamp","Event Type","Player","Details","Related Player"]],
-                          range_name="A1")
-            ts = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
-            ws.append_row([ts, event_type, player or "", details or "", ""],
-                          value_input_option="RAW")
+            from data import rift_api
+            r = rift_api.post_activity_event(
+                event_type=event_type, actor=player, details=details)
+            if not r or not r.get("ok"):
+                msg = (r or {}).get("error") or (r or {}).get("detail") \
+                      or "post_activity_event returned non-ok"
+                if on_error:
+                    on_error(str(msg))
+                return
             # Refresh live activity
-            events = _read_activity(sh)
+            events = rift_api.get_activity_api(limit=200)
             with live._lock:
                 live.activity = events
             if on_done:
@@ -1925,10 +1955,20 @@ def get_most_games_logged(on_done=None, on_error=None):
 
 
 def load_tier_meta(on_done=None, on_error=None):
-    """Phase 3 — pull the three Tier-List meta sheets (Consensus &
-    Controversy, Hot Take Detector, Rater Bias Report) into `live`. Best-
-    effort: any single sheet missing is treated as empty so the UI can
-    still render the others."""
+    """D1 (sheet decommission): the Consensus & Controversy / Hot Take
+    Detector / Rater Bias Report features were dropped per user direction.
+    This loader now no-ops — `live.tier_*` lists stay empty so any UI
+    callers degrade cleanly to 'no data'. Keep the function signature so
+    the tier-list tab's lazy lookup still works without raising."""
+    live.tier_meta_loaded = True
+    live._tier_meta_inflight = False
+    live.tier_meta_error = None
+    if on_done:
+        on_done()
+    return
+
+    # Legacy sheet-driven implementation below — preserved for reference
+    # until Phase E removes it. Unreachable due to the `return` above.
     if live._tier_meta_inflight:
         return
     live._tier_meta_inflight = True
@@ -2476,22 +2516,23 @@ def log_inhouse_games_from_client(on_progress=None, on_done=None, on_error=None)
             champ_map = _load_champion_map()
 
             cfg = load_config()
-            sh  = _gspread_connect(cfg)
 
-            # Load existing game IDs to prevent duplicates
+            # Phase E (sheet decommission): duplicate-game-IDs come from the
+            # Fly REST API now — the same set that `_InhouseGameLog` used to
+            # hold. We pull only the IDs for matches sourced 'inhouse'.
             if on_progress: on_progress("Checking existing game log…")
+            existing_ids = set()
             try:
-                ws_log  = sh.worksheet("_InhouseGameLog")
-                all_rows = ws_log.get_all_values()
-                existing_ids = set()
-                for row in all_rows[1:]:
-                    if row and row[0]:
-                        try:    existing_ids.add(int(row[0]))
-                        except Exception: existing_ids.add(row[0])
-            except Exception:
-                ws_log      = None
-                existing_ids = set()
-                all_rows     = []
+                from data import rift_api
+                for m in (rift_api.get_matches(source="inhouse", limit=2000)
+                          or []):
+                    mid = m.get("id")
+                    if mid is None:
+                        continue
+                    try:    existing_ids.add(int(mid))
+                    except (TypeError, ValueError): existing_ids.add(mid)
+            except Exception as _e:
+                print(f"[reader] existing-ids fetch failed: {_e}")
 
             if on_progress: on_progress(f"{len(existing_ids)} games already logged — fetching history…")
 
@@ -2610,70 +2651,44 @@ def log_inhouse_games_from_client(on_progress=None, on_done=None, on_error=None)
                 if on_done: on_done(0)
                 return
 
-            # Append to sheet (create if needed, never overwrite existing)
-            if on_progress: on_progress(f"Saving {len(new_records)//10} new games to sheet…")
-            if ws_log is None:
-                ws_log = sh.add_worksheet(title="_InhouseGameLog", rows=5000, cols=16)
-                ws_log.update(values=[["gameId","timestamp","player","champion","teamId",
-                                        "win","kills","deaths","assists","cs","damage",
-                                        "gold","vision","role","duration","logged_by"]],
-                              range_name="A1")
-                all_rows = [["header"]]
-            next_row = len(all_rows) + 1
-            rows_to_write = []
-            for rec in new_records:
-                rows_to_write.append([
-                    rec["gameId"], rec["timestamp"], rec["player"], rec["champion"],
-                    rec["teamId"], str(rec["win"]), rec["kills"], rec["deaths"],
-                    rec["assists"], rec["cs"], rec["damage"], rec["gold"],
-                    rec["vision"], rec["role"], rec["duration"], rec["logged_by"],
-                ])
-            for i in range(0, len(rows_to_write), 500):
-                chunk = rows_to_write[i:i+500]
-                ws_log.update(values=chunk, range_name=f"A{next_row + i}")
+            new_game_count = len(api_matches)
 
-            new_game_count = len(new_records) // 10
-
-            # --- Phase 1: mirror to the REST data API. Best-effort — a server
-            # outage or auth issue must not block the sheet-based log flow. ---
-            api_post_ok = False
+            # Phase E (sheet decommission): the Fly REST API is the sole
+            # destination. Sheet writes (the old `_InhouseGameLog` append
+            # plus `sheet_mirror.full_refresh`) were removed alongside the
+            # gspread dependency.
             if api_matches:
+                if on_progress:
+                    on_progress(f"Mirroring {new_game_count} "
+                                f"game{'s' if new_game_count!=1 else ''} "
+                                f"to data API…")
                 try:
                     from data import rift_api
-                    if rift_api.is_configured():
-                        if on_progress: on_progress(f"Mirroring {len(api_matches)} game{'s' if len(api_matches)!=1 else ''} to data API…")
-                        resp = rift_api.post_matches(api_matches)
-                        if isinstance(resp, dict) and not resp.get("ok", True):
-                            print(f"[rift-api] ingest non-200: {resp}")
-                        else:
-                            api_post_ok = resp is not None
+                    resp = rift_api.post_matches(api_matches)
+                    if isinstance(resp, dict) and not resp.get("ok", True):
+                        print(f"[rift-api] ingest non-200: {resp}")
                 except Exception as _e:
                     print(f"[rift-api] mirror failed: {_e}")
 
-            # --- Phase 1: backup the DB to Google Sheets (best-effort). Only
-            # runs when the API ingest itself succeeded; otherwise there's
-            # nothing new on the server to mirror. ---
-            if api_post_ok:
-                try:
-                    from data import sheet_mirror
-                    sheet_mirror.full_refresh(
-                        on_done=lambda c: print(f"[rift-mirror] backed up {c}"),
-                        on_error=lambda m: print(f"[rift-mirror] failed: {m}"))
-                except Exception as _e:
-                    print(f"[rift-mirror] launch failed: {_e}")
-
-            # Write activity event
+            # Write activity event (now via /api/activity)
             write_activity_event("INHOUSE", logged_by,
-                                 f"Logged {new_game_count} new inhouse game{'s' if new_game_count!=1 else ''}")
+                                 f"Logged {new_game_count} new inhouse "
+                                 f"game{'s' if new_game_count!=1 else ''}")
 
-            # Reload inhouse data into live
-            known_names = {r["name"] for r in live.rankings}
-            ib, ic, pr  = _read_inhouse(sh, known_names if known_names else None, live.summoner_map or None)
-            with live._lock:
-                live.inhouse        = ib
-                live.inhouse_champs = ic
-                if pr:
-                    live.primary_roles.update(pr)
+            # Reload inhouse aggregates + champs from the REST endpoints so
+            # the UI updates without a full load_live_data cycle.
+            try:
+                from data import rift_api
+                roster_names = [r["name"] for r in live.rankings] or None
+                inh = rift_api.get_inhouse_aggregates_api(players=roster_names)
+                ich = rift_api.get_inhouse_champs_api(players=roster_names)
+                pr  = rift_api.get_primary_roles_api(players=roster_names)
+                with live._lock:
+                    if inh:  live.inhouse        = inh
+                    if ich:  live.inhouse_champs = ich
+                    if pr:   live.primary_roles.update(pr)
+            except Exception as _e:
+                print(f"[reader] inhouse reload failed: {_e}")
 
             if on_done: on_done(new_game_count)
 
@@ -2904,65 +2919,39 @@ def repair_match_participants(on_progress=None, on_done=None, on_error=None):
 
 def write_tier_list(placements, submitter_name, on_done=None, on_error=None):
     """
-    Write a player's tier list ratings to the 'Tier Lists' sheet.
+    D1 (sheet decommission): submit a rater's full ballot to /api/tier-votes.
 
-    Sheet layout (as exported from Google Sheets):
-      Row 1 : "Player" label  (ignored)
-      Row 2 : Tier value legend  (ignored)
-      Row 3 : "#, Player Name, Ben, Luke, Chips, …"  ← rater names header
-      Row 4+ : "#, <player name>, <Ben rating>, <Luke rating>, …"
-               col A = row #, col B = player display name, col C+ = tier ratings
+    The endpoint REPLACES this rater's prior ballot, so removing a player
+    from the ballot drops their old rating (matching the old sheet-cell
+    behaviour where the cell would be cleared).
 
-    placements : dict  {tier_letter: [player_names]}
-    submitter_name : must match a column header in row 3 of the sheet.
+    `placements`     : {tier_letter: [player_names]}
+    `submitter_name` : the rater's display name (any free-form string —
+                       the server doesn't require a roster match).
     """
-    _HEADER_ROW = 3   # 1-based row that contains rater names
-    _PLAYER_COL = 2   # 1-based column B — player display names
-
     def _bg():
         try:
-            import gspread
-            cfg = load_config()
-            sh  = _gspread_connect(cfg)
-            ws  = sh.worksheet("Tier Lists")
-
-            # --- Locate the submitter's column from row 3 ---
-            header = ws.row_values(_HEADER_ROW)
-            if submitter_name not in header:
+            from data import rift_api
+            import requests
+            if not rift_api.is_configured():
                 if on_error:
-                    on_error(
-                        f"'{submitter_name}' not found in Tier Lists header (row 3). "
-                        f"Add their name to row 3 of the sheet first."
-                    )
+                    on_error("Rift API not configured (sync.url missing).")
                 return
-            col_idx = header.index(submitter_name) + 1   # convert to 1-based
-
-            # --- Build player → tier letter lookup ---
-            player_to_tier = {}
-            for tier_letter, names in placements.items():
-                for n in names:
-                    player_to_tier[n] = tier_letter
-
-            # --- Read column B to find each player's row ---
-            col_b = ws.col_values(_PLAYER_COL)   # index 0 = row 1
-
-            # --- Batch all cell writes into one API call ---
-            updates = []
-            missing = []
-            for pname, tier_letter in player_to_tier.items():
-                if pname in col_b:
-                    row_idx = col_b.index(pname) + 1   # 1-based
-                    cell    = gspread.utils.rowcol_to_a1(row_idx, col_idx)
-                    updates.append({"range": cell, "values": [[tier_letter]]})
-                else:
-                    missing.append(pname)
-
-            if updates:
-                ws.batch_update(updates)
-
-            if missing:
-                print(f"[tier_list write] players not found in sheet col B: {missing}")
-
+            base = rift_api._base_url()
+            headers = {}
+            tok = rift_api._token()
+            if tok:
+                headers["Authorization"] = f"Bearer {tok}"
+            r = requests.post(
+                f"{base}/api/tier-votes",
+                json={"rater": submitter_name,
+                      "placements": placements or {}},
+                headers=headers, timeout=15)
+            if r.status_code != 200:
+                if on_error:
+                    on_error(f"server returned {r.status_code}: "
+                             f"{r.text[:200]}")
+                return
             if on_done:
                 on_done()
         except Exception as e:

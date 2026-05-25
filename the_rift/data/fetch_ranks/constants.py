@@ -12,8 +12,15 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 import requests
-import gspread
-from google.oauth2.service_account import Credentials
+
+# Phase E (sheet decommission): gspread is optional. Modules that touch
+# sheets handle the absence at call time.
+try:
+    import gspread  # noqa: F401
+    from google.oauth2.service_account import Credentials  # noqa: F401
+except Exception:                                              # pragma: no cover
+    gspread = None        # type: ignore
+    Credentials = None    # type: ignore
 
 # ── Module-level constants (extracted from fetch_ranks_gsheets) ──
 
