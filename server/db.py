@@ -694,15 +694,19 @@ def get_players() -> Dict[str, Any]:
     """Return the roster in the shape the client's reader.py was building from
     the Players sheet:
         {"players": [display_name, ...],
-         "summoner_map": {game_name: display_name, ...}}
+         "summoner_map": {game_name: display_name, ...},
+         "riot_ids": {display_name: "GameName#Tagline", ...}}
+    `riot_ids` is the source of truth for the rank refresh — it preserves the
+    real per-player tagline instead of forcing every player to `#NA1`.
     Order preserves insertion (latest update bumps to the end)."""
     conn = _conn()
     rows = conn.execute(
-        "SELECT display_name, game_name FROM players "
+        "SELECT display_name, riot_id, game_name, tagline FROM players "
         "ORDER BY updated_at ASC, display_name ASC"
     ).fetchall()
     players: List[str] = []
     summoner_map: Dict[str, str] = {}
+    riot_ids: Dict[str, str] = {}
     for r in rows:
         dn = r["display_name"]
         gn = r["game_name"]
@@ -710,7 +714,14 @@ def get_players() -> Dict[str, Any]:
             players.append(dn)
         if gn and dn:
             summoner_map[gn] = dn
-    return {"players": players, "summoner_map": summoner_map}
+        if dn:
+            rid = (r["riot_id"] or "").strip()
+            if "#" not in rid and gn and r["tagline"]:
+                rid = f"{gn}#{r['tagline']}"
+            if "#" in rid:
+                riot_ids[dn] = rid
+    return {"players": players, "summoner_map": summoner_map,
+            "riot_ids": riot_ids}
 
 
 def _resolved_display_case_sql() -> str:

@@ -37,24 +37,25 @@ _ProgressFn = Optional[Callable[[str, float], None]]
 
 def _roster_from_api() -> List[Dict[str, Any]]:
     """Roster shape the fetcher's `results` builder expects:
-    [{"name": display, "riot_id": "Game#NA1"}, ...]"""
+    [{"name": display, "riot_id": "Game#Tagline", "game_name": "Game"}, ...]
+
+    Prefers the server-supplied `riot_ids` map (full GameName#Tagline). Falls
+    back to the legacy `summoner_map` (game_name only, no tagline) so older
+    servers still function — the caller will then look for a local override
+    or warn and skip the player rather than forge a wrong tagline."""
     out: List[Dict[str, Any]] = []
     data = rift_api.get_players_roster() or {}
     players = data.get("players") or []
-    # `get_players` doesn't return riot_id today; rebuild from the
-    # summoner_map. The summoner_map's KEY is the riot game_name, the
-    # value is the display name. We need the inverse + the tagline,
-    # which the roster doesn't expose. Fall back: ask Riot to look up
-    # by display_name lookup elsewhere. For now, accept that riot_id
-    # may be empty — fetch_account fails fast with a clear message.
     summoner_map = data.get("summoner_map") or {}
+    riot_ids = data.get("riot_ids") or {}
     display_to_game = {v: k for k, v in summoner_map.items()}
     for name in players:
         game = display_to_game.get(name, "")
-        # Tagline unknown via the current /api/players endpoint — the
-        # client will eventually surface it; for now we accept that
-        # the roster needs to be re-bootstrapped with full riot_ids.
-        out.append({"name": name, "riot_id": game})
+        out.append({
+            "name": name,
+            "riot_id": riot_ids.get(name, ""),
+            "game_name": game,
+        })
     return out
 
 
@@ -92,26 +93,34 @@ def _run(api_key: str, region: str, routing: str, do_scout: bool,
          on_done: Optional[Callable[[Dict[str, Any]], None]]) -> None:
     _emit(on_progress, "Loading roster from server…", 0.02)
     roster_api = _roster_from_api()
-    # The /api/players endpoint loses the tagline today, so the fetcher
-    # uses the local config's full Riot IDs when available. Sources:
-    #   1. live.scout (loaded earlier) — name + tier + final_score, no riot_id
-    #   2. config['players'] — display names only, no riot_id
-    #   3. config['roster_riot_ids'] (new optional field) — {display: full_riot_id}
-    # For now we rely on the riot game name from summoner_map + a tagline
-    # default of 'NA1'. A future API change exposes the tagline alongside.
+    # Riot-ID resolution order, most authoritative first:
+    #   1. server `/api/players` → riot_ids[name]  (full GameName#Tagline)
+    #   2. local config['roster_riot_ids']         (manual override)
+    #   3. legacy fallback: game_name + '#NA1'     (only if user opts in)
+    # The legacy fallback used to run unconditionally and silently mis-tagged
+    # everyone whose real tag wasn't NA1 — that's the unranked-everyone bug.
     from data.config import load_config
     cfg = load_config()
     overrides = cfg.get("roster_riot_ids") or {}
+    allow_na1_fallback = bool(cfg.get("allow_na1_tag_fallback"))
     roster: List[Dict[str, Any]] = []
+    missing: List[str] = []
     for p in roster_api:
         name = p["name"]
-        if name in overrides:
+        if name in overrides and "#" in overrides[name]:
             riot_id = overrides[name]
-        elif p["riot_id"]:
-            riot_id = f"{p['riot_id']}#NA1"
+        elif p.get("riot_id") and "#" in p["riot_id"]:
+            riot_id = p["riot_id"]
+        elif allow_na1_fallback and p.get("game_name"):
+            riot_id = f"{p['game_name']}#NA1"
         else:
+            missing.append(name)
             continue
         roster.append({"name": name, "riot_id": riot_id})
+    if missing:
+        _emit(on_progress,
+              f"Skipping {len(missing)} player(s) with no tagline on server: "
+              f"{', '.join(missing)}", 0.04)
     if not roster:
         _emit(on_progress, "No roster on server — push roster first.", 1.0)
         if on_done:
