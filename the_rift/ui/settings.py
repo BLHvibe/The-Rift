@@ -315,30 +315,23 @@ def _build_settings_window(sb_w, vw, vh):
         dpg.add_separator()
         dpg.add_spacer(height=20)
 
-        # ── Data API (Phase 1) ────────────────────────────────────────────
+        # ── Data API ──────────────────────────────────────────────────────
+        # v4.1.0 (sheet decommission): BACKFILL FROM SHEET / BACK UP TO SHEET
+        # were sheet-tied flows and are gone — match data lives in the Fly DB
+        # only. REPAIR MATCH HISTORY stays because it's an LCU re-fetch path
+        # that's independent of any sheet.
         _section_label("DATA API")
         with dpg.group():
             dpg.add_text(
-                "Match data mirrors into a SQLite store on the Fly server so "
-                "the engine and future surfaces can read it directly. New "
-                "inhouse logs go up automatically; use BACKFILL to push every "
-                "row of _InhouseGameLog into the DB (idempotent — safe to "
-                "re-run). BACK UP TO SHEET writes a faithful DB snapshot to "
-                "_RiftDB_* tabs as a human-readable recovery source. REPAIR "
-                "MATCH HISTORY scans the server for matches with fewer than "
-                "10 participants (the role-collision bug) and re-posts the "
-                "full LCU payload — needs the League client running.",
+                "Match data lives in the Fly server's SQLite store. New "
+                "inhouse logs are pushed automatically when LOG INHOUSE GAME "
+                "runs on the Commands tab. REPAIR MATCH HISTORY scans the "
+                "server for matches with fewer than 10 participants (the "
+                "role-collision bug) and re-posts the full LCU payload — "
+                "needs the League client running.",
                 color=C["txt_dim"][:3], wrap=560)
             dpg.add_spacer(height=10)
             with dpg.group(horizontal=True):
-                bf_btn = dpg.add_button(label="BACKFILL FROM SHEET",
-                                        callback=_backfill_db, width=200, height=28)
-                if "raj_sb_14" in _F: dpg.bind_item_font(bf_btn, _F["raj_sb_14"])
-                dpg.add_spacer(width=12)
-                mr_btn = dpg.add_button(label="BACK UP TO SHEET",
-                                        callback=_mirror_db, width=180, height=28)
-                if "raj_sb_14" in _F: dpg.bind_item_font(mr_btn, _F["raj_sb_14"])
-                dpg.add_spacer(width=12)
                 rp_btn = dpg.add_button(label="REPAIR MATCH HISTORY",
                                         callback=_repair_matches, width=220, height=28)
                 if "raj_sb_14" in _F: dpg.bind_item_font(rp_btn, _F["raj_sb_14"])

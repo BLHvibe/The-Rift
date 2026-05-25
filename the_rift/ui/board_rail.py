@@ -227,9 +227,23 @@ def _w_breakdown(dl, x, y, w, h, rec, b, txt):
     """v3.0.5: context-aware. For PICK actions render the 7-factor bars
     (existing behaviour). For BAN actions render BAN INTEL — the threatening
     enemy player + their WR / games / KDA on the suggested champion, so the
-    first ban no longer renders as an empty placeholder panel."""
+    first ban no longer renders as an empty placeholder panel.
+
+    v4.1.1: hide the engine breakdown on the opponent's turn — the figures
+    here are for whoever is on the clock, so showing them while the enemy is
+    picking leaks the engine's read of THEIR pick. Win-prob / callouts /
+    damage profile stay visible because they're framed from our perspective."""
     is_ban = (rec.get("kind") == "ban")
     title = "BAN INTEL" if is_ban else "WHY THIS CALL"
+    our_turn = bool(rec.get("our_turn"))
+    if not our_turn:
+        cy0 = _panel(dl, x, y, w, h, title, txt)
+        txt(dl, x + 12, cy0 + 4, "opponent on the clock",
+            (*lol_theme.LOL["txt_dim"][:3], 215), 13, "raj_sb_12")
+        txt(dl, x + 12, cy0 + 24,
+            "› intel deferred until our pick",
+            (*lol_theme.LOL["txt_dim"][:3], 170), 12, "raj_sb_12")
+        return
 
     sug0 = {}
     try:

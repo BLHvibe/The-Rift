@@ -4106,9 +4106,22 @@ def _draw_board_center(dl, x, y, w, h, b, rec, interactive=True):
         ny += 21
 
     # ── PRIMARY CALL — the #1 recommendation, emphasised ─────────────
-    sug = rec.get("suggestions") or []
+    # Multiplayer privacy / clarity: the engine's recommendation is for
+    # whoever is on the clock. On the opponent's turn the suggestion is for
+    # THEM, not us — show a small placeholder pointing the user at the
+    # LIKELY NEXT ribbon (rendered on the enemy team panel) for our intel.
     pool_region_h = 220
-    if not sug and act:
+    if not our_turn and act:
+        _txt(dl, x + 22, ny, "OPPONENT ON THE CLOCK",
+             (*lol_theme.LOL["txt_dim"][:3], 230), 18, "raj_sb_18")
+        _txt(dl, x + 22, ny + 28,
+             "› intel: see LIKELY NEXT on the enemy team panel",
+             (*lol_theme.LOL["txt_dim"][:3], 180), 13, "raj_sb_12")
+        ny += 64
+        sug = []
+    else:
+        sug = rec.get("suggestions") or []
+    if not sug and act and our_turn:
         # v3.0.5: graceful fallback so the very first ban (or any state
         # where the engine produces nothing) doesn't render an empty hero
         # area. _draw_board's data-signature retry re-runs once scout data

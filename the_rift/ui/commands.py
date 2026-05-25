@@ -189,16 +189,16 @@ def _build_commands_window(sb_w, vw, vh):
                 _section_hdr("DATA COMMANDS")
 
                 _cmd_button(">  FETCH RANKS",
-                            "Latest ranks from Google Sheets + Riot API.",
+                            "Pull latest ranks from the Riot API into the "
+                            "Fly DB (drives the Rankings tab).",
                             _run_fetch_ranks, status_tag="ts_fetch_ranks")
                 _cmd_button(">  RUN SCOUT",
-                            "Scouting data for all players.",
+                            "Full scout pass — solo-queue champion pool, "
+                            "rank, and form for every player on the roster.",
                             _run_scout, status_tag="ts_scout")
-                _cmd_button(">  SETUP DRAFT",
-                            "Prepare the Draft Tool sheet with current roster.",
-                            _run_setup_draft, status_tag="ts_draft")
                 _cmd_button(">  LOG INHOUSE GAME",
-                            "Connect to LCU and log the last custom game.",
+                            "Connect to the LoL client and post the last "
+                            "custom game to the Fly DB.",
                             _run_inhouse, status_tag="ts_inhouse")
 
                 dpg.add_spacer(height=10)

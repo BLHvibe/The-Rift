@@ -769,8 +769,25 @@ def champion_comfort(
 # Used only when a player has zero inhouse + zero top_champs data so the engine
 # isn't stuck recommending '?'. Numbers are seeds, not measured.
 CHAMP_PRIORS: Dict[str, float] = {
-    "Garen": 0.52, "Darius": 0.52, "Master Yi": 0.53, "Tryndamere": 0.52,
-    "Annie": 0.52, "Ashe": 0.52, "Brand": 0.52, "Morgana": 0.52,
+    # v4.1.1 Wave 3: expanded from 8 → 28 champs with one strong meta pick per
+    # role × archetype so the priors fallback always emits at least 4-5 viable
+    # options regardless of which role is being filled (fixes Issue #4
+    # "no suggestion at B5/R5").
+    # TOP
+    "Garen": 0.52, "Darius": 0.52, "Tryndamere": 0.52, "Malphite": 0.53,
+    "Sett": 0.52, "Ornn": 0.52,
+    # JGL
+    "Master Yi": 0.53, "Warwick": 0.52, "Amumu": 0.52, "Sejuani": 0.52,
+    "Vi": 0.52, "Lee Sin": 0.51,
+    # MID
+    "Annie": 0.52, "Lux": 0.52, "Veigar": 0.52, "Brand": 0.52,
+    "Malzahar": 0.53, "Viktor": 0.52,
+    # BOT (ADC)
+    "Ashe": 0.52, "Miss Fortune": 0.52, "Caitlyn": 0.52, "Jhin": 0.52,
+    "Tristana": 0.52,
+    # SUP
+    "Morgana": 0.52, "Soraka": 0.52, "Janna": 0.52, "Leona": 0.52,
+    "Nautilus": 0.52,
 }
 
 
@@ -977,7 +994,13 @@ def off_role_severity(
     return 0.90
 
 
-_OFF_ROLE_DECAY = 0.40   # multiplier impact: comfort *= (1 - _OFF_ROLE_DECAY * sev)
+# v4.1.1 Wave 4 fix A: role-fit prior bumped 0.40 → 0.55. With max severity
+# 0.90 (off-primary, no customs/scout history at the role), this yields a
+# decay of (1 - 0.55*0.90) = 0.505 ≈ ×0.5 comfort. Per ENGINE_FIX_PLAN.md the
+# user chose "0.5 gentler" — keeps legitimate flex plays surfacing while
+# strongly demoting Mahesh-on-SUP / Chips-on-MID / Kian-on-JGL cascades from
+# the run1 audit.
+_OFF_ROLE_DECAY = 0.55   # multiplier impact: comfort *= (1 - _OFF_ROLE_DECAY * sev)
 
 
 def sample_confidence(games: float) -> str:
@@ -1155,10 +1178,15 @@ def _player_candidates(
                 seen[cname] = 0.50 * champion_comfort(8.0, prior_wr * 100, 2.0,
                                                       role_match=role_match,
                                                       form=form)
-        # Plus a couple of safe meta picks for the role
-        for cname in sorted(valid):
-            if cname not in seen and len(seen) < 6:
-                seen[cname] = 0.20
+        # v4.1.1 Wave 3 fix E: fill *every* valid-role champ at low constant
+        # comfort (0.10) rather than capping at 6 alphabetical. Stops
+        # `_player_candidates` from returning an empty list when 6+ early
+        # alphabetical champs are banned / picked. The 0.10 floor keeps these
+        # below any signal-derived comfort, but ensures the last-pick branch
+        # always has a legal option.
+        for cname in valid:
+            if cname not in seen:
+                seen[cname] = 0.10
 
     # Phase 2: off-role decay. A TOP main slotted JGL with 4 lifetime games
     # there shouldn't have their tiny pool ranked alongside a JGL main's deep

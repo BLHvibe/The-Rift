@@ -552,6 +552,24 @@ async def api_engine_info() -> JSONResponse:
     })
 
 
+@router.get("/engine/version")
+async def api_engine_version() -> JSONResponse:
+    """v4.1.1 — return the git SHA the deployed binary was built from.
+
+    Used by `scripts/draft_engine_audit.py` to stamp each audit run with the
+    server revision it ran against, so future re-audits can confirm whether
+    the deploy is fresh. The SHA is baked into the image at build time via
+    `server/version.txt` (Dockerfile)."""
+    import os
+    try:
+        path = os.path.join(os.path.dirname(__file__), "version.txt")
+        with open(path, "r", encoding="utf-8") as fh:
+            sha = fh.read().strip()
+    except Exception:
+        sha = "unknown"
+    return JSONResponse({"version": sha})
+
+
 @router.post("/engine/refresh_signals")
 async def api_engine_refresh_signals(
         authorization: Optional[str] = Header(default=None)) -> JSONResponse:
@@ -652,6 +670,11 @@ def _state_from(payload: Dict[str, Any]) -> Any:
 
 @router.post("/engine/recommend_action")
 async def api_engine_recommend_action(payload: Dict[str, Any]) -> JSONResponse:
+    """v4.1.1: accepts optional `must_bans` (player -> [{name, ...}]) and
+    `prev_archetype` (str). must_bans pre-loads enemy-perma-ban targets into
+    the P1 ban scoring with a baseline floor of 1.5. prev_archetype enables
+    hysteresis in `target_archetype` so the recommended comp stops flickering
+    on near-tied beam-search scores between picks."""
     _require_engine()
     p = payload or {}
     out = _board.recommend_action(
@@ -661,6 +684,8 @@ async def api_engine_recommend_action(payload: Dict[str, Any]) -> JSONResponse:
         n=int(p.get("n") or 5),
         forced_arch=p.get("forced_arch"),
         scout_champs=p.get("scout_champs"),
+        must_bans=p.get("must_bans"),
+        prev_archetype=p.get("prev_archetype"),
     )
     return JSONResponse(out)
 
@@ -676,6 +701,7 @@ async def api_engine_target_archetype(payload: Dict[str, Any]) -> JSONResponse:
         primary_roles=p.get("primary_roles") or {},
         forced_arch=p.get("forced_arch"),
         scout_champs=p.get("scout_champs"),
+        prev_archetype=p.get("prev_archetype"),
     )
     return JSONResponse(out)
 

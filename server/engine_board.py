@@ -541,7 +541,11 @@ SLOT_ROLE_BIAS: Dict[int, Dict[str, float]] = {
 # Canonical counter-pick slots: R3 (last pick round 1), B5 (final blue pick),
 # R5 (final pick of the draft, traditionally top counter).
 COUNTER_PICK_SLOTS = frozenset({11, 18, 19})
-COUNTER_PICK_THRESHOLD = 0.70   # cv ≥ this triggers the override blend
+# v4.1.1 — dropped 0.70 → 0.55 per ENGINE_FIX_PLAN.md Wave 3. The blended
+# COUNTERS table (1365 entries via engine_signals) supports the broader
+# threshold; the previous gate was tuned for the hand-authored 201-entry table
+# and almost never fired at canonical counter-pick slots in the run1 audit.
+COUNTER_PICK_THRESHOLD = 0.55   # cv ≥ this triggers the override blend
 
 
 def _role_of_player(state: "DraftBoardState", side: str,
@@ -738,6 +742,7 @@ def target_archetype(
     primary_roles: Dict[str, str],
     forced_arch: Optional[str] = None,
     scout_champs: Optional[Dict[str, List[Dict]]] = None,
+    prev_archetype: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Best archetype this side's *players* support (via recommend_comps),
     plus the per-axis deficit vs locked picks so picks can be steered toward a
@@ -795,6 +800,39 @@ def target_archetype(
         return {}
     top = comps[0]
     arch = top.get("archetype", "")
+
+    # v4.1.1 — Wave 4 fix K: archetype hysteresis. Without history, near-tied
+    # archetypes flip every pick (14/16 drafts switched archetype ≥3 times in
+    # run1). Require the new top to beat the previous archetype by ≥0.05
+    # combined before switching; otherwise stay on the previous.
+    if prev_archetype and prev_archetype != arch and prev_archetype in arches:
+        prev_combined = 0.0
+        new_combined = float(top.get("combined", 0.0) or 0.0)
+        for c in comps:
+            if c.get("archetype") == prev_archetype:
+                prev_combined = float(c.get("combined", 0.0) or 0.0)
+                break
+        if new_combined - prev_combined < 0.05:
+            # Re-anchor on prev. Find the prev entry in comps if available.
+            for c in comps:
+                if c.get("archetype") == prev_archetype:
+                    top = c
+                    arch = prev_archetype
+                    break
+            else:
+                # Prev archetype not in current top-N — build a minimal stub
+                # so the UI doesn't flicker.
+                arch_data = arches.get(prev_archetype, {}) or {}
+                top = {
+                    "archetype":     prev_archetype,
+                    "label":         arch_data.get("label", prev_archetype),
+                    "win_condition": arch_data.get("win_condition", ""),
+                    "spike":         arch_data.get("spike", ""),
+                    "viability":     "HOLDING",
+                    "combined":      prev_combined,
+                }
+                arch = prev_archetype
+
     target = (arches.get(arch, {}) or {}).get("target", {}) or {}
     cur = _eng._team_vector(state.locked_picks(side)) \
         if hasattr(_eng, "_team_vector") else {}
@@ -1110,29 +1148,162 @@ def recommend_bans_split(
 
     out: List[Dict[str, Any]] = []
 
+    # v4.1.1 — Wave 2: P1 ban scoring overhaul per ENGINE_FIX_PLAN.md.
+    # Old behaviour: top-N sorted by raw threat × role × flex bonus → ban
+    # triple-stacking on whichever single enemy had the deepest pool. Fixes:
+    #   • Per-player diminishing return (B): decay = 1/(1 + 0.5 * times_banned)
+    #     forces top-6 to spread across ≥3-4 enemies before doubling back.
+    #   • Tier-weighted threat (F): multiply by (tier_score / 50) clamped to
+    #     [0.6, 2.0]. S-tier (Turkey 85.5) → ×1.71, D-tier 35 → ×0.70.
+    #   • must_bans floor (H): champs flagged on the enemy player's scout-sheet
+    #     `must_bans` list get a baseline score floor of 1.5 so they beat any
+    #     customs-derived ban.
+    #   • FLEX gating (L): bonus only when champ_role_count(ch) ≥ 2 AND the
+    #     player has demonstrable history in 2+ roles. Otherwise no bonus.
+    # Note: `form` is already applied inside recommend_bans via form_multiplier
+    # so it doesn't need a separate scale here.
     if action.phase == 1:
+        # 1) Pre-load must_ban champs from enemy roster scout sheets.
+        #    The `scout_champs` map carries the champion pool; a separate
+        #    `must_bans` mapping per player is passed in via the engine
+        #    payload (api.py threads it through; see /api/engine/recommend_action).
+        must_ban_index: Dict[str, str] = {}     # champ -> player
+        must_bans_map = getattr(state, "must_bans", None) or {}
+        for ep in state.players.get(enemy_side, []):
+            ename = ep.get("name", "")
+            for mb in (must_bans_map.get(ename) or []):
+                cn = mb.get("name") or mb.get("champ") if isinstance(mb, dict) else mb
+                if cn and cn not in used:
+                    must_ban_index[cn] = ename
+
+        # 2) Player history breadth for FLEX gating: pull from inhouse_champs.
+        def _player_role_breadth(pname: str) -> int:
+            roles_with_play: Set[str] = set()
+            for ch in (inhouse_champs.get(pname) or []):
+                ch_roles = ch.get("roles") or {}
+                if isinstance(ch_roles, dict):
+                    for r, g in ch_roles.items():
+                        try:
+                            if float(g) >= 3:
+                                roles_with_play.add(r)
+                        except (TypeError, ValueError):
+                            pass
+            return len(roles_with_play)
+
+        # 3) Tier weight: derive from each enemy player's final_score.
+        def _tier_weight(pname: str) -> float:
+            for ep in state.players.get(enemy_side, []):
+                if ep.get("name") == pname:
+                    score = float(ep.get("final_score", ep.get("score", 50)) or 50)
+                    return max(0.6, min(2.0, score / 50.0))
+            return 1.0
+
+        # 4) Build the candidate list (one entry per champ).
+        raw: List[Dict[str, Any]] = []
         for ch, d in threat.items():
             t = float(d.get("threat", 0.0) or 0.0)
             pl = d.get("player", "")
             role = _role_of_player(state, enemy_side, pl)
             rw = ROLE_BAN_WEIGHT.get(role, 1.0)
-            flex = champ_role_count(ch) >= 2
-            score = t * rw * (1.15 if flex else 1.0)
+            tw = _tier_weight(pl)
+            # FLEX gating (L): champion is multi-role-valid AND player has shown
+            # 2+ roles in customs. Otherwise the "flex hides their pick" claim
+            # is fake (the enemy knows where it's going).
+            flex = (champ_role_count(ch) >= 2 and _player_role_breadth(pl) >= 2)
+            base = t * rw * tw * (1.15 if flex else 1.0)
             why = d.get("phase_reason", "") or f"{pl or 'enemy'} comfort"
             if flex:
                 why += " - flex"
-            out.append({"champion": ch, "score": round(score, 3),
-                        "tag": "BAN-P1", "why": why,
-                        "player": pl, "role": role})
-        out.sort(key=lambda s: -s["score"])
+            raw.append({"champion": ch, "base": base, "player": pl,
+                        "role": role, "why": why})
+
+        # 5) Inject must_bans with a high floor so they outrank any customs ban.
+        for ch, pl in must_ban_index.items():
+            role = _role_of_player(state, enemy_side, pl)
+            existing = next((r for r in raw if r["champion"] == ch), None)
+            if existing:
+                # Boost existing entry — must-ban beats any customs-derived score.
+                existing["base"] = max(existing["base"], 1.5)
+                existing["why"] = f"Must ban — {pl} scout perma-list"
+            else:
+                raw.append({"champion": ch, "base": 1.5, "player": pl,
+                            "role": role,
+                            "why": f"Must ban — {pl} scout perma-list"})
+
+        # 6) Per-player diminishing return (B): emit picks one at a time,
+        #    re-applying decay each round. Pure score sort → ban-stacking;
+        #    per-emit decay → spread.
+        #
+        # v4.1.1 — CRITICAL: each /api/engine/recommend_action is a SEPARATE
+        # request, so decay state across calls would be lost. Seed
+        # per_player_banned from state._history so a player banned twice in
+        # earlier P1 calls gets the right decay on the next call's top-1.
+        #
+        # The `threat` dict only contains champs NOT yet in `used`, so we
+        # can't look up history attributions there. Build a complete enemy
+        # `champ -> player` index from inhouse_champs + scout_champs so we
+        # can attribute any historical ban.
+        champ_to_player: Dict[str, str] = dict(must_ban_index)
+        for ep in state.players.get(enemy_side, []):
+            ename = ep.get("name", "")
+            for ch in (inhouse_champs.get(ename) or []):
+                cn = ch.get("champ") or ch.get("name")
+                if cn and cn not in champ_to_player:
+                    champ_to_player[cn] = ename
+            for ch in (scout_champs.get(ename) or []):
+                cn = ch.get("champ") or ch.get("name")
+                if cn and cn not in champ_to_player:
+                    champ_to_player[cn] = ename
+            for cn in (ep.get("top_champs") or []):
+                if cn and cn not in champ_to_player:
+                    champ_to_player[cn] = ename
+
+        per_player_banned: Dict[str, int] = {}
+        for h in getattr(state, "_history", []):
+            if (h.kind == "ban" and h.side == action.side):
+                pl_prev = champ_to_player.get(h.champ, "")
+                if pl_prev:
+                    per_player_banned[pl_prev] = per_player_banned.get(pl_prev, 0) + 1
+
+        picked: List[Dict[str, Any]] = []
+        candidates = list(raw)
+        # Cap iterations: at most n × 4 rounds so we never loop forever.
+        for _ in range(n * 4):
+            if not candidates or len(picked) >= n:
+                break
+            best_idx, best_score = -1, -1.0
+            for i, c in enumerate(candidates):
+                decay = 1.0 / (1.0 + 0.50 * per_player_banned.get(c["player"], 0))
+                s = c["base"] * decay
+                if s > best_score:
+                    best_score, best_idx = s, i
+            if best_idx < 0:
+                break
+            chosen = candidates.pop(best_idx)
+            chosen["score"] = round(best_score, 3)
+            chosen["tag"] = "BAN-P1"
+            picked.append(chosen)
+            per_player_banned[chosen["player"]] = per_player_banned.get(chosen["player"], 0) + 1
+
+        out = [{"champion": c["champion"], "score": c["score"], "tag": "BAN-P1",
+                "why": c["why"], "player": c["player"], "role": c["role"]}
+               for c in picked]
         return out[:n]
 
     # Phase 2 — protect our committed picks. Map each of our locked champs to
     # the role (and thus role-importance) it occupies, so banning a counter to
     # our Top is weighted above a counter to our Jungle.
+    #
+    # v4.1.1 — Wave 2 fix C: P2 ban memory. Old behaviour was memoryless: every
+    # P2 ban call sorted the same `counter_us` map → the same locked pick got
+    # all the protective bans (e.g. Vayne + Kog'Maw both "counters your
+    # Malphite" in draft 5). Now we track which locked picks already have a
+    # P2 ban attributed to them and discount further protection for those.
     side_picks = state.picks[action.side]              # {role: champ}
     champ_role = {c: r for r, c in side_picks.items()}
-    counter_us: Dict[str, float] = {}
+    # Build per-attacker → set of victims they cover (needed for the spread).
+    atk_victims: Dict[str, Set[str]] = {}
+    counter_us_raw: Dict[str, float] = {}
     best_reason_strength: Dict[str, float] = {}
     reason: Dict[str, str] = {}
     role_w: Dict[str, float] = {}
@@ -1142,7 +1313,8 @@ def recommend_bans_split(
         for atk, strg in _counters_of(p):
             if atk in used:
                 continue
-            counter_us[atk] = counter_us.get(atk, 0.0) + strg
+            atk_victims.setdefault(atk, set()).add(p)
+            counter_us_raw[atk] = counter_us_raw.get(atk, 0.0) + strg
             role_w[atk] = max(role_w.get(atk, 1.0), prw)
             # Phase 2: COUNTERS rescaled to 0.30-0.90; "solid counter" tier
             # starts at 0.45 (was 0.20 on the old scale).
@@ -1150,18 +1322,53 @@ def recommend_bans_split(
                 best_reason_strength[atk] = strg
                 reason[atk] = f"counters your {p}"
 
-    for ch in set(counter_us) | set(threat):
+    # Already-protected tally: how many P2 bans have been spent protecting
+    # each locked pick so far. Pulled from history.
+    protected_counts: Dict[str, int] = {}
+    for h in getattr(state, "_history", []):
+        if h.kind != "ban" or h.side != action.side:
+            continue
+        # The previous ban's why is encoded in our recommend output; rebuild
+        # from heuristic: scan its champ's victims and attribute to whichever
+        # victim it most strongly counters.
+        prev_atk = h.champ
+        victims = atk_victims.get(prev_atk, set())
+        if victims:
+            # Attribute to the strongest victim coverage at the time of ban.
+            best_v, best_s = None, 0.0
+            for v in victims:
+                # Re-derive raw strength from _counters_of
+                for a, s in _counters_of(v):
+                    if a == prev_atk and s > best_s:
+                        best_s, best_v = s, v
+            if best_v:
+                protected_counts[best_v] = protected_counts.get(best_v, 0) + 1
+
+    def _spread_factor(atk: str) -> float:
+        """Discount attackers that only protect already-protected victims;
+        reward those that cover ≥2 victims or a fresh one."""
+        victims = atk_victims.get(atk, set())
+        if not victims:
+            return 1.0
+        # 1.0 baseline; +0.15 per fresh victim, ×0.3 if every victim is already protected.
+        fresh = [v for v in victims if protected_counts.get(v, 0) == 0]
+        if not fresh:
+            return 0.30
+        return 1.0 + 0.15 * len(fresh)
+
+    for ch in set(counter_us_raw) | set(threat):
         if ch in used:
             continue
         # Phase 2: counter_us sums rescaled COUNTERS (max 0.9 per pair) so a
         # champion that hard-counters two of our locked picks easily exceeds
         # 1.0 raw; divisor bumped to 1.4 so the normalised cu still spans 0..1.
-        cu = min(counter_us.get(ch, 0.0) / 1.4, 1.0)
+        cu = min(counter_us_raw.get(ch, 0.0) / 1.4, 1.0)
         th = min(float(threat.get(ch, {}).get("threat", 0.0) or 0.0), 1.0)
         # Worth a ban only if it's a real pickable champ or it counters us.
         if cu <= 0.0 and not any(ch in rv.get(r, ()) for r in ROLES):
             continue
-        score = (0.62 * cu + 0.38 * th) * role_w.get(ch, 1.0)
+        spread = _spread_factor(ch)
+        score = (0.62 * cu + 0.38 * th) * role_w.get(ch, 1.0) * spread
         why = (reason.get(ch)
                or (threat.get(ch, {}) or {}).get("phase_reason", "")
                or "enemy threat to your comp")
@@ -1169,6 +1376,111 @@ def recommend_bans_split(
                     "tag": "BAN-P2", "why": why})
     out.sort(key=lambda s: -s["score"])
     return out[:n]
+
+
+# ============================================================================
+# v4.1.1 Wave 5: comp-construction checklist (M)
+# ============================================================================
+# Hard-engage champions — anchor a teamfight by initiating.
+_COMP_ENGAGE = frozenset({
+    "Malphite", "Leona", "Nautilus", "Maokai", "Ornn", "Sejuani", "Amumu",
+    "Jarvan IV", "Rakan", "Alistar", "Thresh", "Blitzcrank", "Pyke",
+    "Galio", "Hecarim", "Zac", "Wukong", "Diana", "Vi", "Kha'Zix", "Rell",
+    "Skarner", "Rumble", "Kennen", "Gragas",
+})
+# Peel / save-the-carry champions.
+_COMP_PEEL = frozenset({
+    "Lulu", "Janna", "Braum", "Tahm Kench", "Trundle", "Soraka", "Yuumi",
+    "Karma", "Nami", "Renata Glasc", "Milio",
+})
+# Strong waveclear sources (poke + AoE clear).
+_COMP_WAVECLEAR = frozenset({
+    "Viktor", "Anivia", "Ziggs", "Xerath", "Karthus", "Orianna", "Syndra",
+    "Caitlyn", "Jhin", "Maokai", "Mordekaiser", "Malzahar", "Cassiopeia",
+    "Heimerdinger", "Ahri", "Lux", "Vel'Koz",
+})
+# Late-game scaling hyper-carries.
+_COMP_SCALING = frozenset({
+    "Kog'Maw", "Vayne", "Kassadin", "Nasus", "Aurelion Sol", "Veigar",
+    "Vladimir", "Jinx", "Kayle", "Senna", "Smolder", "Twitch", "Aphelios",
+    "Cassiopeia", "Ryze", "Azir",
+})
+
+
+def _comp_contribution(champ: str, locked: Sequence[str],
+                       _eng_mod: Any) -> float:
+    """Return -1..+1 contribution score for ADDING `champ` to a comp that
+    already has `locked` picks.
+
+    Positive = fills a missing bucket (engage/peel/waveclear/scaling) or
+    rebalances the AD/AP split toward the healthy 30-70 window.
+    Negative = duplicates a bucket the comp already has, OR worsens AD/AP.
+
+    Used as a small (~10%) multiplicative tiebreaker on the primary score.
+    Per ENGINE_FIX_PLAN.md Wave 5: keep the impact bounded so a tiebreaker
+    can never overrule a hard counter or true comfort pick — it just sorts
+    near-ties toward more coherent comps."""
+    if not champ or not locked:
+        return 0.0
+    locked_set = set(locked)
+
+    # Bucket presence on the already-locked comp.
+    has_engage = any(c in _COMP_ENGAGE for c in locked_set)
+    has_peel = any(c in _COMP_PEEL for c in locked_set)
+    has_waveclear = any(c in _COMP_WAVECLEAR for c in locked_set)
+    has_scaling = any(c in _COMP_SCALING for c in locked_set)
+
+    score = 0.0
+    is_engage = champ in _COMP_ENGAGE
+    is_peel = champ in _COMP_PEEL
+    is_waveclear = champ in _COMP_WAVECLEAR
+    is_scaling = champ in _COMP_SCALING
+
+    # Reward filling missing buckets, penalise duplicating existing ones.
+    if is_engage:
+        score += 0.40 if not has_engage else -0.10
+    if is_peel:
+        score += 0.30 if not has_peel else -0.05
+    if is_waveclear:
+        score += 0.20 if not has_waveclear else 0.0
+    if is_scaling:
+        score += 0.20 if not has_scaling else -0.05
+
+    # AD/AP balance — use the engine's damage_split when available.
+    if _eng_mod is not None and hasattr(_eng_mod, "champ_damage_split"):
+        try:
+            ap_sum, ad_sum = 0.0, 0.0
+            for c in locked_set:
+                ap, ad = _eng_mod.champ_damage_split(c)
+                ap_sum += ap
+                ad_sum += ad
+            tot = ap_sum + ad_sum
+            if tot > 0:
+                ap_frac = ap_sum / tot
+                # Add the candidate's damage type to predict post-add balance.
+                cap, cad = _eng_mod.champ_damage_split(champ)
+                ap_sum_after = ap_sum + cap
+                ad_sum_after = ad_sum + cad
+                tot_after = ap_sum_after + ad_sum_after
+                ap_frac_after = ap_sum_after / tot_after if tot_after > 0 else 0.5
+                # Healthy band 0.30-0.70. Score the move toward/away from band.
+                def dist_to_band(f: float) -> float:
+                    if 0.30 <= f <= 0.70:
+                        return 0.0
+                    if f < 0.30:
+                        return 0.30 - f
+                    return f - 0.70
+                before = dist_to_band(ap_frac)
+                after = dist_to_band(ap_frac_after)
+                if after < before:
+                    score += 0.30      # rebalance toward healthy
+                elif after > before + 0.05:
+                    score -= 0.30      # push further into AD-or-AP heavy
+        except Exception:
+            pass
+
+    # Clamp to [-1, 1].
+    return max(-1.0, min(1.0, score))
 
 
 # ============================================================================
@@ -1182,6 +1494,8 @@ def recommend_action(
     n: int = 5,
     forced_arch: Optional[str] = None,
     scout_champs: Optional[Dict[str, List[Dict]]] = None,
+    must_bans: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    prev_archetype: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Recommend the current action.
@@ -1203,6 +1517,24 @@ def recommend_action(
     inhouse_champs = inhouse_champs or {}
     primary_roles = primary_roles or {}
     scout_champs = scout_champs or {}
+    must_bans = must_bans or {}
+
+    # v4.1.1 — CRITICAL: the /api/primary-roles endpoint returns short codes
+    # (TOP/JGL/MID/BOT/SUP) but the engine's internal ROLE_NORM maps to LONG
+    # form (Top/Jungle/Mid/Bot/Support). off_role_severity and the lane-
+    # matchup checks compare against role_norm, so without normalising
+    # primary_roles here, *every* assignment registers as off-primary (sev
+    # ≈ 0.65 in run3 → fixes Issue A "role assignment ignores primary roles").
+    if _eng is not None and hasattr(_eng, "ROLE_NORM"):
+        rn = _eng.ROLE_NORM
+        primary_roles = {k: rn.get(v, v) for k, v in primary_roles.items()}
+
+    # v4.1.1 — Wave 2: attach must_bans to the state so recommend_bans_split
+    # can pre-load enemy-perma-ban targets in Phase 1 ban scoring.
+    try:
+        setattr(state, "must_bans", must_bans)
+    except Exception:
+        pass
 
     a = state.current_action()
     if a is None:
@@ -1247,7 +1579,8 @@ def recommend_action(
         open_r = state.open_roles(a.side)
         tcomp = target_archetype(state, a.side, inhouse_champs, primary_roles,
                                   forced_arch=forced_arch,
-                                  scout_champs=scout_champs)
+                                  scout_champs=scout_champs,
+                                  prev_archetype=prev_archetype)
         deficit = tcomp.get("deficit", {}) if tcomp else {}
         # Strict contested: a champ is only "contested" when a player on EACH
         # side has actually played it in customs (≥3 games) — not ranked
@@ -1282,6 +1615,11 @@ def recommend_action(
         # without a same-lane enemy yet revealed.
         unmatched_open = [r for r in open_r if r not in enemy_by_role]
 
+        # v4.1.1 — Wave 5: track which open roles produced zero candidates so
+        # the UI can surface "⚠ {player} {role} has no champion pool" rather
+        # than silently dropping the role.
+        roles_with_zero_cands: List[Tuple[str, str]] = []
+
         pool: List[Dict[str, Any]] = []
         for role in open_r:
             player = state.player_for_role(a.side, role)
@@ -1289,10 +1627,14 @@ def recommend_action(
                 continue
             pname = player.get("name", "player")
             opp_champ = enemy_by_role.get(role)   # same-lane enemy, if known
+            role_cand_count = 0
             for ch, sc in _candidates_for_player(
-                player, role, inhouse_champs, primary_roles, used, k=n + 2,
+                player, role, inhouse_champs, primary_roles, used,
+                k=max(n + 2, 30),     # v4.1.1 Wave 3: pre-fetch deeper so
+                                      # exclusions don't starve the pool
                 scout_champs=scout_champs,
             ):
+                role_cand_count += 1
                 bs = blind_safety(ch)
                 fr = flex_score(ch, open_r)
                 fr_unmatched = flex_score(ch, unmatched_open)
@@ -1311,7 +1653,8 @@ def recommend_action(
                 if lane_known:
                     # Our lane opponent is locked → counter-pick this slot.
                     # Never call a pick "blind-safe" when the lane is known.
-                    if cv >= 0.40 or lane_n >= 0.25:
+                    # v4.1.1: cv gate 0.40 → 0.35 per ENGINE_FIX_PLAN.md.
+                    if cv >= 0.35 or lane_n >= 0.25:
                         tag = "COUNTER"
                         why = (cv_why or f"counters {opp_champ}").capitalize()
                     elif lane_n <= -0.30:
@@ -1354,10 +1697,21 @@ def recommend_action(
                 elif lane_known:
                     # Counter-pick slot: comfort still matters but the matchup
                     # dominates, and picking into a losing lane is punished.
-                    score = (0.34 * cmf + 0.40 * cv
-                             + 0.16 * max(0.0, lane_n) + 0.06 * steer
-                             + (0.04 if fr_unmatched >= 2 else 0.0))
-                    score -= 0.24 * max(0.0, -lane_n)
+                    # v4.1.1 — Wave 4 fix J: when we know the lane but the
+                    # COUNTERS / LANE_MATCHUPS tables have no data (cv ≈ 0,
+                    # |lane_n| ≈ 0), the lane-known blend was *worse* than the
+                    # enemy-info blend (cv weight 0.40 of 0 displaced 10% of
+                    # comfort weight for nothing). Fall back when we have no
+                    # real lane signal.
+                    if cv < 0.05 and abs(lane_n) < 0.05:
+                        score = (0.44 * cmf + 0.34 * cv + 0.10 * con
+                                 + 0.06 * bs + 0.06 * steer
+                                 + (0.03 if fr_unmatched >= 2 else 0.0))
+                    else:
+                        score = (0.34 * cmf + 0.40 * cv
+                                 + 0.16 * max(0.0, lane_n) + 0.06 * steer
+                                 + (0.04 if fr_unmatched >= 2 else 0.0))
+                        score -= 0.24 * max(0.0, -lane_n)
                 elif enemy_info == 0:
                     # v3.0.5: bs weight reduced 0.22 → 0.14 (was over-represented
                     # given blind_safety returns 0.5 default for off-table champs).
@@ -1424,6 +1778,68 @@ def recommend_action(
                     "player": pname,
                     "factors": factors,
                 })
+
+            # v4.1.1 Wave 5: flag roles that produced zero candidates so the
+            # UI can warn rather than silently drop the role.
+            if role_cand_count == 0:
+                roles_with_zero_cands.append((pname, role))
+
+        # v4.1.1 Wave 5: emit zero-candidate warnings on the response notes.
+        for pname, role in roles_with_zero_cands:
+            notes.append(f"⚠ {pname} {role} has no champion pool — fill manually")
+
+        # v4.1.1 Wave 5 fix M: comp-construction tiebreaker. Once 3+ picks
+        # are locked, score each candidate's contribution to a complete comp
+        # (engage / peel / AD-AP balance / waveclear / scaling). The
+        # contribution is added as a small multiplicative tweak (max ±10%) so
+        # it breaks ties between near-equal candidates without overruling
+        # primary scoring. See _comp_contribution() for the per-axis logic.
+        locked_us = state.locked_picks(a.side)
+        if len(locked_us) >= 3 and pool:
+            for s in pool:
+                cs = _comp_contribution(s["champion"], locked_us, _eng)
+                s["score"] = round(s["score"] * (1.0 + cs * 0.10), 3)
+                s.setdefault("factors", {})["comp_fit"] = round(cs, 3)
+
+        # v4.1.1 Wave 5: WEAKNESS surface at canonical counter-pick slots
+        # (R3/B5/R5) when the engine has no real counter to apply. Translate
+        # the pre-computed enemy_weakness_vector into actionable guidance.
+        is_cp_slot = a.idx in COUNTER_PICK_SLOTS
+        if is_cp_slot and pool:
+            top_cv = max((float(p.get("factors", {}).get("counter", 0.0))
+                          for p in pool), default=0.0)
+            if top_cv < 0.20 and enemy_weak:
+                # Find the strongest weakness axis.
+                axis_priority = [
+                    ("burst_them", "burst the squishy backline",
+                     ("Akali", "Zed", "LeBlanc", "Talon", "Katarina",
+                      "Pyke", "Pantheon", "Diana")),
+                    ("tank_bust_them", "shred their frontline",
+                     ("Vayne", "Kog'Maw", "Fiora", "Gwen", "Yorick",
+                      "Master Yi", "Trundle")),
+                    ("engage_them", "force fights with hard engage",
+                     ("Malphite", "Leona", "Nautilus", "Maokai", "Ornn",
+                      "Sejuani", "Amumu", "Jarvan IV")),
+                    ("kite_them", "kite them out with range",
+                     ("Caitlyn", "Jhin", "Ashe", "Varus", "Senna",
+                      "Karthus", "Ziggs", "Xerath")),
+                ]
+                for axis, label, archetype_pool in axis_priority:
+                    if enemy_weak.get(axis, 0.0) >= 0.5:
+                        # Boost any candidates that fit this weakness archetype.
+                        boosted = False
+                        for s in pool:
+                            if s["champion"] in archetype_pool:
+                                s["score"] = round(s["score"] * 1.08, 3)
+                                if s.get("tag") in (None, "", "COMFORT"):
+                                    s["tag"] = "WEAKNESS"
+                                    s["why"] = f"Exploit: {label}"
+                                boosted = True
+                        if boosted:
+                            notes.append(
+                                f"Counter-pick slot, no hard counter "
+                                f"available — exploit: {label}.")
+                            break
 
         best: Dict[str, Dict[str, Any]] = {}
         for s in pool:
