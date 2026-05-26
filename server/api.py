@@ -686,6 +686,7 @@ async def api_engine_recommend_action(payload: Dict[str, Any]) -> JSONResponse:
         scout_champs=p.get("scout_champs"),
         must_bans=p.get("must_bans"),
         prev_archetype=p.get("prev_archetype"),
+        scout_role_champs=p.get("scout_role_champs"),
     )
     return JSONResponse(out)
 

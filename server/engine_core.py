@@ -600,10 +600,12 @@ ROLE_VALID: Dict[str, Set[str]] = {
             "Kayle","Kennen","Kled","Malphite","Maokai","Mordekaiser","Nasus","Olaf","Ornn",
             "Pantheon","Poppy","Quinn","Renekton","Riven","Rumble","Sett","Shen","Sion",
             "Tahm Kench","Teemo","Trundle","Tryndamere","Urgot","Vladimir","Volibear",
-            "Wukong","Yasuo","Yone","Yorick","Gragas","Akali","Warwick","Zac"},
+            "Wukong","Yasuo","Yone","Yorick","Gragas","Akali","Warwick","Zac",
+            # v4.1.2 Gap N+: missing champs surfaced by run7 scout-role data
+            "Singed","Sylas","Yorick","Aatrox"},
     "JGL": {"Amumu","Ambessa","Bel'Veth","Briar","Diana","Ekko","Elise","Evelynn",
             "Fiddlesticks","Gragas","Graves","Hecarim","Ivern","Jarvan IV","Karthus","Kayn",
-            "Kha'Zix","Kindred","Lee Sin","Lillia","Master Yi","Nidalee","Nocturne","Nunu",
+            "Kha'Zix","Kindred","Lee Sin","Lillia","Master Yi","Nidalee","Nocturne","Nunu & Willump",
             "Pantheon","Poppy","Rammus","Rek'Sai","Rengar","Sejuani","Shaco","Shyvana",
             "Skarner","Taliyah","Udyr","Vi","Viego","Volibear","Warwick","Wukong",
             "Xin Zhao","Zac","Maokai","Trundle","Sylas"},
@@ -612,14 +614,18 @@ ROLE_VALID: Dict[str, Set[str]] = {
             "LeBlanc","Lissandra","Lux","Malzahar","Mel","Naafiri","Neeko","Orianna",
             "Pantheon","Qiyana","Ryze","Sylas","Syndra","Taliyah","Talon","Tristana",
             "Twisted Fate","Veigar","Vex","Viktor","Vladimir","Xerath","Yasuo","Yone","Zed",
-            "Zoe","Ziggs","Aurora","Jayce","Rumble","Heimerdinger","Zyra"},
+            "Zoe","Ziggs","Aurora","Jayce","Rumble","Heimerdinger","Zyra",
+            # v4.1.2 Gap N+: Brand mid is a real pick
+            "Brand"},
     "BOT": {"Aphelios","Ashe","Caitlyn","Corki","Draven","Ezreal","Jhin","Jinx","Kai'Sa",
             "Kalista","Kog'Maw","Lucian","Miss Fortune","Nilah","Samira","Sivir","Smolder",
             "Tristana","Twitch","Varus","Vayne","Xayah","Zeri","Ziggs","Senna"},
     "SUP": {"Alistar","Bard","Blitzcrank","Braum","Janna","Karma","Leona","Lulu","Lux",
             "Mel","Milio","Morgana","Nami","Nautilus","Pyke","Rakan","Rell","Renata Glasc",
             "Senna","Seraphine","Sona","Soraka","Taric","Thresh","Yuumi","Zilean","Zyra",
-            "Xerath","Vel'Koz","Maokai","Poppy","Tahm Kench","Galio"},
+            "Xerath","Vel'Koz","Maokai","Poppy","Tahm Kench","Galio",
+            # v4.1.2 Gap N+
+            "Brand","Singed"},
 }
 
 
@@ -768,6 +774,101 @@ def champion_comfort(
 # Champions with notably above-average "any-player" win likelihood right now.
 # Used only when a player has zero inhouse + zero top_champs data so the engine
 # isn't stuck recommending '?'. Numbers are seeds, not measured.
+# v4.1.2 Gap N — curated meta-pick set per role for the priors fallback.
+# The Wave 3 fix expanded `_player_candidates` priors fallback to fill *all*
+# `ROLE_VALID[role]` champs at 0.10. That solved last-pick silent failures
+# (Issue #4) but introduced a new problem: `ROLE_VALID` legitimately includes
+# fringe entries like Tristana-MID and Smolder-BOT-only-but-tagged-MID. Those
+# would surface in the priors pool for players with zero data at that role,
+# producing nonsensical picks like "JP MID Tristana" in run7 Draft 1.
+#
+# META_PICKS_BY_ROLE is the *realistic* fallback set — champs that are
+# actually played as their primary meta role at LCS/solo-Q. Used in the
+# priors fallback at 0.10. The rest of `ROLE_VALID[role]` still serves as
+# a safety net at 0.05 so the candidate generator never returns empty.
+# v4.1.2 Gap O — helper to extract per-role top-champs from a scout-sheet
+# payload's `roles` array. The sheet stores entries like:
+#   {"role": "Top", "games": "44", "top_champs": "Sett (16/25), Garen (3/5)"}
+# This parser returns: {"TOP": [{"champ": "Sett", "wins": 16, "games": 25}, ...]}
+# Used by `_player_candidates` so it picks Ben's Volibear at TOP rather than
+# falling through to priors when his customs are sparse.
+_ROLE_LONG_TO_SHORT = {"Top": "TOP", "Jungle": "JGL", "Mid": "MID",
+                       "Bot": "BOT", "Support": "SUP"}
+
+
+def parse_scout_role_champs(scout_roles: List[Dict[str, Any]]
+                            ) -> Dict[str, List[Dict[str, Any]]]:
+    """Parse scout sheet `roles[]` (with `top_champs` like "Sett (16/25), ...")
+    into a per-role champ list. Returns {role_short: [{champ, games, wins}]}."""
+    import re
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    if not scout_roles:
+        return out
+    pat = re.compile(r"^\s*([A-Za-z'\.\s]+?)\s*\((\d+)\s*/\s*(\d+)\s*\)\s*$")
+    # Champion name normalisation: scout sheet writes "Sett" / "LeeSin" /
+    # "MasterYi" while engine tables use "Sett" / "Lee Sin" / "Master Yi".
+    _NAME_FIX = {
+        "LeeSin": "Lee Sin", "MasterYi": "Master Yi",
+        "MonkeyKing": "Wukong", "MissFortune": "Miss Fortune",
+        "Kaisa": "Kai'Sa", "Khazix": "Kha'Zix", "Velkoz": "Vel'Koz",
+        "Belveth": "Bel'Veth", "TwistedFate": "Twisted Fate",
+        "AurelionSol": "Aurelion Sol", "TahmKench": "Tahm Kench",
+        "JarvanIV": "Jarvan IV", "Drmundo": "Dr. Mundo",
+        "DrMundo": "Dr. Mundo", "Nunu": "Nunu & Willump",
+        "KSante": "K'Sante", "ReneGlasc": "Renata Glasc",
+        "RenataGlasc": "Renata Glasc", "Chogath": "Cho'Gath",
+    }
+    for entry in scout_roles:
+        role_long = entry.get("role")
+        role_short = _ROLE_LONG_TO_SHORT.get(role_long)
+        if not role_short:
+            continue
+        raw = (entry.get("top_champs") or "").strip()
+        if not raw:
+            continue
+        items: List[Dict[str, Any]] = []
+        for part in raw.split(","):
+            m = pat.match(part)
+            if not m:
+                continue
+            name = m.group(1).strip()
+            name = _NAME_FIX.get(name, name)
+            try:
+                wins, games = int(m.group(2)), int(m.group(3))
+            except (TypeError, ValueError):
+                continue
+            if games <= 0:
+                continue
+            items.append({"champ": name, "games": games, "wins": wins})
+        if items:
+            out[role_short] = items
+    return out
+
+
+META_PICKS_BY_ROLE: Dict[str, Tuple[str, ...]] = {
+    "TOP": ("Garen", "Darius", "Sett", "Malphite", "Ornn", "Maokai",
+            "Shen", "Renekton", "Camille", "Fiora", "Gwen", "Aatrox",
+            "Jax", "Mordekaiser", "Sion", "K'Sante", "Volibear",
+            "Nasus", "Tryndamere", "Kennen"),
+    "JGL": ("Master Yi", "Warwick", "Amumu", "Sejuani", "Vi", "Lee Sin",
+            "Hecarim", "Kha'Zix", "Nocturne", "Graves", "Diana", "Ekko",
+            "Lillia", "Bel'Veth", "Briar", "Karthus", "Viego",
+            "Wukong", "Jarvan IV", "Xin Zhao", "Rammus"),
+    "MID": ("Annie", "Lux", "Veigar", "Brand", "Malzahar", "Viktor",
+            "Lissandra", "Syndra", "Orianna", "Ahri", "LeBlanc", "Akali",
+            "Vex", "Zed", "Yasuo", "Yone", "Galio", "Twisted Fate",
+            "Aurelion Sol", "Cassiopeia", "Ryze", "Anivia", "Sylas"),
+    "BOT": ("Ashe", "Miss Fortune", "Caitlyn", "Jhin", "Tristana",
+            "Jinx", "Ezreal", "Kai'Sa", "Lucian", "Sivir", "Vayne",
+            "Xayah", "Kog'Maw", "Twitch", "Aphelios", "Senna", "Draven",
+            "Varus", "Samira", "Nilah", "Zeri"),
+    "SUP": ("Morgana", "Soraka", "Janna", "Leona", "Nautilus", "Thresh",
+            "Lulu", "Bard", "Braum", "Karma", "Lux", "Yuumi", "Pyke",
+            "Blitzcrank", "Rakan", "Alistar", "Tahm Kench", "Senna",
+            "Nami", "Renata Glasc", "Maokai", "Rell", "Milio"),
+}
+
+
 CHAMP_PRIORS: Dict[str, float] = {
     # v4.1.1 Wave 3: expanded from 8 → 28 champs with one strong meta pick per
     # role × archetype so the priors fallback always emits at least 4-5 viable
@@ -1085,15 +1186,21 @@ def _player_candidates(
     primary_roles: Dict[str, str],
     max_candidates: int = 8,
     scout_champs: Optional[Dict[str, List[Dict]]] = None,
+    scout_role_champs: Optional[Dict[str, Dict[str, List[Dict]]]] = None,
 ) -> List[Tuple[str, float]]:
     """Return list of (champ, comfort) candidates for a player, sorted high→low.
 
     Comfort sources, in order of signal strength (each only used if previous
     didn't already cover the champ with a higher score):
-      1. inhouse_champs — customs games, full per-champ stats + last-100 recency
-      2. scout_champs   — scout-sheet FULL CHAMPION POOL (ranked + draft, pooled)
-      3. top_champs     — name-only top 3 from rankings sheet, sample size guessed
-      4. CHAMP_PRIORS   — global priors fallback when player has zero data
+      1. inhouse_champs   — customs games, full per-champ stats + last-100 recency
+      2. scout_role_champs — v4.1.2: parsed from scout sheet `roles[].top_champs`,
+                             role-tagged so we know Ben's Volibear is TOP, not JGL
+      3. scout_champs     — scout-sheet FULL CHAMPION POOL (pooled across roles)
+      4. top_champs       — name-only top 3 from rankings sheet, sample size guessed
+      5. CHAMP_PRIORS     — global priors fallback when player has zero data
+
+    `scout_role_champs[player][role_short]` is a list of dicts:
+      {"champ": str, "games": int, "wins": int}
     """
     role = p.get("role", "")
     valid = ROLE_VALID.get(role, set())
@@ -1122,17 +1229,55 @@ def _player_candidates(
         role_norm = ROLE_NORM.get(role, role)
         ch_role_match = role_match
         if isinstance(ch_roles, dict) and ch_roles:
-            # If champ has been played in this exact role > 30% of the time, boost.
+            # v4.1.2 Gap O cont.: customs role-match is strict — if the champ
+            # has been recorded in roles AND was played <10% of the time at
+            # the assigned role, drop role_match. Previous threshold
+            # `ch_total >= 5` let Turkey's 1g Akali-at-MID inflate his TOP
+            # comfort and beat his actual TOP scout pool.
+            #
+            # AND: if customs games at the assigned role are 0 with the champ
+            # only being played at other roles, skip the customs entry entirely
+            # for this candidate. A 1g Akali-at-MID is NOT evidence that
+            # Turkey can play Akali TOP — it's a different lane.
             ch_total = sum(parse_float(v) for v in ch_roles.values())
             if ch_total > 0:
                 this_role_pct = parse_float(ch_roles.get(role_norm, 0)) / ch_total
+                this_role_games = parse_float(ch_roles.get(role_norm, 0))
                 if this_role_pct >= 0.30:
                     ch_role_match = True
-                elif this_role_pct < 0.10 and ch_total >= 5:
+                elif this_role_pct < 0.10:
                     ch_role_match = False
+                # Hard skip: 0 games at this role AND champ was actually
+                # recorded at other roles. The signal here is "this is not a
+                # role they play this champ in".
+                if this_role_games < 1 and ch_total >= 1:
+                    continue
         seen[cname] = champion_comfort(g, wr, kda,
                                        role_match=ch_role_match, form=form,
                                        inhouse=True, results=ch.get("results"))
+
+    # v4.1.2 Gap O — per-role scout top-3. Parsed from the scout sheet's
+    # `roles[].top_champs` field (e.g. "Sett (16/25), Garen (3/5)" → Sett 16w/25g,
+    # Garen 3w/5g, both tagged TOP). Strong signal because it ties champion to
+    # actual *role* played, not just "player has Volibear somewhere". Weighted
+    # between customs (#1) and scout pool (#3) — strong enough to beat the
+    # across-role scout aggregate, but customs still wins ties.
+    if scout_role_champs:
+        per_role = (scout_role_champs.get(pname) or {}).get(role) or []
+        for entry in per_role:
+            cname = entry.get("champ")
+            if not cname or cname not in valid:
+                continue
+            g = parse_float(entry.get("games", 0))
+            if g < 2:
+                continue
+            wins = parse_float(entry.get("wins", 0))
+            wr_pct = (wins / g) * 100 if g > 0 else 50.0
+            # 0.92 weight = below customs (1.0) but above scout-pool (0.85)
+            score = 0.92 * champion_comfort(
+                g, wr_pct, 1.5, role_match=True, form=form, inhouse=False)
+            if score > seen.get(cname, 0.0):
+                seen[cname] = score
 
     # Scout-sheet champion pool (ranked + draft). Per-champ games/wr/kda but
     # pooled across roles, so role-match falls back to player primary. Phase 2:
@@ -1178,15 +1323,21 @@ def _player_candidates(
                 seen[cname] = 0.50 * champion_comfort(8.0, prior_wr * 100, 2.0,
                                                       role_match=role_match,
                                                       form=form)
-        # v4.1.1 Wave 3 fix E: fill *every* valid-role champ at low constant
-        # comfort (0.10) rather than capping at 6 alphabetical. Stops
-        # `_player_candidates` from returning an empty list when 6+ early
-        # alphabetical champs are banned / picked. The 0.10 floor keeps these
-        # below any signal-derived comfort, but ensures the last-pick branch
-        # always has a legal option.
+        # v4.1.2 Gap N fix: meta-curated fallback first (0.10), then
+        # ROLE_VALID safety net (0.05). The previous Wave 3 fix put every
+        # valid-role champ at 0.10 — which produced "JP MID Tristana" in
+        # run7 because Tristana lives in ROLE_VALID["MID"] (technically) but
+        # isn't a realistic mid-lane priors pick. The curated META_PICKS_BY_ROLE
+        # restricts what surfaces from priors; the ROLE_VALID safety net at
+        # 0.05 still guarantees a candidate exists for last-pick scenarios
+        # but ranks well below any meta-aligned option.
+        meta = set(META_PICKS_BY_ROLE.get(role, ()))
+        for cname in meta:
+            if cname in valid and cname not in seen:
+                seen[cname] = 0.10
         for cname in valid:
             if cname not in seen:
-                seen[cname] = 0.10
+                seen[cname] = 0.05
 
     # Phase 2: off-role decay. A TOP main slotted JGL with 4 lifetime games
     # there shouldn't have their tiny pool ranked alongside a JGL main's deep

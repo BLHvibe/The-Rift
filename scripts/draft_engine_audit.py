@@ -93,7 +93,11 @@ def _scout_pool_for_player(world, name) -> List[Dict[str, Any]]:
     """Pull the full champion pool from /api/scout-sheets/{name} → champ_pool.
 
     v4.1.1: also stashes must_bans on the world dict via a side-channel so
-    `run_one_draft` can thread them into /api/engine/recommend_action."""
+    `run_one_draft` can thread them into /api/engine/recommend_action.
+
+    v4.1.2 Gap O: also parses the scout sheet's `roles[].top_champs` field
+    into a per-role champ list so the engine can pick Ben's Volibear at TOP
+    instead of his sparse customs at JGL."""
     data = _get(f"/api/scout-sheets/{name}")
     if not data:
         return []
@@ -101,6 +105,45 @@ def _scout_pool_for_player(world, name) -> List[Dict[str, Any]]:
 
     # Stash must_bans for this player on world (created lazily).
     world.setdefault("must_bans", {})[name] = payload.get("must_bans") or []
+
+    # v4.1.2 Gap O — parse per-role champ lists.
+    _ROLE_LONG_TO_SHORT = {"Top": "TOP", "Jungle": "JGL", "Mid": "MID",
+                            "Bot": "BOT", "Support": "SUP"}
+    _NAME_FIX = {
+        "LeeSin": "Lee Sin", "MasterYi": "Master Yi",
+        "MonkeyKing": "Wukong", "MissFortune": "Miss Fortune",
+        "Kaisa": "Kai'Sa", "Khazix": "Kha'Zix", "Velkoz": "Vel'Koz",
+        "Belveth": "Bel'Veth", "TwistedFate": "Twisted Fate",
+        "AurelionSol": "Aurelion Sol", "TahmKench": "Tahm Kench",
+        "JarvanIV": "Jarvan IV", "Drmundo": "Dr. Mundo",
+        "DrMundo": "Dr. Mundo", "Nunu": "Nunu & Willump",
+        "KSante": "K'Sante", "ReneGlasc": "Renata Glasc",
+        "RenataGlasc": "Renata Glasc", "Chogath": "Cho'Gath",
+    }
+    import re
+    pat = re.compile(r"^\s*([A-Za-z'\.\s]+?)\s*\((\d+)\s*/\s*(\d+)\s*\)\s*$")
+    role_champs: Dict[str, List[Dict[str, Any]]] = {}
+    for entry in (payload.get("roles") or []):
+        role_short = _ROLE_LONG_TO_SHORT.get(entry.get("role"))
+        if not role_short:
+            continue
+        raw = (entry.get("top_champs") or "").strip()
+        items: List[Dict[str, Any]] = []
+        for part in raw.split(","):
+            m = pat.match(part)
+            if not m:
+                continue
+            cn = _NAME_FIX.get(m.group(1).strip(), m.group(1).strip())
+            try:
+                wins, games = int(m.group(2)), int(m.group(3))
+            except (TypeError, ValueError):
+                continue
+            if games > 0:
+                items.append({"champ": cn, "games": games, "wins": wins})
+        if items:
+            role_champs[role_short] = items
+    if role_champs:
+        world.setdefault("scout_role_champs", {})[name] = role_champs
 
     out = []
     for c in (payload.get("champ_pool") or []):
@@ -247,6 +290,7 @@ def run_one_draft(draft_id: int,
             "primary_roles":  world["primary_roles"],
             "scout_champs":   scout_champs,
             "must_bans":      world.get("must_bans") or {},
+            "scout_role_champs": world.get("scout_role_champs") or {},
             "n": 6,
         }
         # We can't know acting side without reading the action — include both

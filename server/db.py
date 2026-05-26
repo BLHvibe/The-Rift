@@ -969,9 +969,60 @@ def primary_roles(
     min_team_size: int = 2,
     max_team_size: int = 10,
 ) -> Dict[str, str]:
-    """Per-player primary role (most-played role across customs). Shape
-    `{display_name: "TOP"|"JGL"|"MID"|"BOT"|"SUP"}`. Players with no role
-    data are omitted."""
+    """Per-player primary role. Shape `{display_name: "TOP"|"JGL"|"MID"|"BOT"|"SUP"}`.
+    Players with no role data are omitted.
+
+    v4.1.2 — hybrid signal:
+      1. Prefer scout-sheet `roles` (solo-Q + draft pool, typically 50-100+
+         games per player) — the strongest signal of where the player
+         actually plays.
+      2. Fall back to customs-derived role for players without a scout sheet
+         or where scout role data is too thin (<10 games at top role).
+
+    The previous customs-only behaviour was wrong for ~60% of the roster:
+    e.g. Ben (TOP main with Volibear 24/35 ranked games) read as JGL because
+    his ~6 customs happened to land mostly in JGL. The engine's
+    off_role_severity then penalised his actual TOP picks as "off-primary".
+    """
+    # Step 1: scout-sheet-derived primary (preferred).
+    scout_primary: Dict[str, str] = {}
+    _ROLE_LONG_TO_SHORT = {"Top": "TOP", "Jungle": "JGL", "Mid": "MID",
+                           "Bot": "BOT", "Support": "SUP"}
+    try:
+        conn_s = _conn()
+        rows_s = conn_s.execute(
+            "SELECT display_name, payload FROM scout_sheets").fetchall()
+        for r in rows_s:
+            name = r["display_name"]
+            if not name:
+                continue
+            try:
+                payload = json.loads(r["payload"]) if r["payload"] else None
+            except (json.JSONDecodeError, TypeError):
+                payload = None
+            if not isinstance(payload, dict):
+                continue
+            roles_list = payload.get("roles") or []
+            if not roles_list:
+                continue
+            # Each entry: {"role": "Top", "games": "69", "pct": "69.0%", ...}
+            best_role, best_games = None, 0
+            for entry in roles_list:
+                try:
+                    g = int(str(entry.get("games", "0")).strip() or 0)
+                except (TypeError, ValueError):
+                    g = 0
+                if g > best_games:
+                    best_games, best_role = g, entry.get("role")
+            if best_role and best_games >= 10:
+                short = _ROLE_LONG_TO_SHORT.get(best_role)
+                if short:
+                    scout_primary[name] = short
+    except Exception:
+        # Scout-sheet table missing or corrupted — degrade silently to
+        # customs-only path below.
+        scout_primary = {}
+
     conn = _conn()
     disp = _resolved_display_case_sql()
     rows = conn.execute(
@@ -1008,11 +1059,19 @@ def primary_roles(
             continue
         by_player.setdefault(name, {})[r["role"]] = int(r["n"] or 0)
 
-    out: Dict[str, str] = {}
+    customs_primary: Dict[str, str] = {}
     for name, roles in by_player.items():
         if not roles:
             continue
-        out[name] = max(roles, key=roles.get)
+        customs_primary[name] = max(roles, key=roles.get)
+
+    # Merge: scout-derived wins when present, customs-derived fills the gaps.
+    out: Dict[str, str] = {}
+    all_names = set(scout_primary) | set(customs_primary)
+    for name in all_names:
+        if elig_set is not None and name not in elig_set:
+            continue
+        out[name] = scout_primary.get(name) or customs_primary.get(name)
     return out
 
 

@@ -430,9 +430,14 @@ def _candidates_for_player(
     exclude: Set[str],
     k: int = 8,
     scout_champs: Optional[Dict[str, List[Dict]]] = None,
+    scout_role_champs: Optional[Dict[str, Dict[str, List[Dict]]]] = None,
 ) -> List[Tuple[str, float]]:
     """(champ, comfort) for a player at a role, via the engine's own candidate
-    generator, with already-used champions removed."""
+    generator, with already-used champions removed.
+
+    v4.1.2: threads `scout_role_champs` (per-role top-3 parsed from scout sheet
+    `roles[].top_champs`) so Ben at TOP picks Volibear from his solo-Q TOP
+    pool instead of falling through to priors with Dr. Mundo."""
     if _eng is None:
         return []
     p = dict(player)
@@ -441,12 +446,21 @@ def _candidates_for_player(
     if gen is None:
         return []
     try:
-        cands = gen(p, inhouse_champs or {}, primary_roles or {}, k + len(exclude),
-                    scout_champs=scout_champs or {})
+        cands = gen(p, inhouse_champs or {}, primary_roles or {},
+                    k + len(exclude),
+                    scout_champs=scout_champs or {},
+                    scout_role_champs=scout_role_champs or {})
     except TypeError:
-        # Older engine without scout_champs kwarg — fall back gracefully.
+        # Older engine without one of the kwargs — try progressively older sigs.
         try:
-            cands = gen(p, inhouse_champs or {}, primary_roles or {}, k + len(exclude))
+            cands = gen(p, inhouse_champs or {}, primary_roles or {},
+                        k + len(exclude), scout_champs=scout_champs or {})
+        except TypeError:
+            try:
+                cands = gen(p, inhouse_champs or {}, primary_roles or {},
+                            k + len(exclude))
+            except Exception:
+                return []
         except Exception:
             return []
     except Exception:
@@ -1243,17 +1257,47 @@ def recommend_bans_split(
         # can't look up history attributions there. Build a complete enemy
         # `champ -> player` index from inhouse_champs + scout_champs so we
         # can attribute any historical ban.
-        champ_to_player: Dict[str, str] = dict(must_ban_index)
+        #
+        # v4.1.2 Gap P fix: pick the OWNER (max games) rather than first
+        # iteration. Champs like Ezreal show up in multiple players' customs
+        # (Luke 2g, Logan 9g, Chris 1g, Chips 1g). Iteration order would
+        # assign Ezreal→Luke and the ban-decay attribution would credit
+        # Luke, not Logan — letting Logan keep stacking unrelated bans. Now
+        # we tally per-(champ, player) games and pick the max for each champ.
+        champ_owner_games: Dict[str, Dict[str, float]] = {}
         for ep in state.players.get(enemy_side, []):
             ename = ep.get("name", "")
             for ch in (inhouse_champs.get(ename) or []):
                 cn = ch.get("champ") or ch.get("name")
-                if cn and cn not in champ_to_player:
-                    champ_to_player[cn] = ename
+                try:
+                    g = float(ch.get("games") or 0)
+                except (TypeError, ValueError):
+                    g = 0.0
+                if cn and g > 0:
+                    champ_owner_games.setdefault(cn, {})[ename] = (
+                        champ_owner_games.get(cn, {}).get(ename, 0) + g)
             for ch in (scout_champs.get(ename) or []):
                 cn = ch.get("champ") or ch.get("name")
-                if cn and cn not in champ_to_player:
-                    champ_to_player[cn] = ename
+                try:
+                    g = float(ch.get("games") or 0)
+                except (TypeError, ValueError):
+                    g = 0.0
+                # Scout pool games are lower weight (across-role) — multiply
+                # by 0.5 so customs games dominate attribution.
+                if cn and g > 0:
+                    champ_owner_games.setdefault(cn, {})[ename] = (
+                        champ_owner_games.get(cn, {}).get(ename, 0) + 0.5 * g)
+        # Resolve max-games owner per champ.
+        champ_to_player: Dict[str, str] = dict(must_ban_index)   # must_bans hard-pin
+        for cn, owners in champ_owner_games.items():
+            if cn in champ_to_player:
+                continue   # must_ban target — don't override
+            best = max(owners.items(), key=lambda kv: kv[1])
+            champ_to_player[cn] = best[0]
+        # Fall back to top_champs name-only when neither customs nor scout
+        # mention the champ at all.
+        for ep in state.players.get(enemy_side, []):
+            ename = ep.get("name", "")
             for cn in (ep.get("top_champs") or []):
                 if cn and cn not in champ_to_player:
                     champ_to_player[cn] = ename
@@ -1267,13 +1311,31 @@ def recommend_bans_split(
 
         picked: List[Dict[str, Any]] = []
         candidates = list(raw)
+        # v4.1.2 Gap P — combined decay + hard cap.
+        #   • DECAY_COEF 0.80: 2nd ban × 0.56, 3rd × 0.38
+        #   • HARD_CAP = 2 unless the player has 3+ must-ban candidates
+        #     in the threat list. With must_bans + customs + scout, a player
+        #     with three 60%+ WR threats is rare; banning a 3rd-best is
+        #     wasteful spread on every other enemy.
+        DECAY_COEF = 0.80
+        HARD_CAP_DEFAULT = 2
+        # Per-player cap can rise to 3 only if that player has 3+ must-ban
+        # records in must_ban_index. Most players have 0-1 must-bans.
+        must_ban_counts: Dict[str, int] = {}
+        for ch, pl in must_ban_index.items():
+            must_ban_counts[pl] = must_ban_counts.get(pl, 0) + 1
         # Cap iterations: at most n × 4 rounds so we never loop forever.
         for _ in range(n * 4):
             if not candidates or len(picked) >= n:
                 break
             best_idx, best_score = -1, -1.0
             for i, c in enumerate(candidates):
-                decay = 1.0 / (1.0 + 0.50 * per_player_banned.get(c["player"], 0))
+                pl = c["player"]
+                count = per_player_banned.get(pl, 0)
+                cap = HARD_CAP_DEFAULT if must_ban_counts.get(pl, 0) < 3 else 3
+                if count >= cap:
+                    continue   # hard cap: skip further bans on this player
+                decay = 1.0 / (1.0 + DECAY_COEF * count)
                 s = c["base"] * decay
                 if s > best_score:
                     best_score, best_idx = s, i
@@ -1345,37 +1407,82 @@ def recommend_bans_split(
                 protected_counts[best_v] = protected_counts.get(best_v, 0) + 1
 
     def _spread_factor(atk: str) -> float:
-        """Discount attackers that only protect already-protected victims;
-        reward those that cover ≥2 victims or a fresh one."""
+        """Discount attackers whose STRONGEST counter target is already
+        protected. Even if the attacker also counters fresh victims, the
+        marginal value of a 2nd ban on the same primary victim is low —
+        diminishing returns. v4.1.2 Gap Q tightened: shrink by 0.5 per
+        already-protected reason for the attacker's #1 victim.
+
+        Old behaviour returned 1.15 when ANY fresh victim existed, even if
+        the attacker's primary target was already protected — that's why
+        Malphite ("counters your Aurora" + "also counters Olaf") still beat
+        candidates that targeted only Olaf in run8."""
         victims = atk_victims.get(atk, set())
         if not victims:
             return 1.0
-        # 1.0 baseline; +0.15 per fresh victim, ×0.3 if every victim is already protected.
+        # Find the attacker's strongest victim (the one that drove its `why`).
+        best_v, best_s = None, 0.0
+        for v in victims:
+            for a, s in _counters_of(v):
+                if a == atk and s > best_s:
+                    best_s, best_v = s, v
+        if best_v is None:
+            best_v = next(iter(victims))
+        primary_protected = protected_counts.get(best_v, 0)
+        if primary_protected >= 1:
+            # The exact victim this attacker most strongly protects has
+            # already received a ban. Shrink hard — 0.50 × (decay per
+            # additional protection).
+            return 0.50 / (1 + 0.5 * (primary_protected - 1))
         fresh = [v for v in victims if protected_counts.get(v, 0) == 0]
-        if not fresh:
-            return 0.30
-        return 1.0 + 0.15 * len(fresh)
+        return 1.0 + 0.15 * (len(fresh) - 1)
 
+    # v4.1.2 Gap Q — within-call de-dup. The previous _spread_factor only
+    # accounted for ALREADY-locked P2 bans from `state._history`. But each
+    # /api/engine/recommend_action returns the top-N (n=6 in audit), so the
+    # alternatives ranked 2-6 all targeted the same locked pick if that
+    # pick had multiple counters in the table. Now we emit them one at a
+    # time, scaling each subsequent candidate's score for the same victim
+    # by 0.5, so the alternatives shown to the user surface variety.
+    p2_pool: List[Dict[str, Any]] = []
     for ch in set(counter_us_raw) | set(threat):
         if ch in used:
             continue
-        # Phase 2: counter_us sums rescaled COUNTERS (max 0.9 per pair) so a
-        # champion that hard-counters two of our locked picks easily exceeds
-        # 1.0 raw; divisor bumped to 1.4 so the normalised cu still spans 0..1.
         cu = min(counter_us_raw.get(ch, 0.0) / 1.4, 1.0)
         th = min(float(threat.get(ch, {}).get("threat", 0.0) or 0.0), 1.0)
-        # Worth a ban only if it's a real pickable champ or it counters us.
         if cu <= 0.0 and not any(ch in rv.get(r, ()) for r in ROLES):
             continue
         spread = _spread_factor(ch)
-        score = (0.62 * cu + 0.38 * th) * role_w.get(ch, 1.0) * spread
+        base = (0.62 * cu + 0.38 * th) * role_w.get(ch, 1.0) * spread
+        # The victim attribution for this attacker (the strongest victim it
+        # counters among our locked picks). Used for within-call de-dup.
+        victim = reason.get(ch, "").replace("counters your ", "").strip() or None
         why = (reason.get(ch)
                or (threat.get(ch, {}) or {}).get("phase_reason", "")
                or "enemy threat to your comp")
-        out.append({"champion": ch, "score": round(score, 3),
-                    "tag": "BAN-P2", "why": why})
-    out.sort(key=lambda s: -s["score"])
-    return out[:n]
+        p2_pool.append({"champion": ch, "base": base, "victim": victim,
+                        "why": why})
+
+    # Emit one at a time with per-victim shrink.
+    victim_seen: Dict[str, int] = {}
+    p2_pool.sort(key=lambda s: -s["base"])
+    emitted: List[Dict[str, Any]] = []
+    while p2_pool and len(emitted) < n:
+        best_idx, best_score = -1, -1.0
+        for i, c in enumerate(p2_pool):
+            shrink = 0.5 ** victim_seen.get(c["victim"] or "_", 0) if c["victim"] else 1.0
+            s = c["base"] * shrink
+            if s > best_score:
+                best_score, best_idx = s, i
+        if best_idx < 0:
+            break
+        chosen = p2_pool.pop(best_idx)
+        v = chosen["victim"] or "_"
+        victim_seen[v] = victim_seen.get(v, 0) + 1
+        emitted.append({"champion": chosen["champion"],
+                        "score": round(best_score, 3),
+                        "tag": "BAN-P2", "why": chosen["why"]})
+    return emitted
 
 
 # ============================================================================
@@ -1496,6 +1603,7 @@ def recommend_action(
     scout_champs: Optional[Dict[str, List[Dict]]] = None,
     must_bans: Optional[Dict[str, List[Dict[str, Any]]]] = None,
     prev_archetype: Optional[str] = None,
+    scout_role_champs: Optional[Dict[str, Dict[str, List[Dict]]]] = None,
 ) -> Dict[str, Any]:
     """
     Recommend the current action.
@@ -1518,6 +1626,7 @@ def recommend_action(
     primary_roles = primary_roles or {}
     scout_champs = scout_champs or {}
     must_bans = must_bans or {}
+    scout_role_champs = scout_role_champs or {}
 
     # v4.1.1 — CRITICAL: the /api/primary-roles endpoint returns short codes
     # (TOP/JGL/MID/BOT/SUP) but the engine's internal ROLE_NORM maps to LONG
@@ -1633,6 +1742,7 @@ def recommend_action(
                 k=max(n + 2, 30),     # v4.1.1 Wave 3: pre-fetch deeper so
                                       # exclusions don't starve the pool
                 scout_champs=scout_champs,
+                scout_role_champs=scout_role_champs,
             ):
                 role_cand_count += 1
                 bs = blind_safety(ch)
