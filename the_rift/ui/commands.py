@@ -120,6 +120,7 @@ class CommandsState:
 cmds = CommandsState()
 
 TOP_BAR_H = 52
+_VP_TITLE_H = 52   # app titlebar height (mirrors main.TITLE_H) — viewport-coord offset
 PAD       = 20
 BTN_W     = 260
 BTN_H     = 32   # compressed from 44 so all commands fit without scrolling
@@ -163,7 +164,7 @@ def draw_commands(dl, vw, vh, fonts=None):
     if not dpg.does_item_exist(_CMD_WIN):
         _build_commands_window(win_x, win_w, vh)
     else:
-        dpg.configure_item(_CMD_WIN, pos=(win_x, TOP_BAR_H),
+        dpg.configure_item(_CMD_WIN, pos=(win_x, _VP_TITLE_H + TOP_BAR_H),
                            width=win_w, height=vh-TOP_BAR_H)
 
     # Flush pending log lines into console widget (main thread only)
@@ -173,7 +174,7 @@ def draw_commands(dl, vw, vh, fonts=None):
 
 def _build_commands_window(sb_w, vw, vh):
     with dpg.window(tag=_CMD_WIN,
-                    pos=(sb_w, TOP_BAR_H),
+                    pos=(sb_w, _VP_TITLE_H + TOP_BAR_H),
                     width=vw, height=vh-TOP_BAR_H,
                     no_title_bar=True, no_resize=True,
                     no_move=True, no_focus_on_appearing=True):

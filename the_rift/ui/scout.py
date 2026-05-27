@@ -509,10 +509,10 @@ def _rw_header(r):
     with dpg.group(horizontal=True):
         dpg.add_spacer(width=14)
         for label, val, col in chips:
-            with dpg.child_window(width=128, height=64, border=True,
+            with dpg.child_window(width=128, height=88, border=True,
                                    no_scrollbar=True,
                                    no_scroll_with_mouse=True):
-                dpg.add_spacer(height=2)
+                dpg.add_spacer(height=4)
                 lt = dpg.add_text(f"  {label}", color=(*C["txt_dim"][:3], 220))
                 if "raj_sb_14" in _F: dpg.bind_item_font(lt, _F["raj_sb_14"])
                 vt = dpg.add_text(f"  {val}", color=col)
@@ -1139,8 +1139,23 @@ def _on_sheet_loaded(name, sheet_data, history):
     scouted_at = sheet_data.get("scouted_at")
     if scouted_at:
         from datetime import datetime as _dt
-        delta = (_dt.now() - scouted_at).days
-        base["scouted_days_ago"] = delta
+        parsed = None
+        if isinstance(scouted_at, _dt):
+            parsed = scouted_at
+        else:
+            s = str(scouted_at).strip().replace("Z", "+00:00")
+            try:
+                parsed = _dt.fromisoformat(s)
+            except ValueError:
+                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+                    try:
+                        parsed = _dt.strptime(s, fmt)
+                        break
+                    except ValueError:
+                        continue
+        if parsed is not None:
+            now = _dt.now(parsed.tzinfo) if parsed.tzinfo else _dt.now()
+            base["scouted_days_ago"] = max(0, (now - parsed).days)
 
     if sheet_data.get("champ_pool"):
         base["champ_pool_full"] = sheet_data["champ_pool"]
