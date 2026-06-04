@@ -211,6 +211,19 @@ def _run(api_key: str, region: str, routing: str, do_scout: bool,
 
     # Optional per-player scout-sheet push
     if do_scout:
+        # Batch-fetch inhouse champion comfort for every player up-front so the
+        # scout payload's `inhouse_champs` array carries the customs signal the
+        # draft engine reads. One API call instead of N.
+        try:
+            from urllib.parse import quote
+            names = [r["name"] for r in results if r.get("name")]
+            qs = quote(",".join(names), safe=",")
+            ih_resp = rift_api._get(f"/api/inhouse-champs?players={qs}") or {}
+            inhouse_by_name = ih_resp.get("inhouse_champs") or {}
+        except Exception as e:                                 # pragma: no cover
+            _emit(on_progress, f"  inhouse-champs fetch failed: {e}", 0.89)
+            inhouse_by_name = {}
+
         _emit(on_progress, "Scouting each player (100 games)…", 0.90)
         for idx, r in enumerate(results, 1):
             if not r.get("puuid"):
@@ -227,13 +240,16 @@ def _run(api_key: str, region: str, routing: str, do_scout: bool,
                 if not analysis:
                     continue
                 rs = f"{r['tier']} {r['division']}" if r['division'] != "N/A" else r['tier']
+                player_inhouse = inhouse_by_name.get(r["name"]) or []
                 api_writer.push_scout_sheet(
                     r["name"], rs, r["lp"], analysis,
                     ranking_info={"position": idx,
                                   "score": r.get("normalized"),
                                   "rating": "",
                                   "tier_component": "",
-                                  "rank_component": str(r.get("normalized"))})
+                                  "rank_component": str(r.get("normalized"))},
+                    inhouse_data=({"champs": player_inhouse}
+                                  if player_inhouse else None))
             except Exception as e:                             # pragma: no cover
                 _emit(on_progress, f"  {r['name']}: scout failed - {e}", pct)
                 continue

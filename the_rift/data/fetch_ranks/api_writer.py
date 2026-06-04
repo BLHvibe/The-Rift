@@ -365,8 +365,9 @@ def _analysis_to_scout_payload(player_name: str,
     ]
 
     # Champ pool — engine's #2 comfort signal.
+    # analyze_player() emits this as `champ_list` (see scouting.py:149).
     champ_pool = []
-    for c in (a.get("champ_pool") or []):
+    for c in (a.get("champ_list") or []):
         if not isinstance(c, dict):
             continue
         results_list = c.get("results") or []
@@ -419,9 +420,11 @@ def _analysis_to_scout_payload(player_name: str,
         "must_bans_msg":    a.get("must_bans_msg"),
         "ban_impact":       a.get("ban_impact"),
         "champ_pool":       champ_pool,
-        "roles":            a.get("roles") or [],
+        # analyze_player() emits these as `role_list` / `recent_matches`
+        # (see scouting.py:160,163).
+        "roles":            a.get("role_list") or [],
         "form_state":       a.get("form", "MIXED"),
-        "matches":          a.get("matches") or [],
+        "matches":          a.get("recent_matches") or [],
         "inhouse_champs":   (inhouse_data or {}).get("champs") or [],
         "scouted_at":       datetime.now(timezone.utc)
                                     .strftime("%Y-%m-%dT%H:%M:%SZ"),
