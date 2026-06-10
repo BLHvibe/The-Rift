@@ -100,3 +100,10 @@ All grounded in data the backend already has; none assume seasons:
   before/after captures in `.claude/qa_screens/v5_*`. All tabs sweep-tested,
   no regressions; draft tab untouched. Next: propagate the luxe language to
   Inhouse, Scout, Rankings, Feed, Profile, Wrapped.
+- 2026-06-10 — Home approved by user. Inhouse leaderboard luxe pass:
+  broadcast header bar (gradient + gold edge light, lit LOG GAME button,
+  gold active segment pill), table carded on a shadowed gradient panel,
+  podium rows with medal stripes/glows (matches Home), win-rate bars under
+  WR%, gradient column header, ambient top-light + vignette. Captures in
+  `.claude/qa_screens/v5_inhouse2`. Next targets: Inhouse detail panel +
+  history/rivals/records views, then Scout report panel, Rankings, Feed.

@@ -6,12 +6,12 @@ Top-right notification: "GAME LOGGED" card slams in on new game detected.
 """
 import math, time, random as _rnd, os, queue as _queue
 import dearpygui.dearpygui as dpg
-from theme import C, RANK_COLORS
+from theme import C, RANK_COLORS, MEDAL_PARTICLE
 from core.animations import anim
 from data.reader import live, log_inhouse_games_from_client, get_most_games_logged, load_match_history, load_rivalries, load_records, load_h2h_matrix
 from data.tips import TIPS as _TIPS
 from ui.tierlist import _wheel_delta as _wheel_delta_shared
-from ui import effects, toast, fmt, audio
+from ui import effects, toast, fmt, audio, luxe
 
 # ---------------------------------------------------------------------------
 # Demo data
@@ -408,6 +408,8 @@ def draw_inhouse(dl, vw, vh, fonts=None):
     inhouse.tick()
     dpg.delete_item(dl, children_only=True)
     dpg.draw_rectangle((0, 0), (vw, 3000), fill=C["bg"], color=(0,0,0,0), parent=dl)
+    # V2 ambient — broad cool top-light so the page has depth under the table.
+    luxe.glow(dl, vw * 0.5, -vh * 0.25, vw * 0.75, (40, 72, 118), 55)
 
     # Keep native window scroll locked — rows are scrolled via scroll_off instead
     if dpg.does_item_exist("content_win"):
@@ -460,6 +462,8 @@ def draw_inhouse(dl, vw, vh, fonts=None):
                           vh - table_top - PAD, vw, vh)
     # Draw top bar AFTER rows so it renders on top of any scrolled-up rows
     _draw_top_bar(dl, vw, header_w)
+    # Cinematic vignette — under the slide-in panels so they stay crisp.
+    luxe.vignette(dl, 0, 0, vw, vh, 60)
     if detail_open:
         _draw_detail_panel(dl, vw, vh)
     if match_detail_open:
@@ -498,11 +502,16 @@ def _draw_loading(dl, vw, vh):
 def _draw_top_bar(dl, vw, header_w):
     """header_w = width of the area this bar owns (stops at detail-panel left edge)."""
     _fetch_most_games_once()
-    dpg.draw_rectangle((0,0),(header_w,TOP_BAR_H), fill=(*C["panel"][:3],220),
+    # V2 broadcast header — gradient surface + gold bottom edge light.
+    dpg.draw_rectangle((0,0),(header_w,TOP_BAR_H), fill=C["navy_deep"],
                         color=(0,0,0,0), parent=dl)
+    luxe.vfade(dl, 0, 0, header_w, TOP_BAR_H, (44, 74, 116), 46, solid="top")
+    luxe.vfade(dl, 0, TOP_BAR_H - 10, header_w, TOP_BAR_H - 1,
+               C["gold"], 26, solid="bottom")
     dpg.draw_line((0,TOP_BAR_H-1),(header_w,TOP_BAR_H-1),
-                  color=C["rule_dark"], thickness=1, parent=dl)
-    _txt(dl, PAD, 12, "IN-HOUSE CUSTOMS", (*C["gold"][:3],220), 23, "raj_24")
+                  color=(*C["gold_dk"][:3], 200), thickness=1, parent=dl)
+    luxe.glow(dl, PAD + 6, TOP_BAR_H // 2, 26, C["gold"], 55)
+    _txt(dl, PAD, 12, "IN-HOUSE CUSTOMS", (*C["gold_lt"][:3],235), 23, "raj_24")
     _txt(dl, PAD+256, 18, "Click a player row to view champion breakdown",
          (*C["txt_dim"][:3],160), 17, "raj_r_16")
 
@@ -511,12 +520,16 @@ def _draw_top_bar(dl, vw, header_w):
     bx = header_w - bw - PAD
     by = (TOP_BAR_H - bh)//2
     is_logging = _log_in_progress
-    btn_fill = (*C["card"][:3], 200) if is_logging else (*C["gold_dk"][:3], 200)
-    btn_bdr  = (*C["gold"][:3], 80)  if is_logging else (*C["gold"][:3], 200)
     btn_lbl  = "LOGGING…"            if is_logging else "LOG GAME"
-    lbl_col  = (*C["txt_dim"][:3], 160) if is_logging else (*C["gold_lt"][:3], 240)
-    dpg.draw_rectangle((bx,by),(bx+bw,by+bh),
-                        fill=btn_fill, color=btn_bdr, rounding=4, parent=dl)
+    lbl_col  = (*C["txt_dim"][:3], 160) if is_logging else (*C["gold_lt"][:3], 245)
+    if is_logging:
+        dpg.draw_rectangle((bx,by),(bx+bw,by+bh),
+                            fill=(*C["card"][:3], 200),
+                            color=(*C["gold"][:3], 80), rounding=4, parent=dl)
+    else:
+        luxe.glow(dl, bx + bw / 2, by + bh / 2, bh * 1.15, C["gold"], 34)
+        luxe.panel(dl, bx, by, bx + bw, by + bh, (116, 90, 44, 235),
+                   corner=4, border=C["gold"], border_a=210, sheen=95)
     _txt(dl, bx+14, by+8, btn_lbl, lbl_col, 16, "raj_sb_16")
 
     # Phase 3 — view-mode segmented control: LEADER | HISTORY | RIVALS | RECORDS
@@ -532,11 +545,19 @@ def _draw_top_bar(dl, vw, header_w):
     for i, (lbl, mode) in enumerate(segments):
         p_x = seg_x + i * (pill_w + seg_gap)
         is_active = (inhouse.view_mode == mode)
-        fill = (*C["gold_dk"][:3], 200) if is_active else (*C["card"][:3], 200)
-        bdr  = (*C["gold"][:3], 200)    if is_active else (*C["gold"][:3], 70)
-        lblc = (*C["gold_lt"][:3], 240) if is_active else (*C["txt2"][:3], 200)
-        dpg.draw_rectangle((p_x, seg_y), (p_x + pill_w, seg_y + bh),
-                           fill=fill, color=bdr, rounding=4, parent=dl)
+        if is_active:
+            luxe.glow(dl, p_x + pill_w / 2, seg_y + bh / 2, bh,
+                      C["gold"], 38)
+            luxe.panel(dl, p_x, seg_y, p_x + pill_w, seg_y + bh,
+                       (116, 90, 44, 235), corner=4,
+                       border=C["gold"], border_a=220, sheen=90)
+            lblc = (*C["gold_lt"][:3], 250)
+        else:
+            dpg.draw_rectangle((p_x, seg_y), (p_x + pill_w, seg_y + bh),
+                               fill=(*C["card"][:3], 200),
+                               color=(*C["gold"][:3], 70),
+                               rounding=4, parent=dl)
+            lblc = (*C["txt2"][:3], 200)
         # Center the label inside the pill.
         text_off = max(0, (pill_w - len(lbl) * 9) // 2)
         _txt(dl, p_x + text_off, seg_y + 8, lbl, lblc, 15, "raj_sb_16")
@@ -1411,6 +1432,14 @@ def _draw_leaderboard(dl, tx, ty, tw, th, vw, vh):
     row_clip_top = ty + HEADER_H + 4
     row_clip_bot = ty + th
 
+    # V2 card framing — the whole table sits on a shadowed gradient panel,
+    # matching the Home card language. Drawn before rows/header.
+    luxe.shadow(dl, tx - 10, ty - 10, tx + tw + 10, ty + th,
+                alpha=85, spread=16, drop=7)
+    luxe.panel(dl, tx - 10, ty - 10, tx + tw + 10, ty + th,
+               (12, 26, 48, 242), corner=10,
+               border=C["gold_dk"], border_a=120, sheen=42)
+
     row_y = ty + HEADER_H + 4
 
     # Cursor in content coords, for per-row hover feedback.
@@ -1432,6 +1461,7 @@ def _draw_leaderboard(dl, tx, ty, tw, th, vw, vh):
             continue
         rank = p["rank"]
         is_top3 = rank <= 3
+        medal   = MEDAL_PARTICLE.get(rank)
         is_sel  = inhouse.selected == n
         is_hov  = (not is_sel and tx+xo <= _mrx <= tx+tw+xo
                    and ry <= _mry <= ry+ROW_H)
@@ -1442,7 +1472,7 @@ def _draw_leaderboard(dl, tx, ty, tw, th, vw, vh):
         elif is_hov:
             bg = (*C["card_hover"][:3], int(al * 0.6))
         elif is_top3:
-            bg = (26, 20, 40, al)   # subtle purple tint for top 3
+            bg = (22, 34, 58, al)   # slightly lifted navy for the podium
         elif i % 2 == 0:
             bg = (*C["card"][:3], al)
         else:
@@ -1450,6 +1480,11 @@ def _draw_leaderboard(dl, tx, ty, tw, th, vw, vh):
 
         dpg.draw_rectangle((tx+xo,ry),(tx+tw+xo,ry+ROW_H),
                             fill=bg, color=(0,0,0,0), rounding=3, parent=dl)
+        if is_hov:
+            dpg.draw_rectangle((tx+xo,ry),(tx+tw+xo,ry+ROW_H),
+                                fill=(0,0,0,0),
+                                color=(*C["gold"][:3], int(al * 0.45)),
+                                rounding=3, thickness=1, parent=dl)
 
         # Rank 1: breathing gold border on top of the row
         if rank == 1 and al > 180:
@@ -1465,14 +1500,16 @@ def _draw_leaderboard(dl, tx, ty, tw, th, vw, vh):
             except Exception:
                 pass
 
-        # Left accent stripe: gold for selected, rift_purple for top3, nothing otherwise
+        # Left accent stripe: gold for selected, medal color for the podium
         if is_sel:
             dpg.draw_rectangle((tx+xo,ry),(tx+xo+4,ry+ROW_H),
                                 fill=(*C["gold"][:3],al), color=(0,0,0,0),
                                 rounding=2, parent=dl)
-        elif is_top3:
-            dpg.draw_rectangle((tx+xo,ry),(tx+xo+4,ry+ROW_H),
-                                fill=(*C["rift_purple"][:3],al), color=(0,0,0,0),
+        elif medal:
+            luxe.glow(dl, tx+xo+2, ry + ROW_H // 2, ROW_H * 0.66,
+                      medal, int(al * 0.22))
+            dpg.draw_rectangle((tx+xo,ry+3),(tx+xo+4,ry+ROW_H-3),
+                                fill=(*medal, al), color=(0,0,0,0),
                                 rounding=2, parent=dl)
 
         try:
@@ -1480,7 +1517,7 @@ def _draw_leaderboard(dl, tx, ty, tw, th, vw, vh):
         except (ValueError, TypeError):
             wr_num = 50.0
         wr_col = C["win"] if wr_num >= 52 else C["loss"] if wr_num < 48 else C["txt"]
-        name_col = C["rift_purple"] if is_top3 else C["gold_lt"]
+        name_col = C["gold_lt"] if is_top3 else C["txt"]
 
         vals = [
             str(rank),
@@ -1499,8 +1536,11 @@ def _draw_leaderboard(dl, tx, ty, tw, th, vw, vh):
             vy = ry + ROW_H//2 - 10
 
             if ci == 0:
-                rank_col = C["gold"] if is_top3 else C["txt_dim"]
+                rank_col = medal if medal else C["txt_dim"]
                 sz = 18 if is_top3 else 15
+                if medal:
+                    luxe.glow(dl, vx + 6, ry + ROW_H // 2, 16,
+                              medal, int(al * 0.25))
                 _txt(dl, vx, vy+(0 if is_top3 else 2), str(rank), (*rank_col[:3],al), sz, "raj_20" if is_top3 else "raj_16")
             elif ci == 1:
                 # Avatar — draw hex-cropped image if loaded, otherwise fallback dot
@@ -1508,6 +1548,9 @@ def _draw_leaderboard(dl, tx, ty, tw, th, vw, vh):
                 av_sz = min(ROW_H - 8, 42)
                 if tex:
                     av_y1 = ry + (ROW_H - av_sz) // 2
+                    if medal:
+                        luxe.glow(dl, vx + av_sz / 2, av_y1 + av_sz / 2,
+                                  av_sz * 0.72, medal, int(al * 0.20))
                     dpg.draw_image(tex, (vx, av_y1), (vx + av_sz, av_y1 + av_sz), parent=dl)
                     _txt(dl, vx + av_sz + 6, vy, val, (*name_col[:3], al), 18, "raj_20")
                 else:
@@ -1517,7 +1560,19 @@ def _draw_leaderboard(dl, tx, ty, tw, th, vw, vh):
             elif ci == 3:
                 _txt(dl, vx, vy+2, val, (*C["txt2"][:3],al), 16, "raj_16")
             elif ci == 4:
-                _txt(dl, vx, vy, val, (*wr_col[:3],al), 17, "raj_18")
+                _txt(dl, vx, vy - 4, val, (*wr_col[:3],al), 17, "raj_18")
+                # Win-rate bar under the number — instant visual scan
+                bw_ = min(cw - 24, 64)
+                if bw_ > 20:
+                    bcy = ry + ROW_H - 13
+                    frac = max(0.0, min(1.0, wr_num / 100.0))
+                    dpg.draw_rectangle((vx, bcy), (vx + bw_, bcy + 3),
+                                       fill=(*C["rule_dark"][:3], int(al*0.5)),
+                                       color=(0,0,0,0), rounding=1, parent=dl)
+                    if frac > 0.01:
+                        luxe.hfade(dl, vx, bcy, vx + int(bw_ * frac),
+                                   bcy + 3, wr_col, int(al * 0.85),
+                                   solid="right")
             elif ci == 5:
                 _txt(dl, vx, vy+2, val, (*C["platinum"][:3],al), 16, "raj_16")
             elif ci in (6,7):
@@ -1525,16 +1580,17 @@ def _draw_leaderboard(dl, tx, ty, tw, th, vw, vh):
             elif ci == 8:
                 _draw_sparkline(dl, vx, ry+8, cw-16, ROW_H-16, n, al)
 
-    # Column header drawn AFTER rows so it masks any rows that scrolled into its area
-    dpg.draw_rectangle((tx,ty),(tx+tw,ty+HEADER_H),
-                        fill=(*C["card"][:3], ha), color=(*C["rule_dark"][:3], ha),
-                        rounding=4, parent=dl)
+    # Column header drawn AFTER rows so it masks any rows that scrolled into
+    # its area — V2: gradient panel + gold kicker labels + fading gold rule.
+    luxe.panel(dl, tx, ty, tx + tw, ty + HEADER_H,
+               (24, 48, 82, min(255, ha)), corner=6,
+               border=C["gold_dk"], border_a=min(150, ha), sheen=46)
     for ci, ((lbl,_),(cx,cw)) in enumerate(zip(COLS, col_xs)):
         active = (lbl in ("#","PLAYER","WR","KDA"))
         col = C["gold"] if active else C["txt_dim"]
         _txt(dl, tx+cx+8, ty+HEADER_H//2-9, lbl, (*col[:3], ha), 16, "raj_sb_16")
-    dpg.draw_line((tx, ty+HEADER_H),(tx+tw, ty+HEADER_H),
-                  color=(*C["rule_dark"][:3], ha), thickness=1, parent=dl)
+    luxe.hfade(dl, tx + 6, ty + HEADER_H - 2, tx + tw - 6, ty + HEADER_H,
+               C["gold"], min(120, ha), solid="left")
 
     # Click detection
     if dpg.is_mouse_button_clicked(0):
