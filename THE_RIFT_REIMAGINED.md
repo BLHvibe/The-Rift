@@ -107,3 +107,12 @@ All grounded in data the backend already has; none assume seasons:
   WR%, gradient column header, ambient top-light + vignette. Captures in
   `.claude/qa_screens/v5_inhouse2`. Next targets: Inhouse detail panel +
   history/rivals/records views, then Scout report panel, Rankings, Feed.
+- 2026-06-10 — Rankings luxe pass: podium cards on medal auras + drop
+  shadows + gradient panels (medal borders, tier accent washes), glows
+  behind the big rank numerals, challenger rows as gradient panels,
+  standings header with gold gradient rule, ambient stage light +
+  vignette. Reveal choreography untouched. `RIFT_QA_WAIT` env var added
+  to the QA harness for long-animation captures. Capture:
+  `.claude/qa_screens/v5_rankings1`. Remaining: Inhouse sub-views, Scout,
+  Feed, Profile, Wrapped. Idea for later: player signature-champion splash
+  backdrops inside podium cards.

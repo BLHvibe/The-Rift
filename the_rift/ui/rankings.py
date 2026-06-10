@@ -12,6 +12,7 @@ from data.config import load_rank_snapshot, save_rank_snapshot
 from core.state import state
 from core.animations import anim, ParticleSystem, Ripple
 from ui import effects
+from ui import luxe
 
 # ---------------------------------------------------------------------------
 # Fixed aesthetic constants (not dependent on screen size)
@@ -536,6 +537,10 @@ def draw_rankings(dl, vw, vh, fonts=None):
     rankings.tick()
 
     dpg.draw_rectangle((0,0),(vw,3000), fill=C["bg"], color=(0,0,0,0), parent=dl)
+    # V2 ambient — cool top-light + a faint gold stage-light over the podium.
+    luxe.glow(dl, vw * 0.5, -vh * 0.25, vw * 0.75, (40, 72, 118), 55)
+    luxe.glow(dl, vw * 0.5, _L.get("hero_top", TOP_PAD) + 60, vw * 0.34,
+              C["gold"], 16)
 
     phase = rankings.phase
 
@@ -577,6 +582,9 @@ def draw_rankings(dl, vw, vh, fonts=None):
                                 fill=(*p.color, p.alpha),
                                 color=(0,0,0,0), parent=dl)
     rankings.particles = [ps for ps in rankings.particles if not ps.finished]
+
+    # Cinematic vignette — under the reveal flash so slams still read hot.
+    luxe.vignette(dl, 0, 0, vw, vh, 65)
 
     if rankings.flash_alpha > 0:
         dpg.draw_rectangle((0,0),(vw,vh),
@@ -647,13 +655,20 @@ def _draw_podium_cards(dl):
         medal_colors = {1: C["gold"], 2: C["platinum"], 3: (205, 127, 50, 255)}
         border_col   = medal_colors.get(rank, C["rule_dark"])
 
-        dpg.draw_rectangle((x1, y1),(x2, y2),
-                           fill=(*C["panel"][:3], al),
-                           color=(*border_col[:3], al),
-                           rounding=4, parent=dl)
+        # V2 podium card — medal aura + drop shadow + gradient panel.
+        a_f = al / 255.0
+        luxe.glow(dl, (x1 + x2) / 2, y2 - 10, col_w * 0.62,
+                  border_col, int((34 if rank == 1 else 22) * a_f))
+        luxe.shadow(dl, x1, y1, x2, y2,
+                    alpha=int(100 * a_f), spread=16, drop=8)
+        luxe.panel(dl, x1, y1, x2, y2, (*C["panel"][:3], al),
+                   corner=8, border=border_col,
+                   border_a=int(200 * a_f), sheen=int(60 * a_f))
         dpg.draw_rectangle((x1+2, y1+2),(x2-2, y1+2+ACCENT_H),
                            fill=(*accent_color[:3], al),
                            color=(0,0,0,0), rounding=2, parent=dl)
+        luxe.vfade(dl, x1 + 3, y1 + 2 + ACCENT_H, x2 - 3, y1 + 22 + ACCENT_H,
+                   accent_color, int(34 * a_f), solid="top")
         # Medal sheen — gold/silver/bronze single-pass sweep on revealed podium cards
         if al >= 220:
             try:
@@ -686,6 +701,7 @@ def _draw_podium_cards(dl):
             label_col = (*accent_color[:3], al)
             _txt(dl, x1+20, y1+18, "CHAMPION", label_col, 15, "raj_sb_18")
             _txt(dl, x1+20, y1+44, "NO.", (*C["txt2"][:3], al), 19, "raj_sb_18")
+            luxe.glow(dl, x1+106, y1+76, 54, C["gold"], int(52 * al / 255))
             _txt(dl, x1+78, y1+28, "1", (*C["gold_lt"][:3], al), 90, "raj_72")
             _name_link(dl, x1+20, y1+152, name, raw_name, (*C["gold"][:3], al), 31, "raj_36")
             _txt(dl, x2-150, y1+72, fs,
@@ -702,6 +718,7 @@ def _draw_podium_cards(dl):
             label = "RUNNER-UP" if rank == 2 else "THIRD"
             _txt(dl, x1+16, y1+14, label, (*accent_color[:3], al), 16, "raj_sb_16")
             _txt(dl, x1+16, y1+32, "NO.", (*C["txt2"][:3], al), 17, "raj_sb_16")
+            luxe.glow(dl, x1+88, y1+54, 40, border_col, int(34 * al / 255))
             _txt(dl, x1+66, y1+18, str(rank), (*C["gold_lt"][:3], al), 68, "raj_56")
             _name_link(dl, x1+16, y1+118, name, raw_name, (*C["txt"][:3], al), 25, "raj_36")
             _txt(dl, x2-120, y1+56, fs,
@@ -731,10 +748,10 @@ def _draw_challenger_rows(dl):
             _mystery(dl, rx, ry, rx+row_w, ry+CHAL_H, t+i*0.1)
             continue
 
-        dpg.draw_rectangle((rx+xo, ry),(rx+row_w+xo, ry+CHAL_H),
-                           fill=(*C["card"][:3], al),
-                           color=(*C["rule_dark"][:3], al),
-                           rounding=3, parent=dl)
+        luxe.panel(dl, rx+xo, ry, rx+row_w+xo, ry+CHAL_H,
+                   (*C["card"][:3], al), corner=6,
+                   border=C["gold_dk"], border_a=int(115 * al / 255),
+                   sheen=int(30 * al / 255))
         if not p: continue
 
         dpg.draw_rectangle((rx+xo, ry+6),(rx+xo+4, ry+CHAL_H-6),
@@ -779,6 +796,7 @@ def _draw_rest_rows(dl):
     chal_h    = 7 * (CHAL_H + CHAL_GAP)
     section_y = podium_bot + CHAL_PAD_T + chal_h + SECTION_GAP
 
+    luxe.glow(dl, rx + 8, section_y - 13, 22, C["gold"], 70)
     _txt(dl, rx, section_y - 22, "FULL STANDINGS",
          (*C["gold"][:3], 240), 19, "raj_sb_20")
 
@@ -798,8 +816,8 @@ def _draw_rest_rows(dl):
         _txt(dl, callout_x, section_y - 22, lbl,
              (220, 130, 130, 200), 16, "raj_sb_16")
 
-    dpg.draw_line((rx, section_y - 4),(rx + row_w, section_y - 4),
-                  color=C["rule_dark"], thickness=1, parent=dl)
+    luxe.hfade(dl, rx, section_y - 5, rx + row_w, section_y - 3,
+               C["gold"], 110, solid="left")
 
     for i, rank in enumerate(range(11, len(data)+1)):
         p   = data[rank-1]

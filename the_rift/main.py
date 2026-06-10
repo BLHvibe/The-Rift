@@ -1207,7 +1207,8 @@ def main():
                 else:
                     _qa["idx"] = 0
                     state.active_tab = _qa["tabs"][0]
-                    _qa["due"] = _now + 3.0
+                    _qa["due"] = _now + max(
+                        3.0, float(os.environ.get("RIFT_QA_WAIT", 0) or 0))
             elif _now >= _qa["due"]:
                 _tab = _qa["tabs"][_qa["idx"]]
                 if _tab == "__done__":
@@ -1227,7 +1228,8 @@ def main():
                         _qa["due"] = _now + 1.0
                     else:
                         state.active_tab = _qa["tabs"][_qa["idx"]]
-                        _qa["due"] = _now + 2.4
+                        _qa["due"] = _now + max(
+                            2.4, float(os.environ.get("RIFT_QA_WAIT", 0) or 0))
 
     # Clean shutdown — release pygame.mixer first so its callback thread
     # isn't running when the interpreter starts tearing down. Wrap
