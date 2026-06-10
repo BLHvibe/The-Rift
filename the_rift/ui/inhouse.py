@@ -632,8 +632,10 @@ def _draw_history(dl, tx, ty, tw, th, vw, vh):
     the date, duration, winner side, and all 10 champion picks in role order."""
     matches = list(live.match_history or [])
 
-    # Loading skeleton
-    if (inhouse.history_loading or
+    # Loading skeleton — only while nothing has arrived. The loader publishes
+    # headers immediately and streams full payloads after, so as soon as any
+    # entries exist we render cards and let them fill in progressively.
+    if not matches and (inhouse.history_loading or
             (not live.match_history_loaded and not live.match_history_error)):
         skel_y = ty + 20
         for i in range(4):
@@ -657,6 +659,7 @@ def _draw_history(dl, tx, ty, tw, th, vw, vh):
         return
 
     # Header
+    luxe.glow(dl, tx + 8, ty + 10, 22, C["gold"], 70)
     _txt(dl, tx, ty + 0, f"MATCH HISTORY  ·  {len(matches)} games",
          (*C["gold"][:3], 220), 21, "raj_sb_18")
     _txt(dl, tx + 280, ty + 4,
@@ -704,24 +707,27 @@ def _draw_match_card(dl, x, y, w, h, m, is_hov=False, is_sel=False):
     """One match card: scoreboard summary across both teams.
     Lays out a header row (date/duration/winner) plus two team rows of 5
     champion+player+KDA cells so the user can read the whole game at a glance."""
-    # Card chrome — selected/hover states layered on top of the base fill.
+    # Card chrome — V2: drop shadow + gradient panel; gold border swells on
+    # hover/selection. Winner side casts a colored wash from its edge.
     glow = effects.hover_amt(f"match_card_{m.get('id','')}", is_hov or is_sel)
-    base_fill = (*C["card"][:3], 240)
-    border_a  = 60 + int(160 * glow) + (60 if is_sel else 0)
+    border_a  = 90 + int(130 * glow) + (40 if is_sel else 0)
     border_a  = min(255, border_a)
-    dpg.draw_rectangle((x, y), (x + w, y + h),
-                       fill=base_fill,
-                       color=(*C["gold"][:3], border_a),
-                       rounding=8, parent=dl)
+    luxe.shadow(dl, x, y, x + w, y + h, alpha=85, spread=14, drop=6)
+    luxe.panel(dl, x, y, x + w, y + h, (*C["card"][:3], 244),
+               corner=8, border=C["gold"], border_a=border_a,
+               sheen=44 + int(40 * glow))
     if is_sel:
         effects.draw_hover_glow(dl, x, y, x + w, y + h,
                                 C["gold"], amt=0.7, rounding=8, spread=2)
     winner = (m.get("winner") or "").lower()
     accent = _BLUE_COL if winner == "blue" else (
               _RED_COL if winner == "red" else (160, 160, 170))
-    # Side accent stripe on winner edge.
-    dpg.draw_rectangle((x, y), (x + 4, y + h),
-                       fill=(*accent, 220), color=(0, 0, 0, 0), parent=dl)
+    # Side accent stripe on winner edge + soft wash bleeding inward.
+    dpg.draw_rectangle((x, y + 3), (x + 4, y + h - 3),
+                       fill=(*accent, 220), color=(0, 0, 0, 0),
+                       rounding=2, parent=dl)
+    luxe.hfade(dl, x + 4, y + 3, x + int(w * 0.18), y + h - 3,
+               accent, 26, solid="left")
 
     # ----- Header strip -----
     ts_raw = (m.get("started_at") or "").replace("T", " ").replace("Z", "")
@@ -943,6 +949,7 @@ def _draw_rivalries(dl, tx, ty, tw, th, vw, vh):
     _matrix_hits.clear()
 
     # ── Header strip ───────────────────────────────────────────────────
+    luxe.glow(dl, tx + 8, ty + 10, 22, C["gold"], 70)
     _txt(dl, tx, ty + 0, "HEAD-TO-HEAD MATRIX",
          (*C["gold"][:3], 220), 21, "raj_sb_18")
     _txt(dl, tx, ty + 26,
@@ -958,11 +965,19 @@ def _draw_rivalries(dl, tx, ty, tw, th, vw, vh):
     for i, (lbl, mode) in enumerate(_MATRIX_MODES):
         px = seg_x + i * (pill_w + pill_gap)
         is_active = (inhouse.matrix_mode == mode)
-        fill = (*C["gold_dk"][:3], 200) if is_active else (*C["card"][:3], 200)
-        bdr  = (*C["gold"][:3], 220)    if is_active else (*C["gold"][:3], 80)
-        lblc = (*C["gold_lt"][:3], 240) if is_active else (*C["txt2"][:3], 200)
-        dpg.draw_rectangle((px, seg_y), (px + pill_w, seg_y + pill_h),
-                           fill=fill, color=bdr, rounding=4, parent=dl)
+        if is_active:
+            luxe.glow(dl, px + pill_w / 2, seg_y + pill_h / 2, pill_h,
+                      C["gold"], 36)
+            luxe.panel(dl, px, seg_y, px + pill_w, seg_y + pill_h,
+                       (116, 90, 44, 235), corner=4,
+                       border=C["gold"], border_a=220, sheen=85)
+            lblc = (*C["gold_lt"][:3], 250)
+        else:
+            dpg.draw_rectangle((px, seg_y), (px + pill_w, seg_y + pill_h),
+                               fill=(*C["card"][:3], 200),
+                               color=(*C["gold"][:3], 70),
+                               rounding=4, parent=dl)
+            lblc = (*C["txt2"][:3], 200)
         text_off = max(0, (pill_w - len(lbl) * 8) // 2)
         _txt(dl, px + text_off, seg_y + 5, lbl, lblc, 14, "raj_sb_14")
         _matrix_hits.append(("matrix_mode", px, seg_y, pill_w, pill_h, mode))
@@ -1004,7 +1019,10 @@ def _draw_rivalries(dl, tx, ty, tw, th, vw, vh):
     # explode and huge ones don't shrink past readability.
     cell_w = max(38, min(64, (avail_w - row_lbl_w) // max(n, 1)))
     cell_h = max(32, min(48, (avail_h - col_hdr_h) // max(n, 1)))
-    grid_x0 = tx + 8 + row_lbl_w
+    # Center the grid horizontally — capped cell sizes leave dead space on
+    # wide windows otherwise.
+    cx_off  = max(0, (tw - (row_lbl_w + cell_w * n + 8)) // 2)
+    grid_x0 = tx + cx_off + 8 + row_lbl_w
     grid_y0 = grid_top + col_hdr_h
     grid_x1 = grid_x0 + cell_w * n
     grid_y1 = grid_y0 + cell_h * n
@@ -1037,14 +1055,14 @@ def _draw_rivalries(dl, tx, ty, tw, th, vw, vh):
         is_sel_row = (selected is not None and selected[0] == row_name)
         row_bg = (*C["card"][:3], 200 if is_sel_row else 130)
         row_bdr = (*C["gold"][:3], 200 if is_sel_row else 60)
-        dpg.draw_rectangle((tx + 4, ry + 1),
+        dpg.draw_rectangle((tx + cx_off + 4, ry + 1),
                            (grid_x0 - 2, ry + cell_h - 1),
                            fill=row_bg, color=row_bdr,
                            rounding=3, parent=dl)
         # Truncate to fit the column.
         max_chars = max(4, row_lbl_w // 8)
         rlbl = row_name[:max_chars].upper()
-        _txt(dl, tx + 12, ry + (cell_h - 14) // 2, rlbl,
+        _txt(dl, tx + cx_off + 12, ry + (cell_h - 14) // 2, rlbl,
              (*C["gold_lt"][:3], 235 if is_sel_row else 215),
              13, "raj_sb_14")
 
@@ -1286,6 +1304,7 @@ def _draw_records(dl, tx, ty, tw, th, vw, vh):
     shows the title / big value / holder / date. Cards with an associated
     match_id are clickable: click → jump to HISTORY view with that match's
     detail panel open."""
+    luxe.glow(dl, tx + 8, ty + 10, 22, C["gold"], 70)
     _txt(dl, tx, ty + 0, "LEAGUE RECORDS",
          (*C["gold"][:3], 220), 21, "raj_sb_18")
     _txt(dl, tx + 200, ty + 4,
@@ -1352,13 +1371,15 @@ def _draw_records(dl, tx, ty, tw, th, vw, vh):
                                   lift=3.0)
         cy_eff = cy + int(lift)
 
-        # Card chrome
-        base_a = 240 if not is_empty else 160
-        bdr_a  = 60 + int(140 * glow)
-        dpg.draw_rectangle((cx, cy_eff), (cx + card_w, cy_eff + card_h),
-                           fill=(*C["card"][:3], base_a),
-                           color=(*C["gold"][:3], bdr_a),
-                           rounding=8, parent=dl)
+        # Card chrome — V2 trophy tile: shadow + gradient panel + gold border.
+        base_a = 244 if not is_empty else 170
+        bdr_a  = 100 + int(120 * glow)
+        luxe.shadow(dl, cx, cy_eff, cx + card_w, cy_eff + card_h,
+                    alpha=80, spread=13, drop=6)
+        luxe.panel(dl, cx, cy_eff, cx + card_w, cy_eff + card_h,
+                   (*C["card"][:3], base_a), corner=8,
+                   border=C["gold_dk"] if is_empty else C["gold"],
+                   border_a=bdr_a, sheen=42 + int(40 * glow))
         if glow > 0.02:
             effects.draw_hover_glow(dl, cx, cy_eff, cx + card_w, cy_eff + card_h,
                                     C["gold"], amt=glow, rounding=8, spread=2)
@@ -1383,6 +1404,9 @@ def _draw_records(dl, tx, ty, tw, th, vw, vh):
             if big_val.startswith("+"): shown = "+" + shown.lstrip("+")
         except Exception:
             shown = big_val
+        val_w = max(30, int(len(shown) * 32 * 0.62))
+        luxe.glow(dl, cx + 14 + val_w / 2, cy_eff + 52, val_w * 0.8,
+                  C["gold"], 30)
         _txt(dl, cx + 14, cy_eff + 34, shown,
              (*C["gold_lt"][:3], 240), 32, "cinzel_36")
 
@@ -1638,16 +1662,23 @@ def _draw_detail_panel(dl, vw, vh):
     px = vw - panel_w
     py = TOP_BAR_H
 
-    # Clip via scissor-like overlay — draw panel bg
+    # V2 panel surface — cast shadow to the left, gradient body, gold top
+    # stripe with a fading wash, gold edge line.
+    luxe.hfade(dl, px - 28, py, px, vh, (0, 0, 0), int(130 * frac),
+               solid="right")
     dpg.draw_rectangle((px, py), (vw, vh),
-                        fill=(*C["panel"][:3], int(240*frac)),
+                        fill=(*C["panel"][:3], int(246*frac)),
                         color=(0,0,0,0), parent=dl)
+    luxe.vfade(dl, px, py, vw, py + 110, (44, 74, 116), int(52 * frac),
+               solid="top")
     dpg.draw_line((px, py), (px, vh),
-                  color=(*C["rule_dark"][:3], int(220*frac)),
+                  color=(*C["gold_dk"][:3], int(220*frac)),
                   thickness=1, parent=dl)
-    dpg.draw_rectangle((px, py), (vw, py+4),
-                        fill=(*C["gold_dk"][:3], int(200*frac)),
+    dpg.draw_rectangle((px, py), (vw, py+3),
+                        fill=(*C["gold"][:3], int(210*frac)),
                         color=(0,0,0,0), parent=dl)
+    luxe.vfade(dl, px, py + 3, vw, py + 20, C["gold"], int(34 * frac),
+               solid="top")
 
     al  = int(255 * frac)
     p   = _BY_NAME.get(name)
@@ -1658,6 +1689,8 @@ def _draw_detail_panel(dl, vw, vh):
     av_sz = 56
     tex   = _get_avatar_tex(name)
     if tex:
+        luxe.glow(dl, px + 16 + av_sz / 2, py + 10 + av_sz / 2,
+                  av_sz * 0.78, C["gold"], int(38 * frac))
         dpg.draw_image(tex, (px+16, py+10), (px+16+av_sz, py+10+av_sz), parent=dl)
         name_x = px + 16 + av_sz + 14
     else:
@@ -1668,10 +1701,11 @@ def _draw_detail_panel(dl, vw, vh):
     sub = f"#{p['rank']}  ·  {p['games']} games  ·  {p['wins']}-{p['losses']}  ·  {p['wr']} WR  ·  KDA {p['kda']}"
     _txt(dl, px+20, py+74, sub, (*C["txt"][:3], int(al*0.85)), 17, "raj_r_16")
 
-    dpg.draw_line((px+16, py+98),(vw-16, py+98),
-                  color=(*C["rule_dark"][:3], int(180*frac)), thickness=1, parent=dl)
+    luxe.hfade(dl, px + 16, py + 97, vw - 16, py + 99,
+               C["gold"], int(110 * frac), solid="left")
 
     # Champion breakdown label
+    luxe.glow(dl, px + 26, py + 119, 18, C["gold"], int(60 * frac))
     _txt(dl, px+20, py+110, "CHAMPION BREAKDOWN", (*C["gold"][:3], al), 17, "raj_sb_18")
 
     # Table header
@@ -1955,20 +1989,27 @@ def _draw_match_detail_panel(dl, vw, vh):
     py = TOP_BAR_H
     al = int(255 * frac)
 
-    # Panel chrome
+    # Panel chrome — V2: cast shadow, gradient body, winner-colored top
+    # stripe with a fading wash, gold edge line.
+    luxe.hfade(dl, px - 28, py, px, vh, (0, 0, 0), int(130 * frac),
+               solid="right")
     dpg.draw_rectangle((px, py), (vw, vh),
-                       fill=(*C["panel"][:3], int(240*frac)),
+                       fill=(*C["panel"][:3], int(246*frac)),
                        color=(0,0,0,0), parent=dl)
+    luxe.vfade(dl, px, py, vw, py + 110, (44, 74, 116), int(52 * frac),
+               solid="top")
     dpg.draw_line((px, py), (px, vh),
-                  color=(*C["rule_dark"][:3], int(220*frac)),
+                  color=(*C["gold_dk"][:3], int(220*frac)),
                   thickness=1, parent=dl)
 
     winner = (m.get("winner") or "").lower()
     accent = _BLUE_COL if winner == "blue" else (_RED_COL if winner == "red"
                                                   else (200, 180, 120))
-    dpg.draw_rectangle((px, py), (vw, py+4),
+    dpg.draw_rectangle((px, py), (vw, py+3),
                        fill=(*accent, int(220*frac)),
                        color=(0,0,0,0), parent=dl)
+    luxe.vfade(dl, px, py + 3, vw, py + 22, accent, int(36 * frac),
+               solid="top")
 
     # Close (X) button — top-right of panel
     bx_close = vw - 36

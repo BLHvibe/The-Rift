@@ -116,3 +116,14 @@ All grounded in data the backend already has; none assume seasons:
   `.claude/qa_screens/v5_rankings1`. Remaining: Inhouse sub-views, Scout,
   Feed, Profile, Wrapped. Idea for later: player signature-champion splash
   backdrops inside podium cards.
+- 2026-06-10 — Inhouse sub-views finished: history match cards (shadow +
+  gradient panel + winner-color edge wash), H2H matrix (gold active pill,
+  grid centered on wide windows), records as trophy tiles with value
+  glows, both slide-in panels (player + match detail) get cast shadow +
+  gradient surface + gold/winner top stripe. FIXED a real UX bug: history
+  held its skeleton until all ~50 per-match payloads finished streaming
+  (10+ s); now cards render as soon as headers arrive and fill in. QA
+  harness supports sub-views (`RIFT_QA_TABS=inhouse:history,...`).
+  Captures: `.claude/qa_screens/v5_ihsub2-3`. Match-detail panel verified
+  by pattern (same surface code as player panel), not screenshotted —
+  worth one live click-through. Remaining: Scout, Feed, Profile, Wrapped.

@@ -999,6 +999,23 @@ def main():
         except Exception:
             pass
 
+    def _qa_apply(target):
+        """QA harness tab/sub-view switch. Targets look like 'home' or
+        'inhouse:history' / 'inhouse:records' / 'inhouse:detail'."""
+        base, _, sub = target.partition(":")
+        state.active_tab = base
+        if base == "inhouse" and sub:
+            try:
+                from ui import inhouse as _ih
+                if sub == "detail":
+                    _ih._set_view_mode("leaderboard")
+                    if _ih.inhouse.players:
+                        _ih.inhouse.select(_ih.inhouse.players[0]["player"])
+                else:
+                    _ih._set_view_mode(sub)
+            except Exception as _e:
+                print(f"[qa] subview {target} failed: {_e}")
+
     # Sidebar TABS list, hoisted so hotkeys can index into it.
     from ui.sidebar import TABS as _TABS, _OVERLAY_TAGS as _OVL
     _TAB_HOTKEYS = [
@@ -1206,7 +1223,7 @@ def main():
                             state.splash_done = True
                 else:
                     _qa["idx"] = 0
-                    state.active_tab = _qa["tabs"][0]
+                    _qa_apply(_qa["tabs"][0])
                     _qa["due"] = _now + max(
                         3.0, float(os.environ.get("RIFT_QA_WAIT", 0) or 0))
             elif _now >= _qa["due"]:
@@ -1214,8 +1231,9 @@ def main():
                 if _tab == "__done__":
                     dpg.stop_dearpygui()
                 else:
-                    _png = os.path.join(_qa["dir"],
-                                        f"{_qa['idx']:02d}_{_tab}.png")
+                    _png = os.path.join(
+                        _qa["dir"],
+                        f"{_qa['idx']:02d}_{_tab.replace(':', '-')}.png")
                     try:
                         dpg.output_frame_buffer(_png)
                         print(f"[qa] captured {_png}")
@@ -1227,7 +1245,7 @@ def main():
                         _qa["tabs"].append("__done__")
                         _qa["due"] = _now + 1.0
                     else:
-                        state.active_tab = _qa["tabs"][_qa["idx"]]
+                        _qa_apply(_qa["tabs"][_qa["idx"]])
                         _qa["due"] = _now + max(
                             2.4, float(os.environ.get("RIFT_QA_WAIT", 0) or 0))
 
