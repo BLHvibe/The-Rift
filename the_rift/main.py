@@ -28,7 +28,7 @@ from ui.home import draw_home
 from ui import profile as profile_panel
 from ui import wrapped as wrapped_overlay
 from ui import hotkeys as hotkey_overlay
-from ui import audio, effects, toast
+from ui import audio, effects, toast, luxe
 from data.reader import live, load_live_data, check_for_update
 from data import patch_ticker
 
@@ -213,11 +213,17 @@ def _handle_drag():
 def _draw_titlebar(dl, w):
     h = TITLE_H
     dpg.delete_item(dl, children_only=True)
-    dpg.draw_rectangle((0,0),(w,h), fill=C["panel"], color=(0,0,0,0), parent=dl)
-    dpg.draw_line((0,h-1),(w,h-1), color=C["rule_dark"], thickness=1, parent=dl)
-    t = dpg.draw_text((18, h//2-14), "THE RIFT", color=C["rift_purple"], size=29, parent=dl)
-    if "cinzel_28" in _FONTS:
-        dpg.bind_item_font(t, _FONTS["cinzel_28"])
+    # V2 chrome — gradient surface, gold bottom edge-light, lit wordmark.
+    dpg.draw_rectangle((0,0),(w,h), fill=C["navy_deep"], color=(0,0,0,0), parent=dl)
+    luxe.vfade(dl, 0, 0, w, h, (44, 74, 116), 52, solid="top")
+    luxe.vfade(dl, 0, h - 12, w, h - 1, C["gold"], 34, solid="bottom")
+    dpg.draw_line((0,h-1),(w,h-1), color=(*C["gold_dk"][:3], 200), thickness=1, parent=dl)
+
+    pulse = effects.breathing_alpha(255, period=4.2, amp=0.35)
+    _, tw_, th_ = luxe.lit_title("THE RIFT", 24)
+    luxe.glow(dl, 18 + tw_ / 2, h / 2, max(40, tw_ * 0.62),
+              (212, 178, 118), int(pulse * 0.14))
+    luxe.draw_lit_title(dl, 18, (h - th_) // 2, "THE RIFT", 24)
 
     m  = 8
     cy = h // 2
@@ -497,8 +503,11 @@ def _sidebar_tick(vw, vh):
     label_alpha = max(0, int((sw - COLLAPSED_W - 8) / (SIDEBAR_EXP - COLLAPSED_W - 8) * 255))
     h = vh - TITLE_H
 
-    dpg.draw_rectangle((0,0),(sw,h), fill=C["panel"], color=(0,0,0,0), parent=dl)
-    dpg.draw_line((sw-1,0),(sw-1,h), color=C["rule_dark"], thickness=1, parent=dl)
+    # V2 chrome — gradient rail with a gold-tinged right edge.
+    dpg.draw_rectangle((0,0),(sw,h), fill=C["navy_deep"], color=(0,0,0,0), parent=dl)
+    luxe.vfade(dl, 0, 0, sw, int(h * 0.45), (44, 74, 116), 42, solid="top")
+    luxe.vfade(dl, 0, int(h * 0.55), sw, h, (4, 8, 18), 120, solid="bottom")
+    dpg.draw_line((sw-1,0),(sw-1,h), color=(*C["gold_dk"][:3], 130), thickness=1, parent=dl)
 
     # Hovered tab index. `ry` is already viewport-local (mouse[1] - vp[1]),
     # so do NOT subtract vp[1] again — that bug made bottom tabs unreachable
@@ -538,6 +547,10 @@ def _sidebar_tick(vw, vh):
             dpg.draw_rectangle((3, iy+2),(sw-2, iy+ITEM_H-2),
                                fill=(*C["card"][:3], bg_a), color=(0,0,0,0),
                                rounding=4, parent=dl)
+        if is_active:
+            # Gold halo behind the active icon — the rail's focal light.
+            luxe.glow(dl, COLLAPSED_W // 2, iy + ITEM_H // 2,
+                      ITEM_H * 0.74, C["gold"], int(icon_alpha * 0.30))
 
         fn = _DRAW_FNS.get(draw_fn_name)
         if fn:
@@ -558,6 +571,8 @@ def _sidebar_tick(vw, vh):
 
     # Sliding gold indicator — drawn last (sits on top of icon row backgrounds)
     ind_y = int(_sb_ind_y[0])
+    luxe.glow(dl, 2, ind_y + ITEM_H // 2, ITEM_H * 0.62,
+              C["gold"], int(pulse_alpha * 0.28))
     dpg.draw_rectangle((0, ind_y + 4), (3, ind_y + ITEM_H - 4),
                         fill=(*C["gold"][:3], pulse_alpha),
                         color=(0, 0, 0, 0), parent=dl)
@@ -678,11 +693,13 @@ def _draw_content(dl, w, h):
         dpg.draw_rectangle((0,0),(w,h), fill=C["bg"], color=(0,0,0,0), parent=dl)
 
 # ---------------------------------------------------------------------------
-# Tab-change transition — a soft fade-in veil over the content area so tabs
-# never hard-cut. Scales with anim.intensity (instant when motion is off).
+# Tab-change transition — broadcast gold-line wipe (V2.1). A navy veil hides
+# the new tab and retreats left→right behind a gold sweep line, so the
+# incoming surface is revealed like an LCS rejoin. Scales with anim.intensity
+# (instant cut when motion is off).
 # ---------------------------------------------------------------------------
 _tab_xfade    = {"last": None, "t0": 0.0}
-_TAB_XFADE_MS = 190
+_TAB_WIPE_MS  = 280
 
 def _draw_tab_transition(dl, w, h):
     cur = state.active_tab
@@ -697,13 +714,39 @@ def _draw_tab_transition(dl, w, h):
     if anim.intensity <= 0.01:
         return
     elapsed = (time.monotonic() - _tab_xfade["t0"]) * 1000.0
-    if elapsed >= _TAB_XFADE_MS:
+    if elapsed >= _TAB_WIPE_MS:
         return
-    a = int(205 * (1.0 - elapsed / _TAB_XFADE_MS))
-    if a <= 2:
-        return
-    dpg.draw_rectangle((0, 0), (w, h),
-                       fill=(*C["bg"][:3], a), color=(0, 0, 0, 0),
+    p  = elapsed / _TAB_WIPE_MS
+    e  = 1.0 - (1.0 - p) ** 3          # ease-out cubic
+    lx = int(w * e)                    # sweep-line x position
+
+    # Navy veil ahead of the line — hides the new tab until the line passes.
+    if lx < w:
+        veil_a = int(235 * (1.0 - p * 0.25))
+        dpg.draw_rectangle((lx, 0), (w, h),
+                           fill=(*C["bg"][:3], veil_a), color=(0, 0, 0, 0),
+                           parent=dl)
+
+    # Fading gold wake behind the sweep line.
+    trail_w = max(24, int(w * 0.04))
+    for i in range(4):
+        seg_a = int(60 * (1 - i / 4) * (1.0 - p))
+        if seg_a <= 0:
+            continue
+        x0 = max(0, lx - trail_w * (i + 1) // 2)
+        x1 = max(0, lx - trail_w * i // 2)
+        if x1 <= x0:
+            continue
+        dpg.draw_rectangle((x0, 0), (x1, h),
+                           fill=(*C["gold"][:3], seg_a), color=(0, 0, 0, 0),
+                           parent=dl)
+
+    # Sweep line — bright gold core with a light leading edge.
+    dpg.draw_rectangle((max(0, lx - 2), 0), (min(w, lx + 2), h),
+                       fill=(*C["gold"][:3], 230), color=(0, 0, 0, 0),
+                       parent=dl)
+    dpg.draw_rectangle((min(w, lx + 2), 0), (min(w, lx + 3), h),
+                       fill=(*C["gold_lt"][:3], 200), color=(0, 0, 0, 0),
                        parent=dl)
 
 # ---------------------------------------------------------------------------
@@ -716,6 +759,7 @@ def main():
 
     dpg.create_context()
     _load_all_textures()
+    luxe.ensure_textures()   # V2 cinematic sprite kit (gradients/glows/shadows)
     setup_theme()
     _FONTS = setup_fonts()
     # Phase 5 — bring the pygame.mixer cue wrapper up and gate it on the
@@ -936,6 +980,25 @@ def main():
     _f11_was_down       = [False]  # edge-detect for F11
     _key_was_down       = {}       # edge-detect for tab-switch hotkeys
 
+    # ── QA screenshot harness (dev only) ───────────────────────────────────
+    # Set RIFT_QA_SHOT to a directory to boot, capture a frame-buffer PNG of
+    # each tab in RIFT_QA_TABS (comma list, default "home"), then exit.
+    _qa = None
+    _qa_dir = os.environ.get("RIFT_QA_SHOT", "").strip()
+    if _qa_dir:
+        _qa = {
+            "dir":  _qa_dir,
+            "tabs": [t.strip() for t in
+                     os.environ.get("RIFT_QA_TABS", "home").split(",")
+                     if t.strip()],
+            "idx":  -1,                          # -1 = waiting on splash
+            "due":  time.monotonic() + 14.0,     # splash hard timeout
+        }
+        try:
+            os.makedirs(_qa_dir, exist_ok=True)
+        except Exception:
+            pass
+
     # Sidebar TABS list, hoisted so hotkeys can index into it.
     from ui.sidebar import TABS as _TABS, _OVERLAY_TAGS as _OVL
     _TAB_HOTKEYS = [
@@ -1130,6 +1193,41 @@ def main():
                 dpg.configure_item("splash_win", show=False)
 
         dpg.render_dearpygui_frame()
+
+        # ── QA harness tick — runs after render so captures are current ────
+        if _qa is not None:
+            _now = time.monotonic()
+            if _qa["idx"] < 0:
+                if not state.splash_done:
+                    if splash.loading_done or _now >= _qa["due"]:
+                        try:
+                            splash.finish()
+                        except Exception:
+                            state.splash_done = True
+                else:
+                    _qa["idx"] = 0
+                    state.active_tab = _qa["tabs"][0]
+                    _qa["due"] = _now + 3.0
+            elif _now >= _qa["due"]:
+                _tab = _qa["tabs"][_qa["idx"]]
+                if _tab == "__done__":
+                    dpg.stop_dearpygui()
+                else:
+                    _png = os.path.join(_qa["dir"],
+                                        f"{_qa['idx']:02d}_{_tab}.png")
+                    try:
+                        dpg.output_frame_buffer(_png)
+                        print(f"[qa] captured {_png}")
+                    except Exception as _e:
+                        print(f"[qa] capture failed for {_tab}: {_e}")
+                    _qa["idx"] += 1
+                    if _qa["idx"] >= len(_qa["tabs"]):
+                        # Grace second so the async PNG write flushes.
+                        _qa["tabs"].append("__done__")
+                        _qa["due"] = _now + 1.0
+                    else:
+                        state.active_tab = _qa["tabs"][_qa["idx"]]
+                        _qa["due"] = _now + 2.4
 
     # Clean shutdown — release pygame.mixer first so its callback thread
     # isn't running when the interpreter starts tearing down. Wrap

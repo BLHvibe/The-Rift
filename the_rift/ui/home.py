@@ -24,9 +24,11 @@ from datetime import datetime, timezone
 
 import dearpygui.dearpygui as dpg
 
-from theme import C, RANK_COLORS
+from theme import C, RANK_COLORS, MEDAL_PARTICLE
 from core.state import state
+from core.animations import anim
 from ui import effects
+from ui import luxe
 from ui.fmt import commas, compact, clamp_text
 from data.reader import (
     live,
@@ -38,6 +40,7 @@ from data.reader import (
     load_prediction_leaderboard,
 )
 from data import rift_api
+from data import splash_art
 
 
 # ---------------------------------------------------------------------------
@@ -157,8 +160,8 @@ def _tier_color(tier):
 
 
 def _draw_card(dl, x, y, w, h, hov_key=None, accent=None):
-    """Standard card backdrop + 1px border + 3px top accent stripe.
-    Returns hover_amt for callers that want a glow."""
+    """V2 card: soft drop shadow + gradient panel + gold border + top sheen
+    + 3px accent stripe with a fading wash. Returns hover_amt."""
     is_hov = False
     amt = 0.0
     if hov_key:
@@ -173,19 +176,19 @@ def _draw_card(dl, x, y, w, h, hov_key=None, accent=None):
         except Exception:
             pass
 
-    dpg.draw_rectangle((x, y), (x + w, y + h),
-                       fill=C["card_hover"] if is_hov else C["card"],
-                       color=(0, 0, 0, 0),
-                       rounding=RADIUS, parent=dl)
+    luxe.shadow(dl, x, y, x + w, y + h, alpha=95, spread=16, drop=7)
+    luxe.panel(dl, x, y, x + w, y + h,
+               C["card_hover"] if is_hov else C["card"],
+               corner=RADIUS,
+               border=C["gold_dk"], border_a=130 + int(amt * 70),
+               sheen=58)
     if accent:
         dpg.draw_rectangle((x, y), (x + w, y + 3),
                            fill=(*accent[:3], 220),
                            color=(0, 0, 0, 0),
                            rounding=RADIUS, parent=dl)
-    dpg.draw_rectangle((x, y), (x + w, y + h),
-                       fill=(0, 0, 0, 0),
-                       color=(*C["rule_dark"][:3], 200),
-                       rounding=RADIUS, thickness=1, parent=dl)
+        luxe.vfade(dl, x + 2, y + 3, x + w - 2, y + 18, accent, 36,
+                   solid="top")
     if hov_key and amt > 0.05:
         effects.draw_hover_glow(dl, x, y, x + w, y + h,
                                  accent or C["gold"], amt,
@@ -198,7 +201,8 @@ def _section_title(dl, x, y, w, label, accent=None, count=None):
     Returns the y-offset where body content should start (relative to passed y)."""
     a = accent or C["gold"]
     title_sz = SZ_LABEL + 4   # ~17 — reads as a real heading, not a chip caption
-    # Accent block — thicker so it pops on dense cards
+    # Accent block — lit from behind so headers carry a focal glow
+    luxe.glow(dl, x + 8, y + 9, 22, a, 80)
     dpg.draw_rectangle((x, y + 6), (x + 16, y + 12),
                        fill=(*a[:3], 240), color=(0, 0, 0, 0), parent=dl)
     dpg.draw_text((x + 24, y), label.upper(),
@@ -217,12 +221,11 @@ def _section_title(dl, x, y, w, label, accent=None, count=None):
         dpg.draw_text((cx_ + 7, y + 3), ct,
                       color=(*a[:3], 240), size=SZ_LABEL + 1, parent=dl)
         right_px = cx_ - 8
-    # Thin rule fills the middle
+    # Gradient rule fills the middle, fading toward the right
     rule_x = x + label_px
     if rule_x < right_px - 4:
-        dpg.draw_line((rule_x, y + 10), (right_px - 4, y + 10),
-                      color=(*C["rule_dark"][:3], 170),
-                      thickness=1, parent=dl)
+        luxe.hfade(dl, rule_x, y + 9, right_px - 4, y + 11,
+                   a, 110, solid="left")
     return 26  # body starts ~26 px below the heading top (was 22)
 
 
@@ -249,77 +252,138 @@ def _draw_mini_sparkline(dl, x, y, w, h, results):
 # HERO BAR
 # ---------------------------------------------------------------------------
 
-def _draw_hero(dl, x, y, w):
-    h = HERO_H
-    # Background card
-    dpg.draw_rectangle((x, y), (x + w, y + h),
-                       fill=C["panel"], color=(0, 0, 0, 0),
-                       rounding=RADIUS, parent=dl)
-    # Breathing border — pulses 1.0x → 0.7x gold every ~4 s (intensity-gated).
-    border_a = effects.breathing_alpha(230, period=4.0, amp=0.4)
-    dpg.draw_rectangle((x, y), (x + w, y + h),
-                       fill=(0, 0, 0, 0), color=(*C["gold_dk"][:3], border_a),
-                       rounding=RADIUS, thickness=1, parent=dl)
-    # Slow shimmer sweep across the hero — once every 8 s.
-    effects.draw_shimmer(dl, x + 2, y + 2, w - 4, h - 4,
-                          C["gold"], alpha=120, period=8.0, sweep_w=140)
-    # Left gold accent strip — also breathing so the eye keeps catching it.
-    strip_a = effects.breathing_alpha(235, period=3.2, amp=0.3, offset=0.4)
-    dpg.draw_rectangle((x + 5, y + 14), (x + 9, y + h - 14),
-                       fill=(*C["gold"][:3], strip_a),
-                       color=(0, 0, 0, 0), rounding=2, parent=dl)
+_hero_bg = {"key": None, "champ": None}
 
-    # Title + subtitle
-    dpg.draw_text((x + 22, y + 12), "THE RIFT",
-                  color=C["gold_lt"], size=30, parent=dl)
-    today = datetime.now().strftime("%A · %b %d").upper()
-    dpg.draw_text((x + 22, y + 54), today,
-                  color=(*C["txt2"][:3], 235),
-                  size=SZ_BODY, parent=dl)
+# Iconic, splash-safe picks so the hero is cinematic from first launch even
+# before any match history exists. Rotates daily.
+_HERO_FALLBACK = ["Ahri", "Jinx", "Yasuo", "Ezreal", "Akali",
+                  "Jhin", "Sett", "Thresh", "Yone", "Caitlyn"]
 
-    # Right: 3 KPI chips
+
+def _hero_champion():
+    """Champion whose splash backs the hero — drawn from the most recent
+    logged match (winning side first), rotating through that game's champs
+    day by day. Falls back to a curated icon list until history loads."""
+    day = int(datetime.now().strftime("%j"))
+    hist = live.match_history or []
+    if not hist:
+        return _HERO_FALLBACK[day % len(_HERO_FALLBACK)]
+    m = hist[0]
+    key = (m.get("match_id") or m.get("id") or 0,
+           datetime.now().strftime("%Y%m%d"))
+    if _hero_bg["key"] == key:
+        return _hero_bg["champ"]
+    parts  = m.get("participants") or []
+    winner = (m.get("winner") or "").lower()
+    champs  = [(pt.get("champion") or "").strip() for pt in parts
+               if (pt.get("team") or "").lower() == winner]
+    champs += [(pt.get("champion") or "").strip() for pt in parts
+               if (pt.get("team") or "").lower() != winner]
+    champs = [c for c in champs if c and c != "?"]
+    pick = champs[day % len(champs)] if champs else \
+        _HERO_FALLBACK[day % len(_HERO_FALLBACK)]
+    _hero_bg["key"]   = key
+    _hero_bg["champ"] = pick
+    return pick
+
+
+def _draw_hero(dl, x, y, w, h):
+    """V2 cinematic hero — full-bleed champion splash with layered scrims,
+    a lit gold wordmark, and glass KPI chips. The anchor of the front page."""
+    t = time.monotonic()
+
+    # ── Backdrop: cover-cropped splash with a near-imperceptible drift ─────
+    champ = _hero_champion()
+    tex = splash_art.get_texture(champ) if champ else None
+    dpg.draw_rectangle((x, y), (x + w, y + h),
+                       fill=C["navy_deep"], color=(0, 0, 0, 0), parent=dl)
+    if tex and dpg.does_item_exist(tex):
+        drift  = max(0.0, min(1.0, anim.intensity))
+        SPLASH_AR = 1215.0 / 717.0
+        aspect = max(1.0, w / max(1.0, float(h)))
+        uw = 1.0 - 0.06 * (0.5 + 0.5 * math.sin(t * 2 * math.pi / 53.0)) * drift
+        vh = min(1.0, uw * SPLASH_AR / aspect)
+        u0 = (1.0 - uw) * (0.5 + 0.5 * math.sin(t * 2 * math.pi / 67.0) * drift)
+        v0 = 0.06 + 0.06 * drift * (0.5 + 0.5 * math.sin(t * 2 * math.pi / 59.0))
+        v0 = max(0.0, min(1.0 - vh, v0))
+        dpg.draw_image(tex, (x, y), (x + w, y + h),
+                       uv_min=(u0, v0), uv_max=(u0 + uw, v0 + vh),
+                       parent=dl)
+    else:
+        # Fallback bed — gradient navy with a warm focal glow, never flat.
+        luxe.vfade(dl, x, y, x + w, y + h, (26, 52, 92), 255, solid="top")
+        luxe.glow(dl, x + int(w * 0.24), y + int(h * 0.62),
+                  int(h * 1.25), C["gold"], 34)
+        luxe.glow(dl, x + int(w * 0.86), y + int(h * 0.30),
+                  int(h * 0.95), C["rift_purple"], 30)
+
+    # ── Scrims — bottom-heavy navy so type sits in clean air ──────────────
+    luxe.vfade(dl, x, y + int(h * 0.40), x + w, y + h, C["bg"], 235,
+               solid="bottom")
+    luxe.hfade(dl, x, y, x + int(w * 0.46), y + h, C["bg"], 185,
+               solid="left")
+    luxe.vfade(dl, x, y, x + w, y + int(h * 0.30), C["bg"], 110,
+               solid="top")
+
+    # ── Wordmark block (lower-left) ────────────────────────────────────────
+    today = datetime.now().strftime("%A · %B %d").upper()
+    title_px = max(38, min(72, int(h * 0.24)))
+    _, tw_, th_ = luxe.lit_title("THE RIFT", title_px)
+    ty = y + h - th_ - 34
+    dpg.draw_text((x + 30, ty - 20), today,
+                  color=(*C["gold"][:3], 215), size=SZ_LABEL, parent=dl)
+    luxe.glow(dl, x + 26 + tw_ / 2, ty + th_ / 2, tw_ * 0.66,
+              (212, 178, 118),
+              int(effects.breathing_alpha(40, period=5.0, amp=0.5)))
+    luxe.draw_lit_title(dl, x + 26, ty, "THE RIFT", title_px)
+
     stats = _stats_cache["data"] or {}
     matches = stats.get("matches") if isinstance(stats, dict) else None
     parts   = stats.get("participants") if isinstance(stats, dict) else None
     last    = stats.get("last_ingest") if isinstance(stats, dict) else None
+    sub = "CUSTOMS HQ — EVERY GAME, EVERY RECORD, EVERY RIVALRY"
+    dpg.draw_text((x + 30, ty + th_ + 2), sub,
+                  color=(*C["txt2"][:3], 225), size=SZ_LABEL, parent=dl)
 
+    # ── KPI glass chips (lower-right) ──────────────────────────────────────
     kpis = [
         ("MATCHES",      commas(matches if matches is not None else 0)),
         ("PARTICIPANTS", commas(parts if parts is not None else 0)),
-        ("LAST UPDATE",  _time_ago(last) if last else "—"),
+        ("LAST GAME",    _time_ago(last) if last else "—"),
     ]
-    chip_w = 170
-    chip_h = 64
-    chip_gap = 12
+    chip_w, chip_h, chip_gap = 168, 66, 14
     total_w = len(kpis) * chip_w + (len(kpis) - 1) * chip_gap
-    cx = x + w - 22 - total_w
-    cy = y + (h - chip_h) // 2
+    cx = x + w - 26 - total_w
+    cy = y + h - chip_h - 26
     for label, val in kpis:
-        dpg.draw_rectangle((cx, cy), (cx + chip_w, cy + chip_h),
-                           fill=C["card"],
-                           color=(*C["gold_dk"][:3], 200),
-                           rounding=6, parent=dl)
-        # Value
+        luxe.shadow(dl, cx, cy, cx + chip_w, cy + chip_h,
+                    alpha=80, spread=12, drop=5)
+        luxe.panel(dl, cx, cy, cx + chip_w, cy + chip_h,
+                   (12, 26, 48, 228), corner=8,
+                   border=C["gold_dk"], border_a=170, sheen=70)
         vw = len(val) * (SZ_KPI * 4 // 10)
-        dpg.draw_text((cx + (chip_w - vw) // 2, cy + 10),
-                      val, color=C["gold_lt"],
-                      size=SZ_KPI, parent=dl)
-        # Label
+        luxe.glow(dl, cx + chip_w / 2, cy + 24, 34, C["gold"], 36)
+        dpg.draw_text((cx + (chip_w - vw) // 2, cy + 8),
+                      val, color=C["gold_lt"], size=SZ_KPI, parent=dl)
         lw = len(label) * (SZ_LABEL * 4 // 10)
-        dpg.draw_text((cx + (chip_w - lw) // 2, cy + chip_h - 18),
+        dpg.draw_text((cx + (chip_w - lw) // 2, cy + chip_h - 20),
                       label, color=(*C["txt2"][:3], 220),
                       size=SZ_LABEL, parent=dl)
         cx += chip_w + chip_gap
 
-    # Live pulse dot between subtitle and KPIs
+    # Live pulse dot above the chips
     fresh = bool(last)
     dot_col = C["win"] if fresh else C["txt_dim"]
-    pulse = (math.sin(time.monotonic() * 2.4) * 0.5 + 0.5)
-    dot_x = x + w - 22 - total_w - 18
-    dot_y = y + h // 2
-    dpg.draw_circle((dot_x, dot_y), 5,
-                    fill=(*dot_col[:3], int(180 + pulse * 75)),
+    pulse = (math.sin(t * 2.4) * 0.5 + 0.5)
+    dot_x = x + w - 26 - total_w - 18
+    dot_y = cy + chip_h // 2
+    luxe.glow(dl, dot_x, dot_y, 14, dot_col, int(60 + pulse * 60))
+    dpg.draw_circle((dot_x, dot_y), 4,
+                    fill=(*dot_col[:3], int(190 + pulse * 65)),
                     color=(0, 0, 0, 0), parent=dl)
+
+    # ── Bottom edge light — the broadcast hairline under the hero ─────────
+    luxe.hairline(dl, x, y + h - 1, x + w, alpha=185, glow_h=12, glow_a=55)
 
 
 # ---------------------------------------------------------------------------
@@ -450,6 +514,7 @@ def _draw_rankings(dl, x, y, w, h):
     col_spark_x = inner_w - col_spark_w
     col_score_x = col_spark_x - col_score_w - 16
 
+    max_score = max(1.0, float(rows[0].get("score") or 1))
     for i, p in enumerate(rows):
         ry   = inner_y + i * row_h
         rank = i + 1
@@ -457,6 +522,7 @@ def _draw_rankings(dl, x, y, w, h):
         score = float(p.get("score") or 0)
         tier  = p.get("tier") or "Unranked"
         is_top3 = rank <= 3
+        medal = MEDAL_PARTICLE.get(rank)
 
         # Subtle alt-row banding for readability
         if i % 2 == 1:
@@ -466,17 +532,32 @@ def _draw_rankings(dl, x, y, w, h):
                                color=(0, 0, 0, 0),
                                rounding=4, parent=dl)
 
-        # Rank number
-        rank_col = C["gold_lt"] if is_top3 else C["txt2"]
+        # Medal edge light for the podium ranks
+        if medal:
+            luxe.glow(dl, inner_x - 2, ry + row_h // 2, row_h * 0.7,
+                      medal, 55)
+            dpg.draw_rectangle((inner_x - 4, ry + 4),
+                               (inner_x - 1, ry + row_h - 6),
+                               fill=(*medal, 235), color=(0, 0, 0, 0),
+                               rounding=2, parent=dl)
+
+        # Rank number — podium ranks glow in their medal color
+        rank_col = medal if medal else C["txt2"]
+        rank_sz  = SZ_NAME_HI + (4 if is_top3 else 0)
         rank_txt = f"{rank}"
         rw = len(rank_txt) * 8
+        if medal:
+            luxe.glow(dl, inner_x + col_tier // 2,
+                      ry + row_h // 2, 18, medal, 60)
         dpg.draw_text((inner_x + (col_tier - rw) // 2,
-                       ry + (row_h - SZ_NAME_HI) // 2),
-                      rank_txt, color=rank_col,
-                      size=SZ_NAME_HI, parent=dl)
+                       ry + (row_h - rank_sz) // 2),
+                      rank_txt, color=(*rank_col[:3], 255),
+                      size=rank_sz, parent=dl)
 
-        # Tier bead
+        # Tier bead with a soft halo
         tcol = _tier_color(tier)
+        luxe.glow(dl, inner_x + col_tier + 6, ry + row_h // 2, 10,
+                  tcol, 70)
         dpg.draw_circle((inner_x + col_tier + 6, ry + row_h // 2),
                         4, fill=(*tcol[:3], 240),
                         color=(0, 0, 0, 0), parent=dl)
@@ -493,6 +574,22 @@ def _draw_rankings(dl, x, y, w, h):
         # their profile. Score / sparkline are passive readouts.
         _player_hits.append((inner_x, ry, inner_x + col_score_x - 8,
                              ry + row_h - 2, name))
+
+        # Score bar — fills the dead middle with a power readout
+        bar_x1 = nx + 196
+        bar_x2 = inner_x + col_score_x - 18
+        if bar_x2 - bar_x1 > 50:
+            bar_cy = ry + row_h // 2
+            frac = max(0.04, min(1.0, score / max_score))
+            dpg.draw_rectangle((bar_x1, bar_cy - 2), (bar_x2, bar_cy + 2),
+                               fill=(*C["rule_dark"][:3], 90),
+                               color=(0, 0, 0, 0), rounding=2, parent=dl)
+            fx2 = bar_x1 + int((bar_x2 - bar_x1) * frac)
+            luxe.hfade(dl, bar_x1, bar_cy - 2, fx2, bar_cy + 2,
+                       C["gold"], 200 if is_top3 else 120, solid="right")
+            dpg.draw_circle((fx2, bar_cy), 2.6,
+                            fill=(*C["gold_lt"][:3], 230 if is_top3 else 150),
+                            color=(0, 0, 0, 0), parent=dl)
 
         # Score (right-aligned within its column)
         s_txt = str(int(round(score)))
@@ -1481,6 +1578,19 @@ def _draw_footer(dl, x, y, w):
 # PUBLIC DRAW
 # ---------------------------------------------------------------------------
 
+_enter = {"t0": 0.0, "last": 0.0}
+
+
+def _entrance_dy(i, now):
+    """Staggered entrance offset for card `i` — cards settle upward into
+    place when the tab is (re)opened. 0 when motion is off."""
+    if anim.intensity <= 0.01:
+        return 0
+    t = (now - _enter["t0"] - 0.055 * i) / 0.36
+    t = max(0.0, min(1.0, t))
+    return int(((1.0 - t) ** 3) * 30)
+
+
 def draw_home(dl, w, h, fonts=None):
     global _wrapped_hit
     dpg.delete_item(dl, children_only=True)
@@ -1489,10 +1599,19 @@ def draw_home(dl, w, h, fonts=None):
     _wrapped_hit = None
 
     _ensure_all()
+    splash_art.flush_pending()   # register any hero-backdrop splash downloads
 
-    # Background
+    # Entrance choreography clock — reset when the tab is re-entered.
+    now = time.monotonic()
+    if now - _enter["last"] > 0.45:
+        _enter["t0"] = now
+    _enter["last"] = now
+
+    # Background — flat base + a broad cool top-light so the page has depth
+    # before any card draws.
     dpg.draw_rectangle((0, 0), (w, h),
                        fill=C["bg"], color=(0, 0, 0, 0), parent=dl)
+    luxe.glow(dl, w * 0.5, -h * 0.25, w * 0.75, (40, 72, 118), 60)
     # Persistent ambient layers — three motes seeds + a very slow drift field
     # behind everything so the home page reads "alive" without distracting from
     # content. All layers scale with the global anim intensity slider.
@@ -1506,9 +1625,10 @@ def draw_home(dl, w, h, fonts=None):
                               accent=C["gold"], n_dots=14, seed=17)
 
     # ── Layout ────────────────────────────────────────────────────────────
-    # Compute heights for the two main rows. The hero + footer are fixed; the
-    # remaining space splits ~62/38 between the main row and the bottom row.
-    avail = h - PAD_OUTER * 2 - HERO_H - GAP - FOOTER_H - GAP
+    # Cinematic hero scales with the window (~28% of height); the remaining
+    # space splits ~62/38 between the main row and the bottom row.
+    hero_h = max(180, min(340, int(h * 0.28)))
+    avail = h - PAD_OUTER * 2 - hero_h - GAP - FOOTER_H - GAP
     main_h   = max(420, int(avail * 0.62))
     bottom_h = max(240, avail - main_h)
 
@@ -1516,31 +1636,35 @@ def draw_home(dl, w, h, fonts=None):
     y0 = PAD_OUTER
     width = w - PAD_OUTER * 2
 
-    # 1) Hero
-    _draw_hero(dl, x0, y0, width)
-    cy = y0 + HERO_H + GAP
+    # 1) Hero (full-bleed cinematic — no entrance offset, it's the anchor)
+    _draw_hero(dl, x0, y0, width, hero_h)
+    cy = y0 + hero_h + GAP
 
-    # 2) Main row (rankings + right stack)
+    # 2) Main row (rankings + right stack) — staggered entrance
     left_w  = int((width - GAP) * 0.60)
     right_w = width - GAP - left_w
-    _draw_rankings(dl, x0, cy, left_w, main_h)
+    _draw_rankings(dl, x0, cy + _entrance_dy(1, now), left_w, main_h)
 
     # Right column stack: SEASON (top, ~46%) + PULSE (bottom, ~54%)
     rx = x0 + left_w + GAP
     season_h = int(main_h * 0.46) - GAP // 2
     pulse_h  = main_h - season_h - GAP
-    _draw_season(dl, rx, cy, right_w, season_h)
-    _draw_pulse(dl, rx, cy + season_h + GAP, right_w, pulse_h)
+    _draw_season(dl, rx, cy + _entrance_dy(2, now), right_w, season_h)
+    _draw_pulse(dl, rx, cy + season_h + GAP + _entrance_dy(3, now),
+                right_w, pulse_h)
 
     cy += main_h + GAP
 
     # 3) Bottom row (recent matches + records)
-    _draw_recent_matches(dl, x0, cy, left_w, bottom_h)
-    _draw_records(dl, rx, cy, right_w, bottom_h)
+    _draw_recent_matches(dl, x0, cy + _entrance_dy(4, now), left_w, bottom_h)
+    _draw_records(dl, rx, cy + _entrance_dy(5, now), right_w, bottom_h)
     cy += bottom_h + GAP
 
     # 4) Footer
     _draw_footer(dl, x0, cy, width)
+
+    # 5) Cinematic vignette over everything (under overlays/toasts)
+    luxe.vignette(dl, 0, 0, w, h, 70)
 
     # ── Click dispatch ───────────────────────────────────────────────────
     if dpg.is_mouse_button_clicked(0) and not state.click_consumed:
