@@ -1,8 +1,10 @@
 <script>
   // Hextech dissolve — the v5 transition reborn with real glow. A honeycomb
   // veil sweeps across on every navigation, gold-flashing as it shatters.
-  import { dissolveSignal } from '../stores.js'
+  import { dissolveSignal, motion } from '../stores.js'
   import { onMount } from 'svelte'
+  let inten = 1
+  motion.subscribe(v => inten = v)
   let canvas
   let ctx, w, h, dpr, start = -1
 
@@ -23,6 +25,7 @@
   })
 
   function trigger() {
+    if (inten <= 0.01) return        // motion off → instant cut
     start = performance.now()
     canvas.style.opacity = '1'
     requestAnimationFrame(frame)

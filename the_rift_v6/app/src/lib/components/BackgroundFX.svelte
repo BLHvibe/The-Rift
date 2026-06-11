@@ -2,8 +2,11 @@
   // Full-app living background: drifting hex lattice, volumetric fog glows,
   // rising embers with real canvas glow. Mouse-parallax on every layer.
   import { onMount } from 'svelte'
+  import { motion } from '../stores.js'
   let canvas
   let mx = 0.5, my = 0.5            // smoothed mouse 0..1
+  let inten = 1
+  motion.subscribe(v => inten = v)
 
   onMount(() => {
     const ctx = canvas.getContext('2d')
@@ -92,7 +95,7 @@
         const ex = e.x * w + Math.sin(t * 0.5 + e.phase * 6.28) * e.amp + (mx - .5) * 40
         const ey = h - p * (h + 80)
         const fade = Math.sin(Math.min(1, Math.max(0, p)) * Math.PI)
-        const a = 0.55 * fade * e.bright
+        const a = 0.55 * fade * e.bright * inten
         if (a < 0.02) continue
         ctx.shadowColor = `rgba(232,213,163,${a})`
         ctx.shadowBlur = 12

@@ -57,15 +57,35 @@ export async function leagueData() {
   for (const p of parts) {
     const name = sumToDisplay[p.player]
     if (!name) continue
-    const a = agg.get(name) ?? { name, wins: 0, losses: 0, k: 0, d: 0, a: 0 }
+    const a = agg.get(name) ?? { name, wins: 0, losses: 0, k: 0, d: 0, a: 0,
+                                 gold: 0, dmg: 0, cs: 0 }
     p.win ? a.wins++ : a.losses++
     a.k += p.kills ?? 0; a.d += p.deaths ?? 0; a.a += p.assists ?? 0
+    a.gold += p.gold ?? 0; a.dmg += p.damage ?? 0; a.cs += p.cs ?? 0
     agg.set(name, a)
   }
   const leaderboard = [...agg.values()]
-    .map(a => ({ ...a, games: a.wins + a.losses,
-                 wr: Math.round(100 * a.wins / Math.max(1, a.wins + a.losses)),
-                 kda: ((a.k + a.a) / Math.max(1, a.d)).toFixed(2) }))
+    .map(a => {
+      const g = a.wins + a.losses
+      return { ...a, games: g,
+               wr: Math.round(100 * a.wins / Math.max(1, g)),
+               kda: ((a.k + a.a) / Math.max(1, a.d)).toFixed(2),
+               avgDmg: Math.round(a.dmg / Math.max(1, g)),
+               avgGold: Math.round(a.gold / Math.max(1, g)),
+               avgCs: Math.round(a.cs / Math.max(1, g)) }
+    })
     .sort((x, y) => y.wins - x.wins || y.wr - x.wr)
-  return { matches, byMatch, leaderboard, sumToDisplay }
+
+  // H2H — vs (cross-team) and with (same-team) records per roster pair.
+  const h2h = new Map()  // "A|B" -> {vsW, vsG, withW, withG}
+  const cell = k => { if (!h2h.has(k)) h2h.set(k, { vsW: 0, vsG: 0, withW: 0, withG: 0 }); return h2h.get(k) }
+  for (const ps of byMatch.values()) {
+    const named = ps.map(p => ({ ...p, dn: sumToDisplay[p.player] })).filter(p => p.dn)
+    for (const a of named) for (const b of named) {
+      if (a.dn === b.dn) continue
+      if (a.team !== b.team) { const c = cell(`${a.dn}|${b.dn}`); c.vsG++; if (a.win) c.vsW++ }
+      else { const c = cell(`${a.dn}|${b.dn}`); c.withG++; if (a.win) c.withW++ }
+    }
+  }
+  return { matches, byMatch, leaderboard, sumToDisplay, h2h }
 }

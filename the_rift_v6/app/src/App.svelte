@@ -1,12 +1,23 @@
 <script>
-  import { screen, TABS } from './lib/stores.js'
+  import { screen } from './lib/stores.js'
   import BackgroundFX from './lib/components/BackgroundFX.svelte'
   import HexDissolve from './lib/components/HexDissolve.svelte'
   import Titlebar from './lib/components/Titlebar.svelte'
   import Sidebar from './lib/components/Sidebar.svelte'
   import Ticker from './lib/components/Ticker.svelte'
   import Home from './lib/screens/Home.svelte'
-  import Stub from './lib/screens/Stub.svelte'
+  import Rankings from './lib/screens/Rankings.svelte'
+  import Inhouse from './lib/screens/Inhouse.svelte'
+  import Scout from './lib/screens/Scout.svelte'
+  import Feed from './lib/screens/Feed.svelte'
+  import Tierlist from './lib/screens/Tierlist.svelte'
+  import Draft from './lib/screens/Draft.svelte'
+  import Settings from './lib/screens/Settings.svelte'
+
+  const SCREENS = {
+    home: Home, rankings: Rankings, inhouse: Inhouse, scout: Scout,
+    feed: Feed, tierlist: Tierlist, draft: Draft, settings: Settings,
+  }
 </script>
 
 <BackgroundFX />
@@ -17,11 +28,7 @@
   <div class="mid">
     <Sidebar />
     <main>
-      {#if $screen === 'home'}
-        <Home />
-      {:else}
-        <Stub label={TABS.find(t => t.id === $screen)?.label ?? ''} />
-      {/if}
+      <svelte:component this={SCREENS[$screen] ?? Home} />
     </main>
   </div>
   <Ticker />
