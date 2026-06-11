@@ -32,7 +32,7 @@ from ui import audio, effects, toast, luxe
 from data.reader import live, load_live_data, check_for_update
 from data import patch_ticker
 
-__version__ = "4.1.5"   # bump this on each release
+__version__ = "5.0.0"   # bump this on each release
 
 WIN_W, WIN_H = 1280, 800
 TITLE_H      = 52    # titlebar height
