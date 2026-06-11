@@ -8,6 +8,7 @@ import dearpygui.dearpygui as dpg
 from theme import C
 from core.animations import anim
 from ui import effects, toast
+from ui import luxe
 from data.config import load_config, save_config
 from data.reader import write_tier_list
 from data.tips import TIPS
@@ -443,6 +444,7 @@ def draw_tierlist(dl, vw, vh, fonts=None):
         set_fonts(fonts)
     dpg.delete_item(dl, children_only=True)
     dpg.draw_rectangle((0,0),(vw,vh), fill=C["bg"], color=(0,0,0,0), parent=dl)
+    luxe.glow(dl, vw * 0.5, -vh * 0.25, vw * 0.75, (40, 72, 118), 55)
     # Prevent native content_win scroll from fighting with scroll_off-based pool scroll
     if dpg.does_item_exist("content_win"):
         dpg.set_y_scroll("content_win", 0)
@@ -472,6 +474,8 @@ def draw_tierlist(dl, vw, vh, fonts=None):
     _draw_pool_divider(dl, PAD, pool_y - 10, vw - PAD*2)
     _draw_pool(dl, PAD, pool_y, vw - PAD*2, vh - pool_y - PAD, vw, vh)
 
+    luxe.vignette(dl, 0, 0, vw, vh, 55)
+
     if tl.drag_name:
         mx, my = tl.drag_pos
         _draw_card(dl, mx - CARD_W//2, my - CARD_H//2, tl.drag_name,
@@ -481,11 +485,16 @@ def draw_tierlist(dl, vw, vh, fonts=None):
 
 
 def _draw_top_bar(dl, vw):
-    dpg.draw_rectangle((0,0),(vw,TOP_BAR_H), fill=(*C["panel"][:3],220),
+    # V2 broadcast header — gradient surface + gold bottom edge light.
+    dpg.draw_rectangle((0,0),(vw,TOP_BAR_H), fill=C["navy_deep"],
                         color=(0,0,0,0), parent=dl)
+    luxe.vfade(dl, 0, 0, vw, TOP_BAR_H, (44, 74, 116), 46, solid="top")
+    luxe.vfade(dl, 0, TOP_BAR_H - 10, vw, TOP_BAR_H - 1,
+               C["gold"], 26, solid="bottom")
     dpg.draw_line((0,TOP_BAR_H-1),(vw,TOP_BAR_H-1),
-                  color=C["rule_dark"], thickness=1, parent=dl)
-    _txt(dl, PAD, 12, "TIER LIST BUILDER", (*C["gold"][:3],220), 22, "cinzel_22")
+                  color=(*C["gold_dk"][:3], 200), thickness=1, parent=dl)
+    luxe.glow(dl, PAD + 6, TOP_BAR_H // 2, 26, C["gold"], 55)
+    _txt(dl, PAD, 12, "TIER LIST BUILDER", (*C["gold_lt"][:3],235), 22, "cinzel_22")
     _txt(dl, PAD+270, 18, "Drag players from the pool into tiers  ·  Right-click a card to remove",
          (*C["txt_dim"][:3],150), 17, "raj_r_16")
 
@@ -494,18 +503,18 @@ def _draw_top_bar(dl, vw):
     bx = vw - bw - PAD
     by = (TOP_BAR_H - bh)//2
     dpg.draw_rectangle((bx,by),(bx+bw,by+bh),
-                        fill=(*C["card"][:3],200), color=(*C["rule_dark"][:3],200),
+                        fill=(*C["card"][:3],200), color=(*C["gold"][:3],70),
                         rounding=4, parent=dl)
     _txt(dl, bx+14, by+8, "RESET", (*C["txt"][:3],200), 17, "raj_sb_16")
 
-    # Submit button
+    # Submit button — lit gold panel.
     sbw, sbh = 160, 34
     sbx = bx - sbw - 10
     sby = by
-    dpg.draw_rectangle((sbx,sby),(sbx+sbw,sby+sbh),
-                        fill=(*C["gold_dk"][:3],200), color=(*C["gold"][:3],200),
-                        rounding=4, parent=dl)
-    _txt(dl, sbx+14, sby+8, "SUBMIT LIST", (*C["gold_lt"][:3],230), 17, "raj_sb_16")
+    luxe.glow(dl, sbx + sbw / 2, sby + sbh / 2, sbh * 1.1, C["gold"], 32)
+    luxe.panel(dl, sbx, sby, sbx + sbw, sby + sbh, (116, 90, 44, 235),
+               corner=4, border=C["gold"], border_a=210, sheen=90)
+    _txt(dl, sbx+14, sby+8, "SUBMIT LIST", (*C["gold_lt"][:3],240), 17, "raj_sb_16")
 
     if dpg.is_mouse_button_clicked(0):
         mouse = dpg.get_mouse_pos(local=False)
@@ -573,15 +582,19 @@ def _draw_tier_rows(dl, tx, ty, tw, vw, vh):
         row_y  = ty + i*(TIER_H+4)
         tcol   = TIER_COLORS[tier]
 
-        # Row background
-        dpg.draw_rectangle((tx, row_y),(tx+tw, row_y+TIER_H),
-                            fill=(*C["card"][:3],220),
-                            color=(*C["rule_dark"][:3],180),
-                            rounding=4, parent=dl)
+        # Row background — gradient panel with a tier-color wash from the left.
+        luxe.panel(dl, tx, row_y, tx+tw, row_y+TIER_H,
+                   (*C["card"][:3], 225), corner=4,
+                   border=C["gold_dk"], border_a=110, sheen=30)
+        luxe.hfade(dl, tx + TIER_LBL_W, row_y + 2,
+                   tx + TIER_LBL_W + int(tw * 0.16), row_y + TIER_H - 2,
+                   tcol, 26, solid="left")
 
-        # Tier label box
+        # Tier label box — lit from behind.
+        luxe.glow(dl, tx + TIER_LBL_W // 2, row_y + TIER_H // 2,
+                  TIER_H * 0.7, tcol, 50)
         dpg.draw_rectangle((tx, row_y),(tx+TIER_LBL_W, row_y+TIER_H),
-                            fill=(*tcol[:3],220), color=(0,0,0,0),
+                            fill=(*tcol[:3],225), color=(0,0,0,0),
                             rounding=4, parent=dl)
         lbl_x = tx + TIER_LBL_W//2 - 10
         lbl_y = row_y + TIER_H//2 - 14
@@ -612,8 +625,9 @@ def _tier_contains(tier, name):
 
 
 def _draw_pool_divider(dl, tx, dy, tw):
-    dpg.draw_line((tx, dy),(tx+tw, dy), color=(*C["rule_dark"][:3],180), thickness=1, parent=dl)
-    _txt(dl, tx, dy+4, "PLAYER POOL", (*C["gold_dk"][:3],220), 17, "raj_sb_16")
+    luxe.hfade(dl, tx, dy - 1, tx + tw, dy + 1, C["gold"], 110, solid="left")
+    luxe.glow(dl, tx + 8, dy + 13, 18, C["gold"], 55)
+    _txt(dl, tx, dy+4, "PLAYER POOL", (*C["gold"][:3],225), 17, "raj_sb_16")
     placed_count = sum(len(v) for v in tl.placements.values())
     total = placed_count + len(tl.unplaced)
     _txt(dl, tx+170, dy+8, f"{placed_count}/{total} placed",

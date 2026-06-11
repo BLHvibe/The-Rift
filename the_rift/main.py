@@ -1005,10 +1005,41 @@ def main():
         'inhouse:rivalsdrill'. Data-dependent selections are stored as a
         pending action and retried each frame until their data arrives."""
         base, _, sub = target.partition(":")
+        # Clean up the outgoing tab's overlay window, exactly like the
+        # sidebar/hotkey navigation paths do — otherwise the old tab's
+        # floating window (scout report, feed cards, …) lingers on top.
+        old_tag = _OVL.get(state.active_tab)
+        if old_tag and dpg.does_item_exist(old_tag):
+            dpg.delete_item(old_tag)
         state.active_tab = base
+        if dpg.does_item_exist("content_win"):
+            dpg.set_y_scroll("content_win", 0)
         if _qa is not None:
             _qa["pending"] = None
-        if base == "inhouse" and sub:
+        if base == "tierlist" and sub == "unlocked":
+            try:
+                from ui import tierlist as _tl_mod
+                _tl_mod._tl_unlocked = True
+            except Exception as _e:
+                print(f"[qa] tierlist unlock failed: {_e}")
+        elif base == "home" and sub == "profile":
+            def _try_prof():
+                roster = list(live.players or [])
+                if not roster:
+                    return False
+                state.nav_to_profile = roster[0]
+                return True
+            if _qa is not None:
+                _qa["pending"] = _try_prof
+        elif base == "home" and sub == "wrapped":
+            def _try_wrap():
+                if not (live.records_loaded or live.match_history_loaded):
+                    return False
+                wrapped_overlay.open_wrapped()
+                return True
+            if _qa is not None:
+                _qa["pending"] = _try_wrap
+        elif base == "inhouse" and sub:
             try:
                 from ui import inhouse as _ih
                 if sub == "detail":

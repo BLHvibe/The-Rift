@@ -131,3 +131,16 @@ All grounded in data the backend already has; none assume seasons:
   with retry-until-data pending actions; match-detail panel and drill-down
   now visually verified (`.claude/qa_screens/v5_ihsub4`). Remaining luxe
   targets: Scout, Feed, Profile, Wrapped, Tierlist, Commands/Settings.
+- 2026-06-10 — luxe rollout COMPLETE across all drawlist surfaces: Scout
+  (broadcast header, gold sort pills, carded table w/ medal stripes +
+  tier-bead glows), Feed (header + gold REFRESH/filter chips, gradient
+  cards w/ kind-color washes), Tierlist (header, lit gold SUBMIT, tier
+  rows w/ glowing labels + color washes, gold pool divider), Profile
+  panel (cast shadow, gradient header w/ gold edge light, avatar tier
+  glow, lit section rules), Wrapped (stage lighting: gold floor glow,
+  cool top light, vignette). QA harness: overlay-cleanup on tab switch
+  (fixes stale floating windows — was masking captures), plus
+  `home:profile`, `home:wrapped`, `tierlist:unlocked` targets. All
+  captures in `.claude/qa_screens/v5_rest1-3`. NOT restyled: Draft
+  (locked, by design); Commands/Settings (DPG widget overlays — inherit
+  the global theme; candidates for a later polish pass).

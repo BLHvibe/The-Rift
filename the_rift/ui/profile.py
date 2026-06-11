@@ -25,6 +25,7 @@ from theme import C, RANK_COLORS
 from core.state import state
 from core.animations import anim
 from ui import effects
+from ui import luxe
 from ui.fmt import commas, compact, pct, signed, clamp_text
 from data.reader import (
     live, load_rivalries, load_match_history,
@@ -223,9 +224,13 @@ def _records_held(name):
 
 def _draw_header(dl, x, y, w, name):
     h = HEADER_H
+    # V2 header — gradient surface + gold edge light along the bottom.
     dpg.draw_rectangle((x, y), (x + w, y + h),
                        fill=C["card_hover"], color=(0, 0, 0, 0),
                        rounding=0, parent=dl)
+    luxe.vfade(dl, x, y, x + w, y + h, (52, 84, 128), 55, solid="top")
+    luxe.vfade(dl, x, y + h - 14, x + w, y + h - 2, C["gold"], 40,
+               solid="bottom")
     dpg.draw_rectangle((x, y + h - 2), (x + w, y + h),
                        fill=C["gold"], color=(0, 0, 0, 0), parent=dl)
 
@@ -238,6 +243,7 @@ def _draw_header(dl, x, y, w, name):
     rk = _player_rankings_row(name) or {}
     tier = rk.get("tier") or "Unranked"
     tcol = RANK_COLORS.get(tier, RANK_COLORS["Unranked"])
+    luxe.glow(dl, av_cx, av_cy, av_r * 1.7, tcol, 44)
     dpg.draw_circle((av_cx, av_cy), av_r + 4,
                     fill=(0, 0, 0, 0), color=(*tcol[:3], 230),
                     thickness=2, parent=dl)
@@ -302,13 +308,13 @@ def _draw_header(dl, x, y, w, name):
 
 def _draw_section_title(dl, x, y, w, label, accent=None):
     a = accent or C["gold"]
+    luxe.glow(dl, x + 6, y + 13, 16, a, 60)
     dpg.draw_rectangle((x, y + 11), (x + 12, y + 15),
                        fill=(*a[:3], 220), color=(0, 0, 0, 0), parent=dl)
     dpg.draw_text((x + 20, y + 4), label.upper(),
                   color=(*a[:3], 230), size=13, parent=dl)
-    dpg.draw_line((x + 20 + max(80, len(label) * 8 + 8), y + 13),
-                  (x + w, y + 13),
-                  color=(*C["rule_dark"][:3], 140), thickness=1, parent=dl)
+    luxe.hfade(dl, x + 20 + max(80, len(label) * 8 + 8), y + 12,
+               x + w, y + 14, a, 90, solid="left")
     return 24
 
 
@@ -711,10 +717,14 @@ def draw(dl, content_w, content_h):
         if in_panel:
             state.click_consumed = True
 
-    # Panel chrome
+    # Panel chrome — V2: cast shadow to the left, gradient body, gold edge.
+    luxe.hfade(dl, x1 - 28, y1, x1, y2, (0, 0, 0), int(130 * frac),
+               solid="right")
     dpg.draw_rectangle((x1, y1), (x2, y2),
                        fill=C["panel"], color=(0, 0, 0, 0),
                        parent=dl)
+    luxe.vfade(dl, x1, y1 + HEADER_H, x2, y2, (6, 12, 24),
+               int(70 * frac), solid="bottom")
     dpg.draw_line((x1, y1), (x1, y2),
                   color=(*C["gold_dk"][:3], 220), thickness=1, parent=dl)
 

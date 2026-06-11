@@ -20,6 +20,7 @@ import dearpygui.dearpygui as dpg
 from theme import C, RANK_COLORS
 from core.animations import anim
 from ui import effects
+from ui import luxe
 from ui.fmt import commas, compact, clamp_text
 from data.reader import (
     live,
@@ -349,14 +350,18 @@ def draw(dl, w, h):
 
     frac = wrapped.open_frac
     bg_a = int(245 * frac)
-    # Backdrop
+    # Backdrop — V2: cinematic stage instead of a flat sheet. Deep navy with
+    # a warm gold floor-light, cool top-light, and a vignette.
     dpg.draw_rectangle((0, 0), (w, h),
                        fill=(*C["bg"][:3], bg_a),
                        color=(0, 0, 0, 0), parent=dl)
+    luxe.glow(dl, w * 0.5, h * 1.12, w * 0.55, C["gold"], int(34 * frac))
+    luxe.glow(dl, w * 0.5, -h * 0.25, w * 0.7, (40, 72, 118), int(60 * frac))
 
     # Localized ambient field
     effects.draw_ambient_motes(dl, 0, 0, w, h, accent=C["gold"],
                                 alpha=int(120 * frac), n=22, seed=23)
+    luxe.vignette(dl, 0, 0, w, h, int(110 * frac))
 
     if wrapped.pages:
         page = wrapped.pages[min(wrapped.page_idx, len(wrapped.pages) - 1)]

@@ -5,12 +5,13 @@ Clicking any row loads the full report in the right panel.
 """
 import math, time, random as _rnd
 import dearpygui.dearpygui as dpg
-from theme import C, RANK_COLORS
+from theme import C, RANK_COLORS, MEDAL_PARTICLE
 from core.animations import anim
 from data.reader import live, load_scout_sheet, cache_scout_sheet
 from data.tips import TIPS as _TIPS
 from ui.tierlist import _wheel_delta as _wheel_delta_shared
 from ui import effects
+from ui import luxe
 
 # ---------------------------------------------------------------------------
 # Layout constants
@@ -1252,6 +1253,8 @@ def draw_scout(dl, vw, vh, fonts=None):
     scout.tick()
     dpg.delete_item(dl, children_only=True)
     dpg.draw_rectangle((0,0),(vw,3000), fill=C["bg"], color=(0,0,0,0), parent=dl)
+    # V2 ambient — broad cool top-light + page vignette for depth.
+    luxe.glow(dl, vw * 0.5, -vh * 0.25, vw * 0.75, (40, 72, 118), 55)
     # Prevent native content_win scroll from misaligning click zones
     if dpg.does_item_exist("content_win"):
         dpg.set_y_scroll("content_win", 0)
@@ -1279,7 +1282,8 @@ def draw_scout(dl, vw, vh, fonts=None):
 
     dx = table_w + 1
     dpg.draw_line((dx, TOP_BAR_H),(dx, vh),
-                  color=C["rule_dark"], thickness=1, parent=dl)
+                  color=(*C["gold_dk"][:3], 110), thickness=1, parent=dl)
+    luxe.vignette(dl, 0, 0, vw, vh, 60)
 
 
 def _draw_idle(dl, vw, vh):
@@ -1330,20 +1334,34 @@ def _draw_loading(dl, vw, vh):
 
 def _draw_top_bar(dl, vw, header_w):
     """header_w = width of the table column — bars and buttons stay inside it."""
-    dpg.draw_rectangle((0,0),(header_w,TOP_BAR_H), fill=(*C["panel"][:3],220), color=(0,0,0,0), parent=dl)
-    dpg.draw_line((0,TOP_BAR_H-1),(header_w,TOP_BAR_H-1), color=C["rule_dark"], thickness=1, parent=dl)
+    # V2 broadcast header — gradient surface + gold bottom edge light.
+    dpg.draw_rectangle((0,0),(header_w,TOP_BAR_H), fill=C["navy_deep"],
+                       color=(0,0,0,0), parent=dl)
+    luxe.vfade(dl, 0, 0, header_w, TOP_BAR_H, (44, 74, 116), 46, solid="top")
+    luxe.vfade(dl, 0, TOP_BAR_H - 10, header_w, TOP_BAR_H - 1,
+               C["gold"], 26, solid="bottom")
+    dpg.draw_line((0,TOP_BAR_H-1),(header_w,TOP_BAR_H-1),
+                  color=(*C["gold_dk"][:3], 200), thickness=1, parent=dl)
+    luxe.glow(dl, PAD + 6, TOP_BAR_H // 2, 26, C["gold"], 55)
     _txt(dl, PAD, 12, "PLAYER SCOUTING", (*C["gold_lt"][:3],240), 24, "cinzel_24")
 
     labels = [("SCORE","score"),("W/R","wr"),("KDA","kda")]
     bx = header_w - 320   # anchor sort buttons to the right edge of the table column
     for lbl, col_key in labels:
         active = scout.sort_col == col_key
-        bc = C["gold"] if active else C["rule_dark"]
-        fc = (*C["gold_dk"][:3],200) if active else (0,0,0,0)
-        dpg.draw_rectangle((bx,10),(bx+90,TOP_BAR_H-10),
-                            fill=fc, color=(*bc[:3],200), rounding=4, parent=dl)
+        if active:
+            luxe.glow(dl, bx + 45, TOP_BAR_H // 2, 30, C["gold"], 34)
+            luxe.panel(dl, bx, 10, bx + 90, TOP_BAR_H - 10,
+                       (116, 90, 44, 235), corner=4,
+                       border=C["gold"], border_a=215, sheen=85)
+            tcol = C["gold_lt"]
+        else:
+            dpg.draw_rectangle((bx,10),(bx+90,TOP_BAR_H-10),
+                                fill=(*C["card"][:3], 180),
+                                color=(*C["gold"][:3], 70),
+                                rounding=4, parent=dl)
+            tcol = C["txt"]
         arr  = ("▲" if scout.sort_asc else "▼") if active else ""
-        tcol = C["gold_lt"] if active else C["txt"]
         _txt(dl, bx+8, 18, lbl+arr, (*tcol[:3],220), 17, "raj_18")
         bx += 100
 
@@ -1377,6 +1395,13 @@ def _draw_table(dl, tx, ty, tw, th, vw, vh):
 
     row_clip_top = ty + HEADER_H + 4
     row_clip_bot = ty + th
+
+    # V2 card framing — the table sits on a shadowed gradient panel.
+    luxe.shadow(dl, tx - 8, ty - 8, tx + tw + 8, ty + th,
+                alpha=85, spread=14, drop=6)
+    luxe.panel(dl, tx - 8, ty - 8, tx + tw + 8, ty + th,
+               (12, 26, 48, 242), corner=10,
+               border=C["gold_dk"], border_a=120, sheen=42)
 
     row_y = ty + HEADER_H + 4
 
@@ -1432,12 +1457,21 @@ def _draw_table(dl, tx, ty, tw, th, vw, vh):
             str(p.get("games",0)),
         ]
 
+        medal = MEDAL_PARTICLE.get(i + 1)
+        if medal:
+            luxe.glow(dl, tx + xo + 2, ry + ROW_H // 2, ROW_H * 0.6,
+                      medal, int(al * 0.22))
+            dpg.draw_rectangle((tx+xo, ry+3), (tx+xo+4, ry+ROW_H-3),
+                               fill=(*medal, al), color=(0, 0, 0, 0),
+                               rounding=2, parent=dl)
         for ci, (val, (cx, cw)) in enumerate(zip(vals, col_xs)):
             vx = tx + xo + cx + 8
             vy = ry + ROW_H//2 - 10
             if ci == 0:
-                _txt(dl, vx, vy, val, (*C["txt2"][:3],al), 20, "raj_20")
+                rank_c = medal if medal else C["txt2"]
+                _txt(dl, vx, vy, val, (*rank_c[:3],al), 20, "raj_20")
             elif ci == 1:
+                luxe.glow(dl, vx+5, ry+ROW_H//2, 12, bc, int(al * 0.30))
                 dpg.draw_circle((vx+5,ry+ROW_H//2),8, fill=(*bc[:3],al), color=(0,0,0,0), parent=dl)
                 _txt(dl, vx+20, vy, val.upper(), (*C["gold_lt"][:3],al), 22, "raj_24")
             elif ci == 2:
@@ -1451,15 +1485,17 @@ def _draw_table(dl, tx, ty, tw, th, vw, vh):
             else:
                 _txt(dl, vx, vy, val, (*C["txt2"][:3],al), 19, "raj_20")
 
-    # Column header drawn AFTER rows so it masks any rows that scrolled into its area
-    dpg.draw_rectangle((tx,ty),(tx+tw,ty+HEADER_H),
-                        fill=(*C["card"][:3],ha), color=(*C["rule_dark"][:3],ha), rounding=4, parent=dl)
+    # Column header drawn AFTER rows so it masks any rows that scrolled into
+    # its area — V2: gradient panel + fading gold rule.
+    luxe.panel(dl, tx, ty, tx + tw, ty + HEADER_H,
+               (24, 48, 82, min(255, ha)), corner=6,
+               border=C["gold_dk"], border_a=min(150, ha), sheen=46)
     for (lbl,_,sk),(cx,cw) in zip(COLS, col_xs):
         active = sk and scout.sort_col == sk
         col    = C["gold_lt"] if active else C["txt2"]
         _txt(dl, tx+cx+8, ty+HEADER_H//2-10, lbl, (*col[:3],ha), 19, "raj_sb_18")
-    dpg.draw_line((tx,ty+HEADER_H),(tx+tw,ty+HEADER_H),
-                  color=(*C["rule_dark"][:3],ha), thickness=1, parent=dl)
+    luxe.hfade(dl, tx + 6, ty + HEADER_H - 2, tx + tw - 6, ty + HEADER_H,
+               C["gold"], min(120, ha), solid="left")
 
     # Click detection — uses scroll-adjusted positions
     if dpg.is_mouse_button_clicked(0):

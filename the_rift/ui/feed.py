@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 import dearpygui.dearpygui as dpg
 from theme import C
 from ui import effects
+from ui import luxe
 from data.reader import live, load_activity
 
 _F = {}
@@ -397,13 +398,18 @@ def draw_feed(dl, vw, vh, fonts=None):
 
     dpg.delete_item(dl, children_only=True)
     dpg.draw_rectangle((0, 0), (vw, vh), fill=C["bg"], color=(0, 0, 0, 0), parent=dl)
+    luxe.glow(dl, vw * 0.5, -vh * 0.25, vw * 0.75, (40, 72, 118), 55)
 
-    # Top bar
+    # Top bar — V2 broadcast header.
     dpg.draw_rectangle((0, 0), (vw, TOP_BAR_H),
-                        fill=(*C["panel"][:3], 220), color=(0, 0, 0, 0), parent=dl)
+                        fill=C["navy_deep"], color=(0, 0, 0, 0), parent=dl)
+    luxe.vfade(dl, 0, 0, vw, TOP_BAR_H, (44, 74, 116), 46, solid="top")
+    luxe.vfade(dl, 0, TOP_BAR_H - 10, vw, TOP_BAR_H - 1,
+               C["gold"], 26, solid="bottom")
     dpg.draw_line((0, TOP_BAR_H - 1), (vw, TOP_BAR_H - 1),
-                  color=C["rule_dark"], thickness=1, parent=dl)
-    _txt(dl, PAD, 12, "ACTIVITY FEED", (*C["gold"][:3], 220), 23, "raj_24")
+                  color=(*C["gold_dk"][:3], 200), thickness=1, parent=dl)
+    luxe.glow(dl, PAD + 6, TOP_BAR_H // 2, 26, C["gold"], 55)
+    _txt(dl, PAD, 12, "ACTIVITY FEED", (*C["gold_lt"][:3], 235), 23, "raj_24")
 
     # Loading spinner (orbital)
     if _feed.loading:
@@ -433,10 +439,14 @@ def draw_feed(dl, vw, vh, fonts=None):
     bw, bh = 140, 34
     bx = vw - bw - PAD
     by = (TOP_BAR_H - bh) // 2
-    btn_fill = (*C["gold_dk"][:3], 200) if not _feed.loading else (*C["gold_dk"][:3], 120)
-    dpg.draw_rectangle((bx, by), (bx + bw, by + bh),
-                        fill=btn_fill,
-                        color=(*C["gold"][:3], 200), rounding=4, parent=dl)
+    if _feed.loading:
+        dpg.draw_rectangle((bx, by), (bx + bw, by + bh),
+                            fill=(*C["gold_dk"][:3], 120),
+                            color=(*C["gold"][:3], 120), rounding=4, parent=dl)
+    else:
+        luxe.glow(dl, bx + bw / 2, by + bh / 2, bh * 1.1, C["gold"], 32)
+        luxe.panel(dl, bx, by, bx + bw, by + bh, (116, 90, 44, 235),
+                   corner=4, border=C["gold"], border_a=210, sheen=90)
     _txt(dl, bx + 14, by + 8, "REFRESH", (*C["gold_lt"][:3], 240), 18, "raj_sb_18")
 
     # Phase 3 — filter chips (left of REFRESH).
@@ -451,11 +461,19 @@ def draw_feed(dl, vw, vh, fonts=None):
     for i, (lbl, val) in enumerate(chips):
         cx0 = chip_x0 + i * (chip_w + chip_gap)
         is_active = (_feed.filter_kind == val)
-        fill = (*C["gold_dk"][:3], 200) if is_active else (*C["card"][:3], 180)
-        bdr  = (*C["gold"][:3], 200)    if is_active else (*C["gold"][:3], 70)
-        lblc = (*C["gold_lt"][:3], 240) if is_active else (*C["txt2"][:3], 200)
-        dpg.draw_rectangle((cx0, chip_y), (cx0 + chip_w, chip_y + chip_h),
-                           fill=fill, color=bdr, rounding=3, parent=dl)
+        if is_active:
+            luxe.glow(dl, cx0 + chip_w / 2, chip_y + chip_h / 2,
+                      chip_h, C["gold"], 34)
+            luxe.panel(dl, cx0, chip_y, cx0 + chip_w, chip_y + chip_h,
+                       (116, 90, 44, 235), corner=3,
+                       border=C["gold"], border_a=215, sheen=80)
+            lblc = (*C["gold_lt"][:3], 250)
+        else:
+            dpg.draw_rectangle((cx0, chip_y), (cx0 + chip_w, chip_y + chip_h),
+                               fill=(*C["card"][:3], 180),
+                               color=(*C["gold"][:3], 70),
+                               rounding=3, parent=dl)
+            lblc = (*C["txt2"][:3], 200)
         text_off = max(2, (chip_w - len(lbl) * 8) // 2)
         _txt(dl, cx0 + text_off, chip_y + 6, lbl, lblc, 13, "raj_sb_14")
 
@@ -617,16 +635,13 @@ def _draw_event_card(ev, parent):
     is_fresh  = appear_at is not None and (time.monotonic() - appear_at) < 8.0
 
     w = _card_w[0] + PAD * 2
-    with dpg.drawlist(width=w, height=CARD_H, parent=parent):
-        # ── Background ───────────────────────────────────────────
+    with dpg.drawlist(width=w, height=CARD_H, parent=parent) as _cdl:
+        # ── Background — V2 gradient panel + kind-color edge wash ─
         bg_outline = (*C["gold"][:3], 220) if is_fresh else (*border_col[:3], 130)
-        dpg.draw_rectangle(
-            (PAD, 4), (w - PAD, CARD_H - 4),
-            fill=(*C["card"][:3], 230),
-            color=bg_outline,
-            rounding=6,
-            thickness=2 if is_fresh else 1,
-        )
+        luxe.panel(_cdl, PAD, 4, w - PAD, CARD_H - 4,
+                   (*C["card"][:3], 235), corner=6,
+                   border=bg_outline[:3], border_a=bg_outline[3],
+                   sheen=40)
         # ── Left accent strip ────────────────────────────────────
         accent_w = 5 if is_fresh else 3
         accent_c = (*C["gold"][:3], 240) if is_fresh else (*border_col[:3], 220)
@@ -634,6 +649,8 @@ def _draw_event_card(ev, parent):
             (PAD, 8), (PAD + accent_w, CARD_H - 8),
             fill=accent_c, color=(0, 0, 0, 0), rounding=2,
         )
+        luxe.hfade(_cdl, PAD + accent_w, 8, PAD + int(w * 0.14), CARD_H - 8,
+                   accent_c[:3], 24, solid="left")
 
         # ── Left-side kind chip (colored box with abbreviation) ──
         chip_x = PAD + 14
