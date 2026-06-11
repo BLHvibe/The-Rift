@@ -219,11 +219,15 @@ def _draw_titlebar(dl, w):
     luxe.vfade(dl, 0, h - 12, w, h - 1, C["gold"], 34, solid="bottom")
     dpg.draw_line((0,h-1),(w,h-1), color=(*C["gold_dk"][:3], 200), thickness=1, parent=dl)
 
+    luxe.flow_line(dl, 0, h - 3, w, color=C["gold"], alpha=60,
+                   h=2, speed=34)
+
     pulse = effects.breathing_alpha(255, period=4.2, amp=0.35)
     _, tw_, th_ = luxe.lit_title("THE RIFT", 24)
     luxe.glow(dl, 18 + tw_ / 2, h / 2, max(40, tw_ * 0.62),
               (212, 178, 118), int(pulse * 0.14))
-    luxe.draw_lit_title(dl, 18, (h - th_) // 2, "THE RIFT", 24)
+    luxe.draw_lit_title_animated(dl, 18, (h - th_) // 2, "THE RIFT", 24,
+                                 period=9.0, sweep_s=1.1)
 
     m  = 8
     cy = h // 2
@@ -693,13 +697,13 @@ def _draw_content(dl, w, h):
         dpg.draw_rectangle((0,0),(w,h), fill=C["bg"], color=(0,0,0,0), parent=dl)
 
 # ---------------------------------------------------------------------------
-# Tab-change transition — broadcast gold-line wipe (V2.1). A navy veil hides
-# the new tab and retreats left→right behind a gold sweep line, so the
-# incoming surface is revealed like an LCS rejoin. Scales with anim.intensity
-# (instant cut when motion is off).
+# Tab-change transition — hextech dissolve (spectacle pass). A navy veil
+# hides the incoming tab and breaks apart left→right into a honeycomb of
+# shrinking hexagons, each flashing gold as it dissolves. Scales with
+# anim.intensity (instant cut when motion is off).
 # ---------------------------------------------------------------------------
 _tab_xfade    = {"last": None, "t0": 0.0}
-_TAB_WIPE_MS  = 280
+_TAB_WIPE_MS  = 430
 
 def _draw_tab_transition(dl, w, h):
     cur = state.active_tab
@@ -713,41 +717,58 @@ def _draw_tab_transition(dl, w, h):
         _tab_xfade["t0"]   = time.monotonic()
     if anim.intensity <= 0.01:
         return
-    elapsed = (time.monotonic() - _tab_xfade["t0"]) * 1000.0
-    if elapsed >= _TAB_WIPE_MS:
-        return
-    p  = elapsed / _TAB_WIPE_MS
-    e  = 1.0 - (1.0 - p) ** 3          # ease-out cubic
-    lx = int(w * e)                    # sweep-line x position
+    _freeze = os.environ.get("RIFT_QA_FREEZE_WIPE", "")
+    if _freeze:
+        p = max(0.0, min(0.999, float(_freeze)))   # QA: hold mid-dissolve
+    else:
+        elapsed = (time.monotonic() - _tab_xfade["t0"]) * 1000.0
+        if elapsed >= _TAB_WIPE_MS:
+            return
+        p = elapsed / _TAB_WIPE_MS
+    e     = 1.0 - (1.0 - p) ** 2.2
+    band  = 0.34                       # fraction of width mid-dissolve
+    front = e * (1.0 + band)           # dissolve frontier, 0 → 1+band
 
-    # Navy veil ahead of the line — hides the new tab until the line passes.
-    if lx < w:
-        veil_a = int(235 * (1.0 - p * 0.25))
-        dpg.draw_rectangle((lx, 0), (w, h),
-                           fill=(*C["bg"][:3], veil_a), color=(0, 0, 0, 0),
+    navy = C["navy_deep"][:3]
+    # Solid veil for the not-yet-dissolving region (right of the frontier).
+    if front < 1.0:
+        dpg.draw_rectangle((int(front * w), 0), (w, h),
+                           fill=(*navy, 244), color=(0, 0, 0, 0),
                            parent=dl)
 
-    # Fading gold wake behind the sweep line.
-    trail_w = max(24, int(w * 0.04))
-    for i in range(4):
-        seg_a = int(60 * (1 - i / 4) * (1.0 - p))
-        if seg_a <= 0:
+    # Honeycomb band — hexes between (front-band, front), each shrinking and
+    # fading by its own local progress, flashing gold near the leading edge.
+    HEX = max(56, int(w / 28))
+    hh  = int(HEX * 0.866)
+    step_x = int(HEX * 0.75)
+    k0 = max(0, int((front - band) * w) // step_x - 1)
+    k1 = min(int(w // step_x) + 1, int(front * w) // step_x + 1)
+    for k in range(k0, k1 + 1):
+        cx = k * step_x
+        lp = (front - cx / w) / band
+        if lp <= 0.0 or lp >= 1.0:
             continue
-        x0 = max(0, lx - trail_w * (i + 1) // 2)
-        x1 = max(0, lx - trail_w * i // 2)
-        if x1 <= x0:
+        s  = 1.0 - lp * lp             # shrink accelerates
+        sz = HEX * s
+        if sz < 3:
             continue
-        dpg.draw_rectangle((x0, 0), (x1, h),
-                           fill=(*C["gold"][:3], seg_a), color=(0, 0, 0, 0),
-                           parent=dl)
-
-    # Sweep line — bright gold core with a light leading edge.
-    dpg.draw_rectangle((max(0, lx - 2), 0), (min(w, lx + 2), h),
-                       fill=(*C["gold"][:3], 230), color=(0, 0, 0, 0),
-                       parent=dl)
-    dpg.draw_rectangle((min(w, lx + 2), 0), (min(w, lx + 3), h),
-                       fill=(*C["gold_lt"][:3], 200), color=(0, 0, 0, 0),
-                       parent=dl)
+        a  = int(244 * (1.0 - lp))
+        ga = int(135 * math.sin(math.pi * min(1.0, lp * 2.2)))
+        y_off = (hh // 2) if (k % 2) else 0
+        r = 0
+        while True:
+            cy = r * hh + y_off
+            if cy - hh > h:
+                break
+            x1, y1 = cx - sz / 2, cy - sz * 0.433
+            x2, y2 = cx + sz / 2, cy + sz * 0.433
+            dpg.draw_image("lux_hex", (x1, y1), (x2, y2),
+                           color=(*navy, a), parent=dl)
+            if ga > 6:
+                dpg.draw_image("lux_hex", (x1 - 2, y1 - 2), (x2 + 2, y2 + 2),
+                               color=(*C["gold"][:3], int(ga * (1.0 - lp))),
+                               parent=dl)
+            r += 1
 
 # ---------------------------------------------------------------------------
 # Main
@@ -760,6 +781,10 @@ def main():
     dpg.create_context()
     _load_all_textures()
     luxe.ensure_textures()   # V2 cinematic sprite kit (gradients/glows/shadows)
+    # Pre-warm the titlebar wordmark + its light-sweep frames so the first
+    # sweep never causes a mid-frame texture-bake hitch.
+    luxe.lit_title("THE RIFT", 24)
+    luxe.lit_title_frames("THE RIFT", 24)
     setup_theme()
     _FONTS = setup_fonts()
     # Phase 5 — bring the pygame.mixer cue wrapper up and gate it on the
@@ -1288,8 +1313,8 @@ def main():
                 else:
                     _qa["idx"] = 0
                     _qa_apply(_qa["tabs"][0])
-                    _qa["due"] = _now + max(
-                        3.0, float(os.environ.get("RIFT_QA_WAIT", 0) or 0))
+                    _wait = float(os.environ.get("RIFT_QA_WAIT", 0) or 0)
+                    _qa["due"] = _now + (max(0.2, _wait) if _wait else 3.0)
             elif _now >= _qa["due"]:
                 _tab = _qa["tabs"][_qa["idx"]]
                 if _tab == "__done__":
@@ -1304,14 +1329,20 @@ def main():
                     except Exception as _e:
                         print(f"[qa] capture failed for {_tab}: {_e}")
                     _qa["idx"] += 1
+                    # Re-stamp AFTER the capture — output_frame_buffer blocks
+                    # for hundreds of ms at high res, which silently consumed
+                    # sub-second waits and made every capture land one frame
+                    # after the switch.
+                    _fresh = time.monotonic()
                     if _qa["idx"] >= len(_qa["tabs"]):
                         # Grace second so the async PNG write flushes.
                         _qa["tabs"].append("__done__")
-                        _qa["due"] = _now + 1.0
+                        _qa["due"] = _fresh + 1.0
                     else:
                         _qa_apply(_qa["tabs"][_qa["idx"]])
-                        _qa["due"] = _now + max(
-                            2.4, float(os.environ.get("RIFT_QA_WAIT", 0) or 0))
+                        _wait = float(os.environ.get("RIFT_QA_WAIT", 0) or 0)
+                        _qa["due"] = _fresh + (max(0.2, _wait) if _wait
+                                               else 2.4)
 
     # Clean shutdown — release pygame.mixer first so its callback thread
     # isn't running when the interpreter starts tearing down. Wrap

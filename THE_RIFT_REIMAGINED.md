@@ -68,6 +68,25 @@ All grounded in data the backend already has; none assume seasons:
   language; optional Discord webhook auto-post.
 - **Ctrl+K command palette** — jump to any player/tab/action.
 
+## Spectacle pass (2026-06-10, "ultracode" session)
+
+User direction: features are fleshed out — make it LOOK INSANE. DPG
+verdict given before building: not at its ceiling yet (sprite compositing
+headroom), but hard limits exist (no real-time blur/glass, no shader
+post-processing, no video). If those are ever wanted → front-end rewrite.
+
+Shipped: hextech dissolve tab transition (honeycomb of shrinking navy
+hexes with a gold-flash front, replaces the line wipe; `RIFT_QA_FREEZE_WIPE`
+env freezes p for QA); rising ember fields (Home + Rankings podium); mouse
+parallax on the Home hero (splash leans toward cursor, wordmark
+counter-drifts, light glint follows the mouse); flowing energy lines
+(titlebar + hero edge, manually tiled lux_flow strip); periodic light
+sweep across Home; titlebar wordmark catches the light every ~9 s
+(pre-baked specular frames, pre-warmed at startup — lazily baking at hero
+size caused a 1 s hitch, so the hero title stays static). All
+intensity-gated. QA harness: due re-stamped after blocking PNG writes
+(sub-second waits were firing instantly).
+
 ## Sequencing
 
 | Phase | Scope |

@@ -541,6 +541,8 @@ def draw_rankings(dl, vw, vh, fonts=None):
     luxe.glow(dl, vw * 0.5, -vh * 0.25, vw * 0.75, (40, 72, 118), 55)
     luxe.glow(dl, vw * 0.5, _L.get("hero_top", TOP_PAD) + 60, vw * 0.34,
               C["gold"], 16)
+    # Arena embers rising behind the podium.
+    luxe.draw_embers(dl, 0, 0, vw, int(vh * 0.55), n=18, seed=5, alpha=110)
 
     phase = rankings.phase
 

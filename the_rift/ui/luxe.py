@@ -24,12 +24,17 @@ are stateless and safe to call every frame.
 """
 from __future__ import annotations
 
+import math
 import os
+import random
 import sys
+import time
 
 import dearpygui.dearpygui as dpg
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
+
+from core.animations import anim
 
 _REG    = "luxe_tex_registry"
 _built  = False
@@ -119,6 +124,28 @@ def ensure_textures():
     vg = np.zeros((V, V, 4), np.uint8)
     vg[..., 3] = (a * 255).astype(np.uint8)
     _register("lux_vign", Image.fromarray(vg))
+
+    # ── lux_hex — flat-top hexagon, white, soft AA edge (dissolve sprite) ──
+    HW, HH = 96, 84
+    hx = Image.new("L", (HW, HH), 0)
+    ImageDraw.Draw(hx).polygon(
+        [(HW * 0.25, 0), (HW * 0.75, 0), (HW - 1, HH * 0.5),
+         (HW * 0.75, HH - 1), (HW * 0.25, HH - 1), (0, HH * 0.5)],
+        fill=255)
+    hx = hx.filter(ImageFilter.GaussianBlur(1.2))
+    hexs = np.zeros((HH, HW, 4), np.uint8)
+    hexs[..., :3] = 255
+    hexs[..., 3] = np.asarray(hx, np.uint8)
+    _register("lux_hex", Image.fromarray(hexs))
+
+    # ── lux_flow — tileable pulse strip for flowing energy lines ───────────
+    FW = 256
+    xs = np.arange(FW, dtype=np.float32)
+    pulse = (np.sin(xs * 2 * np.pi / 64.0) * 0.5 + 0.5) ** 2.2
+    fl = np.zeros((8, FW, 4), np.uint8)
+    fl[..., :3] = 255
+    fl[..., 3] = np.broadcast_to((40 + pulse * 215).astype(np.uint8), (8, FW))
+    _register("lux_flow", Image.fromarray(fl))
 
     _built = True
 
@@ -223,6 +250,79 @@ def hairline(dl, x1, y, x2, alpha=200, glow_h=10, glow_a=70, color=GOLD):
 
 
 # ---------------------------------------------------------------------------
+# Motion primitives — all intensity-gated, all stateless (time-driven)
+# ---------------------------------------------------------------------------
+
+def draw_embers(dl, x, y, w, h, n=24, seed=7, color=GOLD, alpha=150):
+    """Rising gold embers — slow, sparse, fading in/out over each cycle.
+    Deterministic per-frame (seeded), so no per-particle state is kept."""
+    inten = anim.intensity
+    if inten <= 0.01 or w <= 0 or h <= 0:
+        return
+    rnd = random.Random(seed)
+    t = time.monotonic()
+    for _ in range(n):
+        period = 9.0 + rnd.random() * 9.0
+        phase  = rnd.random()
+        bx     = x + rnd.random() * w
+        amp    = 12 + rnd.random() * 34
+        size   = 1.4 + rnd.random() * 2.4
+        bright = 0.35 + 0.65 * rnd.random()
+        p  = ((t / period) + phase) % 1.0
+        ey = y + h - p * (h + 60)
+        ex = bx + math.sin(t * 0.55 + phase * 6.283) * amp
+        fade = math.sin(min(1.0, max(0.0, p)) * math.pi)
+        a = alpha * fade * bright * inten
+        if a < 4:
+            continue
+        glow(dl, ex, ey, size * 6.5, color, a * 0.45)
+        dpg.draw_circle((ex, ey), size, fill=(*color[:3], int(a)),
+                        color=(0, 0, 0, 0), parent=dl)
+
+
+def flow_line(dl, x1, y, x2, color=GOLD, alpha=150, h=2, speed=46, tile=160):
+    """Flowing energy line — golden pulses streaming along a rule. Tiles the
+    lux_flow strip manually so no sampler wrap mode is assumed."""
+    if x2 <= x1:
+        return
+    if anim.intensity <= 0.01:
+        dpg.draw_line((x1, y + h / 2), (x2, y + h / 2),
+                      color=(*color[:3], int(alpha * 0.7)), thickness=h,
+                      parent=dl)
+        return
+    off = (time.monotonic() * speed) % tile
+    sx = x1 - off
+    while sx < x2:
+        ex = sx + tile
+        cs, ce = max(sx, x1), min(ex, x2)
+        if ce > cs:
+            ua = (cs - sx) / tile
+            ub = (ce - sx) / tile
+            dpg.draw_image("lux_flow", (cs, y), (ce, y + h),
+                           uv_min=(ua, 0), uv_max=(ub, 1),
+                           color=(*color[:3], int(alpha)), parent=dl)
+        sx = ex
+
+
+def sheen_band(dl, x, y, w, h, period=16.0, alpha=22, width_frac=0.20,
+               color=GOLD_HOT, phase=0.0):
+    """Occasional slow diagonal-feel light sweep across a region. Sweeps for
+    ~a third of each period, idle otherwise."""
+    inten = anim.intensity
+    if inten <= 0.01 or w <= 0:
+        return
+    t = ((time.monotonic() / period) + phase) % 1.0
+    if t > 0.34:
+        return
+    p  = t / 0.34
+    bw = w * width_frac
+    cx = x - bw + (w + 2 * bw) * p
+    a  = alpha * inten * math.sin(p * math.pi)
+    hfade(dl, cx, y, cx + bw / 2, y + h, color, a, solid="right")
+    hfade(dl, cx + bw / 2, y, cx + bw, y + h, color, a, solid="left")
+
+
+# ---------------------------------------------------------------------------
 # Lit typography — pre-rendered gradient + glow text for ceremonial titles
 # ---------------------------------------------------------------------------
 
@@ -291,5 +391,79 @@ def draw_lit_title(dl, x, y, text, px, style="gold", alpha=255):
                       parent=dl)
         return (len(text) * px // 2, px)
     dpg.draw_image(tag, (x, y), (x + w, y + h),
+                   color=(255, 255, 255, int(alpha)), parent=dl)
+    return (w, h)
+
+
+def lit_title_frames(text, px, style="gold", frames=14):
+    """Pre-render a specular light-sweep across a lit title as N frames.
+    Returns (list_of_tags, w, h); empty list on failure."""
+    key = (text, int(px), style, "seq")
+    if key in _titles:
+        return _titles[key]
+    try:
+        font = ImageFont.truetype(_font_path(_STYLE_FONTS.get(style,
+                                  _STYLE_FONTS["gold"])), int(px))
+        probe = ImageDraw.Draw(Image.new("L", (4, 4)))
+        bbox = probe.textbbox((0, 0), text, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        pad = max(14, int(px) // 3)
+        W, H = tw + pad * 2, th + pad * 2
+
+        mask = Image.new("L", (W, H), 0)
+        ImageDraw.Draw(mask).text((pad - bbox[0], pad - bbox[1]),
+                                  text, 255, font=font)
+        m = np.asarray(mask, np.float32) / 255.0
+
+        top = np.array([248, 232, 184], np.float32)
+        mid = np.array([214, 180, 118], np.float32)
+        bot = np.array([148, 110, 56],  np.float32)
+        rows = np.linspace(0.0, 1.0, H, dtype=np.float32).reshape(H, 1, 1)
+        grad = np.where(rows < 0.55,
+                        top + (mid - top) * (rows / 0.55),
+                        mid + (bot - mid) * ((rows - 0.55) / 0.45))
+        rgb = np.broadcast_to(grad, (H, W, 3)).astype(np.float32)
+
+        glow_mask = mask.filter(ImageFilter.GaussianBlur(max(2, px / 7)))
+        glow_img = Image.new("RGBA", (W, H), (232, 198, 132, 0))
+        glow_img.putalpha(glow_mask.point(lambda v: int(v * 0.55)))
+
+        sigma = max(6.0, W / 9.0)
+        xs = np.arange(W, dtype=np.float32)
+        tags = []
+        for i in range(frames):
+            pos = -2 * sigma + (W + 4 * sigma) * (i / max(1, frames - 1))
+            band = np.exp(-((xs - pos) ** 2) / (2 * sigma * sigma))
+            out_rgb = rgb + (255.0 - rgb) * band[None, :, None] * 0.85
+            out = np.zeros((H, W, 4), np.uint8)
+            out[..., :3] = np.clip(out_rgb, 0, 255).astype(np.uint8)
+            out[..., 3]  = (m * 255).astype(np.uint8)
+            fimg = Image.alpha_composite(
+                Image.new("RGBA", (W, H), (0, 0, 0, 0)), glow_img)
+            fimg = Image.alpha_composite(fimg, Image.fromarray(out))
+            tag = f"lux_titleseq_{abs(hash(key))}_{i}"
+            _register(tag, fimg)
+            tags.append(tag)
+        _titles[key] = (tags, W, H)
+    except Exception as e:                               # pragma: no cover
+        print(f"[luxe] lit_title_frames failed for {text!r}: {e}")
+        _titles[key] = ([], 0, 0)
+    return _titles[key]
+
+
+def draw_lit_title_animated(dl, x, y, text, px, style="gold", alpha=255,
+                            period=7.0, sweep_s=0.9):
+    """Lit title that periodically catches the light — a specular band sweeps
+    across the gold every `period` seconds. Static when motion is off."""
+    if anim.intensity <= 0.01:
+        return draw_lit_title(dl, x, y, text, px, style, alpha)
+    t = time.monotonic() % period
+    if t >= sweep_s:
+        return draw_lit_title(dl, x, y, text, px, style, alpha)
+    tags, w, h = lit_title_frames(text, px, style)
+    if not tags:
+        return draw_lit_title(dl, x, y, text, px, style, alpha)
+    idx = min(len(tags) - 1, int(t / sweep_s * len(tags)))
+    dpg.draw_image(tags[idx], (x, y), (x + w, y + h),
                    color=(255, 255, 255, int(alpha)), parent=dl)
     return (w, h)

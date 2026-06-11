@@ -292,20 +292,34 @@ def _draw_hero(dl, x, y, w, h):
     a lit gold wordmark, and glass KPI chips. The anchor of the front page."""
     t = time.monotonic()
 
-    # ── Backdrop: cover-cropped splash with a near-imperceptible drift ─────
+    # ── Cursor state — drives parallax + the hero light glint ─────────────
+    drift = max(0.0, min(1.0, anim.intensity))
+    try:
+        _m  = dpg.get_mouse_pos(local=False)
+        _vp = dpg.get_viewport_pos()
+        mxc = _m[0] - _vp[0] - 68
+        myc = _m[1] - _vp[1] - 52
+    except Exception:
+        mxc, myc = x + w / 2, y + h / 2
+    nx = max(-0.5, min(0.5, (mxc - x) / max(1.0, float(w)) - 0.5))
+    ny = max(-0.5, min(0.5, (myc - y) / max(1.0, float(h)) - 0.5))
+    par_x = anim.smooth("hero_par_x", nx * drift, rate=0.06)
+    par_y = anim.smooth("hero_par_y", ny * drift, rate=0.06)
+
+    # ── Backdrop: cover-cropped splash, slow drift + mouse parallax ───────
     champ = _hero_champion()
     tex = splash_art.get_texture(champ) if champ else None
     dpg.draw_rectangle((x, y), (x + w, y + h),
                        fill=C["navy_deep"], color=(0, 0, 0, 0), parent=dl)
     if tex and dpg.does_item_exist(tex):
-        drift  = max(0.0, min(1.0, anim.intensity))
         SPLASH_AR = 1215.0 / 717.0
         aspect = max(1.0, w / max(1.0, float(h)))
         uw = 1.0 - 0.06 * (0.5 + 0.5 * math.sin(t * 2 * math.pi / 53.0)) * drift
         vh = min(1.0, uw * SPLASH_AR / aspect)
         u0 = (1.0 - uw) * (0.5 + 0.5 * math.sin(t * 2 * math.pi / 67.0) * drift)
         v0 = 0.06 + 0.06 * drift * (0.5 + 0.5 * math.sin(t * 2 * math.pi / 59.0))
-        v0 = max(0.0, min(1.0 - vh, v0))
+        u0 = max(0.0, min(1.0 - uw, u0 + par_x * 0.020))
+        v0 = max(0.0, min(1.0 - vh, v0 + par_y * 0.014))
         dpg.draw_image(tex, (x, y), (x + w, y + h),
                        uv_min=(u0, v0), uv_max=(u0 + uw, v0 + vh),
                        parent=dl)
@@ -317,6 +331,10 @@ def _draw_hero(dl, x, y, w, h):
         luxe.glow(dl, x + int(w * 0.86), y + int(h * 0.30),
                   int(h * 0.95), C["rift_purple"], 30)
 
+    # ── Hero light glint — a soft lamp follows the cursor over the art ────
+    if drift > 0.01 and x <= mxc <= x + w and y <= myc <= y + h:
+        luxe.glow(dl, mxc, myc, h * 0.85, (205, 195, 165), int(16 * drift))
+
     # ── Scrims — bottom-heavy navy so type sits in clean air ──────────────
     luxe.vfade(dl, x, y + int(h * 0.40), x + w, y + h, C["bg"], 235,
                solid="bottom")
@@ -325,17 +343,25 @@ def _draw_hero(dl, x, y, w, h):
     luxe.vfade(dl, x, y, x + w, y + int(h * 0.30), C["bg"], 110,
                solid="top")
 
-    # ── Wordmark block (lower-left) ────────────────────────────────────────
+    # Embers drifting up through the hero art.
+    luxe.draw_embers(dl, x, y + int(h * 0.25), w, int(h * 0.75),
+                     n=16, seed=31, alpha=120)
+
+    # ── Wordmark block (lower-left) — counter-drifts against the parallax ─
     today = datetime.now().strftime("%A · %B %d").upper()
     title_px = max(38, min(72, int(h * 0.24)))
     _, tw_, th_ = luxe.lit_title("THE RIFT", title_px)
     ty = y + h - th_ - 34
-    dpg.draw_text((x + 30, ty - 20), today,
+    tx_ = x + 26 - int(par_x * 30)
+    ty_off = -int(par_y * 10)
+    dpg.draw_text((tx_ + 4, ty - 20 + ty_off), today,
                   color=(*C["gold"][:3], 215), size=SZ_LABEL, parent=dl)
-    luxe.glow(dl, x + 26 + tw_ / 2, ty + th_ / 2, tw_ * 0.66,
+    luxe.glow(dl, tx_ + tw_ / 2, ty + th_ / 2 + ty_off, tw_ * 0.66,
               (212, 178, 118),
               int(effects.breathing_alpha(40, period=5.0, amp=0.5)))
-    luxe.draw_lit_title(dl, x + 26, ty, "THE RIFT", title_px)
+    # Static lit title here — the per-px sweep frames are too heavy to bake
+    # lazily at hero size; the breathing glow + parallax keep it alive.
+    luxe.draw_lit_title(dl, tx_, ty + ty_off, "THE RIFT", title_px)
 
     stats = _stats_cache["data"] or {}
     matches = stats.get("matches") if isinstance(stats, dict) else None
@@ -382,8 +408,10 @@ def _draw_hero(dl, x, y, w, h):
                     fill=(*dot_col[:3], int(190 + pulse * 65)),
                     color=(0, 0, 0, 0), parent=dl)
 
-    # ── Bottom edge light — the broadcast hairline under the hero ─────────
-    luxe.hairline(dl, x, y + h - 1, x + w, alpha=185, glow_h=12, glow_a=55)
+    # ── Bottom edge light — flowing energy line under the hero ────────────
+    luxe.hairline(dl, x, y + h - 1, x + w, alpha=150, glow_h=12, glow_a=45)
+    luxe.flow_line(dl, x, y + h - 3, x + w, color=C["gold"], alpha=95,
+                   h=3, speed=52)
 
 
 # ---------------------------------------------------------------------------
@@ -1623,6 +1651,9 @@ def draw_home(dl, w, h, fonts=None):
                                 accent=C["gold_lt"], alpha=35, n=8, seed=53)
     effects.draw_drift_field(dl, 0, 0, w, h, alpha=50,
                               accent=C["gold"], n_dots=14, seed=17)
+    # Rising embers — the page breathes even at rest.
+    luxe.draw_embers(dl, 0, int(h * 0.35), w, int(h * 0.65),
+                     n=22, seed=13, alpha=105)
 
     # ── Layout ────────────────────────────────────────────────────────────
     # Cinematic hero scales with the window (~28% of height); the remaining
@@ -1663,7 +1694,8 @@ def draw_home(dl, w, h, fonts=None):
     # 4) Footer
     _draw_footer(dl, x0, cy, width)
 
-    # 5) Cinematic vignette over everything (under overlays/toasts)
+    # 5) Periodic light sweep + cinematic vignette (under overlays/toasts)
+    luxe.sheen_band(dl, 0, 0, w, h, period=19.0, alpha=15)
     luxe.vignette(dl, 0, 0, w, h, 70)
 
     # ── Click dispatch ───────────────────────────────────────────────────
