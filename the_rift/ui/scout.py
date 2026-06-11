@@ -8,6 +8,7 @@ import dearpygui.dearpygui as dpg
 from theme import C, RANK_COLORS, MEDAL_PARTICLE
 from core.animations import anim
 from data.reader import live, load_scout_sheet, cache_scout_sheet
+from data import splash_art
 from data.tips import TIPS as _TIPS
 from ui.tierlist import _wheel_delta as _wheel_delta_shared
 from ui import effects
@@ -452,74 +453,159 @@ def _rw_player_tags(r):
     dpg.add_separator()
 
 
-def _rw_header(r):
-    """Broadcast-style scout-report header: large avatar + name, tier ribbon,
-    and a row of headline KPI chips (Score, WR, KDA, Games) so the most-asked
-    questions about a player are answered before scrolling."""
-    from ui.inhouse import _get_avatar_tex, _flush_pending
-    _flush_pending()
+_CARD_DL = "scout_card_dl"
+_CARD_H  = 224
 
-    dpg.add_spacer(height=10)
-    with dpg.group(horizontal=True):
-        dpg.add_spacer(width=14)
 
-        tex = _get_avatar_tex(r["player"])
-        if tex:
-            dpg.add_image(tex, width=80, height=80)
-            dpg.add_spacer(width=16)
+def _signature_champ(r):
+    """Best champion to back the card with — top_champs first, then pools."""
+    champs = r.get("top_champs") or []
+    if isinstance(champs, str):
+        champs = [c.strip() for c in champs.split(",") if c.strip()]
+    if not champs:
+        pool = r.get("champ_pool_full") or r.get("champ_pool") or []
+        champs = [(c.get("champion") if isinstance(c, dict) else c)
+                  for c in pool]
+    for c in champs:
+        name = c.get("champion") if isinstance(c, dict) else c
+        if name:
+            return str(name)
+    return None
 
-        with dpg.group():
-            t = dpg.add_text(r["player"].upper(), color=C["gold_lt"][:3])
-            if "raj_36" in _F: dpg.bind_item_font(t, _F["raj_36"])
-            with dpg.group(horizontal=True):
-                bc = RANK_COLORS.get(r["tier"], RANK_COLORS["Unranked"])
-                t2 = dpg.add_text(r["tier"].upper(), color=bc[:3])
-                if "raj_sb_22" in _F: dpg.bind_item_font(t2, _F["raj_sb_22"])
-                elif "raj_sb_18" in _F: dpg.bind_item_font(t2, _F["raj_sb_18"])
-                dpg.add_spacer(width=14)
-                rl = r.get("primary_role")
-                if rl:
-                    rt = dpg.add_text(f"·  {rl.upper()} MAIN",
-                                       color=(*C["txt2"][:3], 220))
-                    if "raj_sb_18" in _F: dpg.bind_item_font(rt, _F["raj_sb_18"])
-                    dpg.add_spacer(width=14)
-                days = r.get("scouted_days_ago", None)
-                if days is not None:
-                    ac = (79,168,130) if days<=2 else (200,168,106) if days<=6 else (184,69,53)
-                    ta = dpg.add_text(f"Scouted {days}d ago", color=ac)
-                else:
-                    ta = dpg.add_text("Live data", color=(79,168,130))
-                if "raj_r_16" in _F: dpg.bind_item_font(ta, _F["raj_r_16"])
 
-    # ── Headline KPI chips ───────────────────────────────────────────────
-    dpg.add_spacer(height=12)
-    wr_f = _safe_float(r.get("wr_raw"))
-    kda_f = _safe_float(r.get("kda_raw"))
+def _paint_scout_card(r):
+    """Repaint the animated player-card drawlist — called every frame from
+    draw_scout so the splash drifts, embers rise, and glows breathe."""
+    if r is None or not dpg.does_item_exist(_CARD_DL):
+        return
+    dl = _CARD_DL
+    w  = dpg.get_item_width(dl) or 600
+    h  = dpg.get_item_height(dl) or _CARD_H
+    dpg.delete_item(dl, children_only=True)
+    t = time.monotonic()
+
+    # ── Signature-champ splash, cover-cropped with slow drift ─────────────
+    champ = _signature_champ(r)
+    tex = splash_art.get_texture(champ) if champ else None
+    dpg.draw_rectangle((0, 0), (w, h), fill=C["navy_deep"],
+                       color=(0, 0, 0, 0), parent=dl)
+    if tex and dpg.does_item_exist(tex):
+        drift = max(0.0, min(1.0, anim.intensity))
+        SPLASH_AR = 1215.0 / 717.0
+        aspect = max(1.0, w / float(h))
+        uw  = 1.0 - 0.05 * (0.5 + 0.5 * math.sin(t * 2 * math.pi / 47.0)) * drift
+        vh_ = min(1.0, uw * SPLASH_AR / aspect)
+        u0  = (1.0 - uw) * 0.5
+        v0  = max(0.0, min(1.0 - vh_,
+                  0.08 + 0.05 * drift * (0.5 + 0.5 * math.sin(t * 2 * math.pi / 61.0))))
+        dpg.draw_image(tex, (0, 0), (w, h), uv_min=(u0, v0),
+                       uv_max=(u0 + uw, v0 + vh_), parent=dl)
+    else:
+        luxe.vfade(dl, 0, 0, w, h, (26, 52, 92), 255, solid="top")
+        luxe.glow(dl, w * 0.22, h * 0.7, h * 1.1, C["gold"], 30)
+
+    # Scrims + embers
+    luxe.vfade(dl, 0, int(h * 0.42), w, h, C["bg"], 232, solid="bottom")
+    luxe.hfade(dl, 0, 0, int(w * 0.55), h, C["bg"], 175, solid="left")
+    luxe.vfade(dl, 0, 0, w, int(h * 0.25), C["bg"], 95, solid="top")
+    luxe.draw_embers(dl, 0, int(h * 0.2), w, int(h * 0.8), n=10, seed=29,
+                     alpha=110)
+
+    # ── Avatar with tier-ring glow + lit name ──────────────────────────────
+    tier = r.get("tier", "Unranked")
+    tcol = RANK_COLORS.get(tier, RANK_COLORS["Unranked"])
+    av = None
+    try:
+        from ui.inhouse import _get_avatar_tex
+        av = _get_avatar_tex(r["player"])
+    except Exception:
+        pass
+    ax, ay, asz = 22, h - 96, 72
+    if av:
+        luxe.glow(dl, ax + asz / 2, ay + asz / 2, asz * 0.85, tcol, 60)
+        dpg.draw_image(av, (ax, ay), (ax + asz, ay + asz), parent=dl)
+        nx = ax + asz + 16
+    else:
+        nx = 26
+
+    name = str(r.get("player", "?")).upper()
+    _, tw_, th_ = luxe.lit_title(name, 38, style="gold_raj")
+    ny = h - 92
+    luxe.glow(dl, nx + tw_ / 2, ny + th_ / 2, tw_ * 0.6, (212, 178, 118),
+              int(effects.breathing_alpha(34, period=5.0, amp=0.5)))
+    luxe.draw_lit_title(dl, nx, ny, name, 38, style="gold_raj")
+
+    sub_parts = [tier.upper()]
+    if r.get("primary_role"):
+        sub_parts.append(f"{str(r['primary_role']).upper()} MAIN")
+    days = r.get("scouted_days_ago")
+    sub_parts.append("LIVE DATA" if days is None else f"SCOUTED {days}D AGO")
+    sub = "  ·  ".join(sub_parts)
+    luxe.glow(dl, nx + 5, ny + th_ + 13, 9, tcol, 80)
+    dpg.draw_circle((nx + 5, ny + th_ + 13), 3.2, fill=(*tcol[:3], 240),
+                    color=(0, 0, 0, 0), parent=dl)
+    _txt(dl, nx + 16, ny + th_ + 4, sub, (*C["txt2"][:3], 230), 15,
+         "raj_sb_14")
+
+    # ── Headline KPI glass chips (upper-right) ─────────────────────────────
+    wr_f    = _safe_float(r.get("wr_raw"))
+    kda_f   = _safe_float(r.get("kda_raw"))
     games_n = _safe_int(r.get("games_raw"))
     score_n = _safe_int(r.get("score"))
     chips = [
-        ("SCORE",   f"{score_n:,}",     C["gold_lt"][:3]),
-        ("WIN %",   f"{wr_f:.0f}%",
-                    (130, 210, 130) if wr_f >= 52 else
-                    (220, 130, 130) if wr_f < 48 else C["txt"][:3]),
-        ("KDA",     f"{kda_f:.2f}",
-                    (130, 210, 130) if kda_f >= 3.5 else
-                    (220, 130, 130) if kda_f < 1.8 else C["txt"][:3]),
-        ("GAMES",   f"{games_n:,}",    C["txt"][:3]),
+        ("SCORE", f"{score_n:,}", C["gold_lt"]),
+        ("WIN %", f"{wr_f:.0f}%",
+         (130, 210, 130) if wr_f >= 52 else
+         (220, 130, 130) if wr_f < 48 else C["txt"]),
+        ("KDA",   f"{kda_f:.2f}",
+         (130, 210, 130) if kda_f >= 3.5 else
+         (220, 130, 130) if kda_f < 1.8 else C["txt"]),
+        ("GAMES", f"{games_n:,}", C["txt"]),
     ]
+    cw_, ch_, gap = 112, 58, 10
+    total = len(chips) * cw_ + (len(chips) - 1) * gap
+    cx = w - 18 - total
+    cy = 16
+    for label, val, col in chips:
+        luxe.shadow(dl, cx, cy, cx + cw_, cy + ch_, alpha=70, spread=10,
+                    drop=4)
+        luxe.panel(dl, cx, cy, cx + cw_, cy + ch_, (12, 26, 48, 225),
+                   corner=7, border=C["gold_dk"], border_a=160, sheen=60)
+        vw_ = len(val) * (24 * 4 // 10)
+        luxe.glow(dl, cx + cw_ / 2, cy + 22, 26, col, 30)
+        _txt(dl, cx + (cw_ - vw_) // 2, cy + 6, val, (*col[:3], 245), 24,
+             "raj_24")
+        lw_ = len(label) * (12 * 4 // 10)
+        _txt(dl, cx + (cw_ - lw_) // 2, cy + ch_ - 18, label,
+             (*C["txt_dim"][:3], 220), 12, "raj_sb_12")
+        cx += cw_ + gap
+
+    # Frame, vignette, flowing bottom edge
+    luxe.vignette(dl, 0, 0, w, h, 70)
+    dpg.draw_rectangle((0, 0), (w, h), fill=(0, 0, 0, 0),
+                       color=(*C["gold_dk"][:3], 190), thickness=1,
+                       parent=dl)
+    luxe.flow_line(dl, 1, h - 3, w - 1, color=C["gold"], alpha=90, h=2,
+                   speed=44)
+
+
+def _rw_header(r):
+    """Cinematic player card — an animated drawlist repainted every frame by
+    draw_scout (splash drift, embers, breathing glows, flowing edge)."""
+    from ui.inhouse import _flush_pending
+    _flush_pending()
+
+    dpg.add_spacer(height=8)
+    try:
+        win_w = dpg.get_item_width(_REPORT_WIN) or 720
+    except Exception:
+        win_w = 720
     with dpg.group(horizontal=True):
-        dpg.add_spacer(width=14)
-        for label, val, col in chips:
-            with dpg.child_window(width=128, height=88, border=True,
-                                   no_scrollbar=True,
-                                   no_scroll_with_mouse=True):
-                dpg.add_spacer(height=4)
-                lt = dpg.add_text(f"  {label}", color=(*C["txt_dim"][:3], 220))
-                if "raj_sb_14" in _F: dpg.bind_item_font(lt, _F["raj_sb_14"])
-                vt = dpg.add_text(f"  {val}", color=col)
-                if "raj_36" in _F: dpg.bind_item_font(vt, _F["raj_36"])
-            dpg.add_spacer(width=8)
-    dpg.add_spacer(height=10)
+        dpg.add_spacer(width=10)
+        dpg.add_drawlist(tag=_CARD_DL, width=max(420, win_w - 44),
+                         height=_CARD_H)
+    _paint_scout_card(r)
+    dpg.add_spacer(height=6)
     dpg.add_separator()
 
 
@@ -1255,6 +1341,8 @@ def draw_scout(dl, vw, vh, fonts=None):
     dpg.draw_rectangle((0,0),(vw,3000), fill=C["bg"], color=(0,0,0,0), parent=dl)
     # V2 ambient — broad cool top-light + page vignette for depth.
     luxe.glow(dl, vw * 0.5, -vh * 0.25, vw * 0.75, (40, 72, 118), 55)
+    luxe.draw_embers(dl, 0, int(vh * 0.35), vw, int(vh * 0.65),
+                     n=14, seed=37, alpha=90)
     # Prevent native content_win scroll from misaligning click zones
     if dpg.does_item_exist("content_win"):
         dpg.set_y_scroll("content_win", 0)
@@ -1279,6 +1367,12 @@ def draw_scout(dl, vw, vh, fonts=None):
         if scout.report_dirty:
             _rebuild_report_window(vw, vh)
             scout.report_dirty = False
+
+    # Animated player card — repaint every frame (splash drift, embers,
+    # breathing glows). Splash downloads land via flush_pending.
+    splash_art.flush_pending()
+    if scout.current_report is not None:
+        _paint_scout_card(scout.current_report)
 
     dx = table_w + 1
     dpg.draw_line((dx, TOP_BAR_H),(dx, vh),

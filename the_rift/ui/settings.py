@@ -93,6 +93,8 @@ REGIONS  = ["na1","euw1","eun1","kr","jp1","br1","la1","la2","oc1","tr1","ru"]
 ROUTINGS = ["americas","europe","asia","sea"]
 
 TOP_BAR_H = 52
+_VP_TITLE_H = 52   # app titlebar height (mirrors main.TITLE_H) — windows use
+                   # viewport coords, so overlay y must include this offset
 PAD       = 28
 
 
@@ -108,13 +110,19 @@ def draw_settings(dl, vw, vh, fonts=None):
         set_fonts(fonts)
     dpg.delete_item(dl, children_only=True)
     dpg.draw_rectangle((0,0),(vw,vh), fill=C["bg"], color=(0,0,0,0), parent=dl)
+    from ui import luxe
+    luxe.glow(dl, vw * 0.5, -vh * 0.25, vw * 0.75, (40, 72, 118), 55)
 
-    # Top bar
-    dpg.draw_rectangle((0,0),(vw,TOP_BAR_H), fill=(*C["panel"][:3],220),
+    # Top bar — V2 broadcast header.
+    dpg.draw_rectangle((0,0),(vw,TOP_BAR_H), fill=C["navy_deep"],
                         color=(0,0,0,0), parent=dl)
+    luxe.vfade(dl, 0, 0, vw, TOP_BAR_H, (44, 74, 116), 46, solid="top")
+    luxe.vfade(dl, 0, TOP_BAR_H - 10, vw, TOP_BAR_H - 1,
+               C["gold"], 26, solid="bottom")
     dpg.draw_line((0,TOP_BAR_H-1),(vw,TOP_BAR_H-1),
-                  color=C["rule_dark"], thickness=1, parent=dl)
-    _txt(dl, PAD, 12, "SETTINGS", (*C["gold"][:3],220), 22, "cinzel_22")
+                  color=(*C["gold_dk"][:3], 200), thickness=1, parent=dl)
+    luxe.glow(dl, PAD + 6, TOP_BAR_H // 2, 26, C["gold"], 55)
+    _txt(dl, PAD, 12, "SETTINGS", (*C["gold_lt"][:3],235), 22, "cinzel_22")
 
     # Settings form lives in a DPG window overlay for native input widgets.
     # Add a left inset so the content doesn't hug the sidebar (looked misplaced).
@@ -126,8 +134,11 @@ def draw_settings(dl, vw, vh, fonts=None):
     if not dpg.does_item_exist(_SETTINGS_WIN):
         _build_settings_window(win_x, win_w, vh)
     else:
-        # Reposition if viewport or sidebar width changed
-        dpg.configure_item(_SETTINGS_WIN, pos=(win_x, TOP_BAR_H),
+        # Reposition if viewport or sidebar width changed. Windows live in
+        # viewport coords — include the app titlebar offset, or the overlay
+        # climbs up and covers the SETTINGS header (the old overlap bug).
+        dpg.configure_item(_SETTINGS_WIN,
+                           pos=(win_x, _VP_TITLE_H + TOP_BAR_H),
                            width=win_w, height=vh-TOP_BAR_H)
 
 
@@ -139,7 +150,7 @@ def _build_settings_window(sb_w, vw, vh):
     _pfp_det["picker"]      = False
 
     with dpg.window(tag=_SETTINGS_WIN,
-                    pos=(sb_w, TOP_BAR_H),
+                    pos=(sb_w, _VP_TITLE_H + TOP_BAR_H),
                     width=vw, height=vh-TOP_BAR_H,
                     no_title_bar=True, no_resize=True,
                     no_move=True, no_focus_on_appearing=True):

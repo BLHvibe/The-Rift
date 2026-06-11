@@ -410,6 +410,8 @@ def draw_inhouse(dl, vw, vh, fonts=None):
     dpg.draw_rectangle((0, 0), (vw, 3000), fill=C["bg"], color=(0,0,0,0), parent=dl)
     # V2 ambient — broad cool top-light so the page has depth under the table.
     luxe.glow(dl, vw * 0.5, -vh * 0.25, vw * 0.75, (40, 72, 118), 55)
+    luxe.draw_embers(dl, 0, int(vh * 0.35), vw, int(vh * 0.65),
+                     n=16, seed=21, alpha=90)
 
     # Keep native window scroll locked — rows are scrolled via scroll_off instead
     if dpg.does_item_exist("content_win"):
@@ -462,7 +464,8 @@ def draw_inhouse(dl, vw, vh, fonts=None):
                           vh - table_top - PAD, vw, vh)
     # Draw top bar AFTER rows so it renders on top of any scrolled-up rows
     _draw_top_bar(dl, vw, header_w)
-    # Cinematic vignette — under the slide-in panels so they stay crisp.
+    # Periodic light sweep + cinematic vignette — under the slide-in panels.
+    luxe.sheen_band(dl, 0, 0, vw, vh, period=21.0, alpha=13, phase=0.3)
     luxe.vignette(dl, 0, 0, vw, vh, 60)
     if detail_open:
         _draw_detail_panel(dl, vw, vh)

@@ -445,6 +445,8 @@ def draw_tierlist(dl, vw, vh, fonts=None):
     dpg.delete_item(dl, children_only=True)
     dpg.draw_rectangle((0,0),(vw,vh), fill=C["bg"], color=(0,0,0,0), parent=dl)
     luxe.glow(dl, vw * 0.5, -vh * 0.25, vw * 0.75, (40, 72, 118), 55)
+    luxe.draw_embers(dl, 0, int(vh * 0.35), vw, int(vh * 0.65),
+                     n=12, seed=41, alpha=85)
     # Prevent native content_win scroll from fighting with scroll_off-based pool scroll
     if dpg.does_item_exist("content_win"):
         dpg.set_y_scroll("content_win", 0)

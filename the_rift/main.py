@@ -342,10 +342,16 @@ def _draw_splash(dl, sp: Splash, vw, vh):
     img_y = max(15, (vh - _IMG_H - 140) // 2)
     cy    = img_y + _IMG_H + 15   # title sits just below the image; other rows offset
 
-    # Full background
+    # Full background — deep navy with stage lighting + rising embers.
     dpg.draw_rectangle((0,0),(vw,vh),
                         fill=(*C["bg"][:3], fa),
                         color=(0,0,0,0), parent=dl)
+    luxe.glow(dl, vw * 0.5, -vh * 0.25, vw * 0.7, (40, 72, 118),
+              int(55 * fa / 255))
+    luxe.glow(dl, vw * 0.5, vh * 1.12, vw * 0.5, C["gold"],
+              int(28 * fa / 255))
+    luxe.draw_embers(dl, 0, int(vh * 0.25), vw, int(vh * 0.75),
+                     n=22, seed=3, alpha=int(120 * fa / 255))
 
     # --- Splash caricature (replaces vector crown) ---
     pulse  = (math.sin(sp.pulse_t) + 1) / 2
@@ -378,20 +384,26 @@ def _draw_splash(dl, sp: Splash, vw, vh):
                             fill=(*C["gold_dk"][:3], ga), parent=dl)
         _draw_crown(dl, crown_cx, crown_cy, crown_sz, ca)
 
-    # --- Title typewriter ---
-    # Anchor tx from the full title width so text stays centered as chars reveal
+    # --- Title typewriter — lit gold texture revealed left→right ---
     shown = sp.TITLE[:sp.title_chars]
     if shown:
-        ta    = int(sp.crown_alpha * fa / 255)
-        tx    = cx - _TITLE_W // 2 + 40
-        # Shadow
-        dpg.draw_text((tx+2, cy+10), shown,
-                      color=(*C["bg"][:3], ta//2), size=52, parent=dl)
-        # Main purple Cinzel
-        t_tag = dpg.draw_text((tx, cy+8), shown,
-                              color=(*C["rift_purple"][:3], ta), size=52, parent=dl)
-        if "cinzel_52" in _FONTS:
-            dpg.bind_item_font(t_tag, _FONTS["cinzel_52"])
+        ta = int(sp.crown_alpha * fa / 255)
+        tag_t, ttw, tth = luxe.lit_title(sp.TITLE, 52)
+        if tag_t:
+            frac_t = len(shown) / max(1, len(sp.TITLE))
+            tx = cx - ttw // 2
+            luxe.glow(dl, cx, cy + 8 + tth / 2, ttw * 0.62,
+                      (212, 178, 118), int(ta * 0.16 * frac_t))
+            dpg.draw_image(tag_t, (tx, cy + 8),
+                           (tx + ttw * frac_t, cy + 8 + tth),
+                           uv_min=(0, 0), uv_max=(frac_t, 1),
+                           color=(255, 255, 255, ta), parent=dl)
+        else:
+            t_tag = dpg.draw_text((cx - _TITLE_W // 2 + 40, cy+8), shown,
+                                  color=(*C["gold_lt"][:3], ta), size=52,
+                                  parent=dl)
+            if "cinzel_52" in _FONTS:
+                dpg.bind_item_font(t_tag, _FONTS["cinzel_52"])
 
     # --- Gold rule ---
     if sp.rule_frac > 0:
@@ -419,10 +431,12 @@ def _draw_splash(dl, sp: Splash, vw, vh):
         crd_y = int(min(cy + 100 + sp.fact_y_off, vh - crd_h - 30))
         fa2   = int(sp.fact_alpha * fa / 255)
 
-        dpg.draw_rectangle((crd_x, crd_y), (crd_x+crd_w, crd_y+crd_h),
-                           fill=(*C["panel"][:3], fa2),
-                           color=(*C["rule_gold"][:3], fa2),
-                           rounding=4, parent=dl)
+        luxe.shadow(dl, crd_x, crd_y, crd_x+crd_w, crd_y+crd_h,
+                    alpha=int(80 * fa2 / 255), spread=12, drop=5)
+        luxe.panel(dl, crd_x, crd_y, crd_x+crd_w, crd_y+crd_h,
+                   (*C["panel"][:3], fa2), corner=6,
+                   border=C["rule_gold"], border_a=min(160, fa2),
+                   sheen=int(40 * fa2 / 255))
         lbl = dpg.draw_text((crd_x+14, crd_y+10), "DID YOU KNOW",
                             color=(*C["gold_dk"][:3], fa2), size=15, parent=dl)
         if "raj_sb_14" in _FONTS: dpg.bind_item_font(lbl, _FONTS["raj_sb_14"])
@@ -432,7 +446,7 @@ def _draw_splash(dl, sp: Splash, vw, vh):
                                color=(*C["txt2"][:3], fa2), size=17, parent=dl)
             if "raj_r_16" in _FONTS: dpg.bind_item_font(ft, _FONTS["raj_r_16"])
 
-    # --- Loading bar ---
+    # --- Loading bar — gold fill with a glowing head ---
     if sp.phase in (SplashPhase.LOADING, SplashPhase.FADE_OUT):
         t    = (time.monotonic() % 1.8) / 1.8
         fill = int(200 * t)
@@ -441,9 +455,13 @@ def _draw_splash(dl, sp: Splash, vw, vh):
                            fill=(0,0,0,0), color=(*C["rule_dark"][:3], fa),
                            rounding=2, parent=dl)
         if fill > 0:
-            dpg.draw_rectangle((cx-100, bar_y),(cx-100+fill, bar_y+4),
-                               fill=(*C["gold_dk"][:3], fa),
-                               color=(0,0,0,0), rounding=2, parent=dl)
+            luxe.hfade(dl, cx-100, bar_y, cx-100+fill, bar_y+4,
+                       C["gold"], int(fa * 0.9), solid="right")
+            luxe.glow(dl, cx-100+fill, bar_y+2, 14, C["gold_lt"],
+                      int(fa * 0.45))
+
+    # Cinematic vignette over the whole splash.
+    luxe.vignette(dl, 0, 0, vw, vh, int(110 * fa / 255))
 
 
 def _wrap(text, w):
@@ -618,8 +636,7 @@ def _draw_ticker(dl, vw):
     dpg.draw_rectangle((0, 0), (vw, TICKER_H),
                        fill=(*C["panel"][:3], 255),
                        color=(0, 0, 0, 0), parent=dl)
-    dpg.draw_line((0, 0), (vw, 0), color=C["rule_dark"],
-                  thickness=1, parent=dl)
+    luxe.flow_line(dl, 0, 0, vw, color=C["gold"], alpha=44, h=2, speed=30)
     # Left "PATCH" pill
     patch = patch_ticker.get_patch_version()
     pill_label = f"PATCH {patch}" if patch else "THE RIFT"
@@ -782,9 +799,11 @@ def main():
     _load_all_textures()
     luxe.ensure_textures()   # V2 cinematic sprite kit (gradients/glows/shadows)
     # Pre-warm the titlebar wordmark + its light-sweep frames so the first
-    # sweep never causes a mid-frame texture-bake hitch.
+    # sweep never causes a mid-frame texture-bake hitch; the 52px splash
+    # title bakes here too so the splash's first frame is instant.
     luxe.lit_title("THE RIFT", 24)
     luxe.lit_title_frames("THE RIFT", 24)
+    luxe.lit_title("THE RIFT", 52)
     setup_theme()
     _FONTS = setup_fonts()
     # Phase 5 — bring the pygame.mixer cue wrapper up and gate it on the
@@ -1018,6 +1037,8 @@ def main():
                      if t.strip()],
             "idx":  -1,                          # -1 = waiting on splash
             "due":  time.monotonic() + 14.0,     # splash hard timeout
+            "splash_due": (time.monotonic() + 2.4
+                           if os.environ.get("RIFT_QA_SPLASH") else None),
         }
         try:
             os.makedirs(_qa_dir, exist_ok=True)
@@ -1064,6 +1085,16 @@ def main():
                 return True
             if _qa is not None:
                 _qa["pending"] = _try_wrap
+        elif base == "scout" and sub == "report":
+            def _try_scout():
+                from ui import scout as _sc
+                if not _sc.scout.players:
+                    return False
+                if not _sc.scout.selected:
+                    _sc.scout.select(_sc.scout.players[0]["name"])
+                return True
+            if _qa is not None:
+                _qa["pending"] = _try_scout
         elif base == "inhouse" and sub:
             try:
                 from ui import inhouse as _ih
@@ -1215,6 +1246,27 @@ def main():
         toast.draw("content_dl", _content_w, _content_h)
         _draw_ticker("ticker_dl", vw)
 
+        # ── Click sparkle — a tiny gold burst wherever the user clicks in
+        # the content area. Universal interaction juice; intensity-gated.
+        if (state.splash_done and anim.intensity > 0.01
+                and dpg.is_mouse_button_clicked(0)):
+            try:
+                _mp  = dpg.get_mouse_pos(local=False)
+                _vpp = dpg.get_viewport_pos()
+                _cmx = _mp[0] - _vpp[0] - _sb_w[0]
+                _cmy = _mp[1] - _vpp[1] - TITLE_H
+                if 0 <= _cmx <= _content_w and 0 <= _cmy <= _content_h:
+                    anim.burst(_cmx, _cmy, C["gold"][:3], count=7,
+                               spread=70, lifetime_ms=430, size=3)
+            except Exception:
+                pass
+        for _ps in anim.active_particles:
+            for _p in _ps.particles:
+                if _p.alive:
+                    dpg.draw_circle((_p.x, _p.y), _p.current_size,
+                                    fill=(*_p.color, _p.alpha),
+                                    color=(0, 0, 0, 0), parent="content_dl")
+
         # Kick off rankings reveal the first time the user actually lands on
         # the Rankings tab. Phase 4 changed the default tab to HOME, so we no
         # longer fire the reveal at splash-done — the slam-impact tween reads
@@ -1304,6 +1356,16 @@ def main():
                     _qa["pending"] = None
             _now = time.monotonic()
             if _qa["idx"] < 0:
+                # Optional splash capture mid-intro (RIFT_QA_SPLASH=1).
+                if (_qa.get("splash_due") and _now >= _qa["splash_due"]
+                        and not state.splash_done):
+                    _qa["splash_due"] = None
+                    try:
+                        dpg.output_frame_buffer(
+                            os.path.join(_qa["dir"], "xx_splash.png"))
+                        print("[qa] captured splash")
+                    except Exception as _e:
+                        print(f"[qa] splash capture failed: {_e}")
                 if not state.splash_done:
                     if splash.loading_done or _now >= _qa["due"]:
                         try:

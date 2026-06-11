@@ -87,6 +87,27 @@ size caused a 1 s hitch, so the hero title stays static). All
 intensity-gated. QA harness: due re-stamped after blocking PNG writes
 (sub-second waits were firing instantly).
 
+## Max-out pass (2026-06-11)
+
+- FIXED Settings overlap bug: the overlay window was positioned at
+  `TOP_BAR_H` in viewport coords without the 52 px app-titlebar offset
+  (Commands had it right), so the widget window covered the drawlist
+  SETTINGS header. Settings also got the V2 broadcast header.
+- Scout per-player card revamped: `_rw_header` is now an animated
+  drawlist (`scout_card_dl`) repainted every frame by `draw_scout` —
+  signature-champ splash (cover-crop + drift), tier-ring avatar glow,
+  lit Rajdhani-gold name, tier/role/freshness line, glass KPI chips,
+  embers, vignette, flowing bottom edge. All widget report sections
+  below it unchanged. QA target: `scout:report`.
+- Startup splash luxe'd: lit gold typewriter title (uv-revealed),
+  stage glows, embers, paneled fun-fact card, gold loading bar with
+  glowing head, vignette. 52 px title pre-warmed at startup.
+- Ambient spread: embers on Inhouse/Scout/Tierlist, light sweep on
+  Inhouse, flowing gold edges on the ticker.
+- Click sparkle: small gold burst at any content-area click (global
+  particle renderer wired into the main loop; intensity-gated).
+- QA harness: `RIFT_QA_SPLASH=1` captures the splash mid-intro.
+
 ## Sequencing
 
 | Phase | Scope |
