@@ -1163,12 +1163,14 @@ def _draw_matrix_drilldown(dl, tx, ty, tw, ty_bot, selected, matrix):
     panel_h = max(0, ty_bot - ty)
     if panel_h < 40:
         return
-    # Frame
-    dpg.draw_rectangle((tx, ty), (tx + tw, ty + panel_h),
-                       fill=(*C["card"][:3], 200),
-                       color=(*C["gold"][:3], 80),
-                       rounding=4, parent=dl)
+    # Frame — V2: shadow + gradient panel, matching the table cards.
+    luxe.shadow(dl, tx, ty, tx + tw, ty + panel_h,
+                alpha=75, spread=12, drop=5)
+    luxe.panel(dl, tx, ty, tx + tw, ty + panel_h,
+               (*C["card"][:3], 220), corner=6,
+               border=C["gold_dk"], border_a=140, sheen=40)
     if not selected:
+        luxe.glow(dl, tx + 22, ty + 20, 18, C["gold"], 55)
         _txt(dl, tx + 16, ty + 14, "CLICK A CELL TO DRILL IN",
              (*C["gold_lt"][:3], 220), 13, "raj_sb_12")
         _txt(dl, tx + 16, ty + 36,
@@ -1190,6 +1192,7 @@ def _draw_matrix_drilldown(dl, tx, ty, tw, ty_bot, selected, matrix):
     total = gv + gw
 
     # Title
+    luxe.glow(dl, tx + 22, ty + 21, 20, C["gold"], 60)
     _txt(dl, tx + 16, ty + 12,
          f"{row_name.upper()}  ›  vs {col_name.upper()}",
          (*C["gold_lt"][:3], 245), 19, "raj_sb_18")
@@ -1217,13 +1220,15 @@ def _draw_matrix_drilldown(dl, tx, ty, tw, ty_bot, selected, matrix):
     bx = tx + 16
     for label, big, sub, color_key in blocks:
         col_main = C.get(color_key, C["gold_lt"])
-        # Block frame
-        dpg.draw_rectangle((bx, block_y), (bx + bw, block_y + block_h),
-                           fill=(*C["bg"][:3], 220),
-                           color=(*C["gold"][:3], 60),
-                           rounding=3, parent=dl)
+        # Block frame — mini glass chip with a glow behind the value.
+        luxe.panel(dl, bx, block_y, bx + bw, block_y + block_h,
+                   (10, 22, 42, 228), corner=5,
+                   border=C["gold_dk"], border_a=110, sheen=32)
         _txt(dl, bx + 10, block_y + 6, label,
              (*C["gold"][:3], 220), 11, "raj_sb_12")
+        big_w = max(16, int(len(str(big)) * 22 * 0.55))
+        luxe.glow(dl, bx + 10 + big_w / 2, block_y + 34, big_w * 0.9,
+                  col_main, 26)
         _txt(dl, bx + 10, block_y + 22, str(big),
              (*col_main[:3], 240), 22, "raj_sb_22")
         _txt(dl, bx + 10, block_y + block_h - 22, str(sub)[:18],

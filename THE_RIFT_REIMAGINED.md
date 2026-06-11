@@ -124,6 +124,10 @@ All grounded in data the backend already has; none assume seasons:
   held its skeleton until all ~50 per-match payloads finished streaming
   (10+ s); now cards render as soon as headers arrive and fill in. QA
   harness supports sub-views (`RIFT_QA_TABS=inhouse:history,...`).
-  Captures: `.claude/qa_screens/v5_ihsub2-3`. Match-detail panel verified
-  by pattern (same surface code as player panel), not screenshotted —
-  worth one live click-through. Remaining: Scout, Feed, Profile, Wrapped.
+  Captures: `.claude/qa_screens/v5_ihsub2-3`.
+- 2026-06-10 — Inhouse tab COMPLETE. H2H drill-down restyled (shadowed
+  panel, glowing pair title, glass stat chips with value glows). QA
+  harness gained `inhouse:matchdetail` / `inhouse:rivalsdrill` targets
+  with retry-until-data pending actions; match-detail panel and drill-down
+  now visually verified (`.claude/qa_screens/v5_ihsub4`). Remaining luxe
+  targets: Scout, Feed, Profile, Wrapped, Tierlist, Commands/Settings.

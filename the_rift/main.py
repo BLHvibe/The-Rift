@@ -1001,9 +1001,13 @@ def main():
 
     def _qa_apply(target):
         """QA harness tab/sub-view switch. Targets look like 'home' or
-        'inhouse:history' / 'inhouse:records' / 'inhouse:detail'."""
+        'inhouse:history' / 'inhouse:detail' / 'inhouse:matchdetail' /
+        'inhouse:rivalsdrill'. Data-dependent selections are stored as a
+        pending action and retried each frame until their data arrives."""
         base, _, sub = target.partition(":")
         state.active_tab = base
+        if _qa is not None:
+            _qa["pending"] = None
         if base == "inhouse" and sub:
             try:
                 from ui import inhouse as _ih
@@ -1011,6 +1015,28 @@ def main():
                     _ih._set_view_mode("leaderboard")
                     if _ih.inhouse.players:
                         _ih.inhouse.select(_ih.inhouse.players[0]["player"])
+                elif sub == "matchdetail":
+                    _ih._set_view_mode("history")
+                    def _try_match(_ih=_ih):
+                        ms = [m for m in (live.match_history or [])
+                              if m.get("id")]
+                        if not ms:
+                            return False
+                        if not _ih.inhouse.selected_match_id:
+                            _ih.inhouse.select_match(ms[0]["id"])
+                        return True
+                    if _qa is not None:
+                        _qa["pending"] = _try_match
+                elif sub == "rivalsdrill":
+                    _ih._set_view_mode("rivalries")
+                    def _try_drill(_ih=_ih):
+                        roster = list(live.players or [])
+                        if len(roster) < 2 or not live.h2h_matrix_loaded:
+                            return False
+                        _ih.inhouse.matrix_selected = (roster[0], roster[1])
+                        return True
+                    if _qa is not None:
+                        _qa["pending"] = _try_drill
                 else:
                     _ih._set_view_mode(sub)
             except Exception as _e:
@@ -1213,6 +1239,13 @@ def main():
 
         # ── QA harness tick — runs after render so captures are current ────
         if _qa is not None:
+            if _qa.get("pending"):
+                try:
+                    if _qa["pending"]():
+                        _qa["pending"] = None
+                except Exception as _e:
+                    print(f"[qa] pending action failed: {_e}")
+                    _qa["pending"] = None
             _now = time.monotonic()
             if _qa["idx"] < 0:
                 if not state.splash_done:
