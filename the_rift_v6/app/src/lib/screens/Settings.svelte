@@ -17,7 +17,7 @@
   <section class="glass card">
     <h3 class="gold-text">DATA</h3>
     <p class="mono">source · the-rift-draft-sync.fly.dev (live)</p>
-    <p class="mono dim">v6.0.0 · draft tool runs on v5 until the port lands</p>
+    <p class="mono dim">v6.1.0 · war room live — deep engine recs still on v5</p>
   </section>
 </div>
 
