@@ -2,6 +2,16 @@
   import { onMount } from 'svelte'
   import { fly, fade } from 'svelte/transition'
   import { api, iconUrl, splashUrl, leagueData } from '../api.js'
+  import ARCH from '../archetypes.json'
+
+  const ARCH_TAGS = {
+    'Teamfight': ['Tank', 'Mage'], 'Pick': ['Assassin', 'Mage'],
+    'Split Push': ['Fighter', 'Assassin'], 'Poke / Siege': ['Mage', 'Marksman'],
+    'Protect the Carry': ['Marksman', 'Support', 'Tank'],
+    'Dive': ['Fighter', 'Assassin', 'Tank'], 'Scaling': ['Marksman', 'Mage'],
+  }
+  let archetype = null, showArch = false
+  let tagsBy = {}
 
   // ── Tournament draft sequence (20 actions, v5 order) ───────────────────
   const SEQ = [
@@ -34,6 +44,7 @@
       const ver = (await (await fetch('https://ddragon.leagueoflegends.com/api/versions.json')).json())[0]
       const cj = await (await fetch(`https://ddragon.leagueoflegends.com/cdn/${ver}/data/en_US/champion.json`)).json()
       allChamps = Object.values(cj.data).map(c => c.name).sort()
+      for (const c of Object.values(cj.data)) tagsBy[c.name] = c.tags ?? []
     } catch (e) { console.error(e) }
     ready = true
   })
@@ -45,6 +56,17 @@
     teams[zone] = [...teams[zone], drag]
     drag = null; teams = teams
   }
+  // Click-to-assign: pool chip → emptier side; team chip → back to pool.
+  function clickAssign(n, from) {
+    for (const k of Object.keys(teams)) teams[k] = teams[k].filter(x => x !== n)
+    if (from === 'pool') {
+      const zone = teams.B.length <= teams.R.length
+        ? (teams.B.length < 5 ? 'B' : 'R') : (teams.R.length < 5 ? 'R' : 'B')
+      teams[zone].push(n)
+    } else teams.pool.push(n)
+    teams = teams
+  }
+  const fits = c => archetype && (tagsBy[c] ?? []).some(t => ARCH_TAGS[archetype]?.includes(t))
 
   // ── Balance meter — elo-style logistic on avg ladder score ────────────
   $: avgB = teams.B.length ? teams.B.reduce((a, n) => a + (scoreBy[n] ?? 50), 0) / teams.B.length : 0
@@ -75,19 +97,22 @@
     const mine = side === 'B' ? teams.B : teams.R
     const t = taken()
     const out = []
+    const w = c => parseFloat(c.wr) * Math.min(1, c.games / 3) *
+                   (fits(c.champ) ? 1.45 : 1)
     for (const name of mine) {
       const best = (champsBy[name] ?? []).filter(c => !t.has(c.champ))
-        .sort((a, b) => (parseFloat(b.wr) * Math.min(1, b.games / 3)) -
-                        (parseFloat(a.wr) * Math.min(1, a.games / 3)))[0]
-      if (best) out.push({ who: name, champ: best.champ, wr: best.wr, g: best.games })
+        .sort((a, b) => w(b) - w(a))[0]
+      if (best) out.push({ who: name, champ: best.champ, wr: best.wr,
+                           g: best.games, fit: fits(best.champ) })
     }
     return out
   }
-  $: bansB = ready && teams.R.length ? banTargets('B') : []
-  $: bansR = ready && teams.B.length ? banTargets('R') : []
-  $: picksB = ready && teams.B.length ? pickIdeas('B') : []
-  $: picksR = ready && teams.R.length ? pickIdeas('R') : []
-  $: _board = board   // reactivity anchor for intel recompute
+  // archetype + board appear in the expressions so Svelte re-runs intel
+  // when either changes (it can't see inside the helper functions).
+  $: picksB = ready && teams.B.length && (archetype, board, true) ? pickIdeas('B') : []
+  $: picksR = ready && teams.R.length && (archetype, board, true) ? pickIdeas('R') : []
+  $: bansB = ready && teams.R.length && (board, true) ? banTargets('B') : []
+  $: bansR = ready && teams.B.length && (board, true) ? banTargets('R') : []
   $: heroPick = board.slice(6).find(Boolean) ?? null
 
   // ── Board interactions ─────────────────────────────────────────────────
@@ -112,8 +137,17 @@
 
   <header class="top">
     <span class="kicker">◆ WAR ROOM</span><div class="rule-fade"></div>
+    <button class="archb" class:set={archetype} on:click={() => showArch = true}>
+      ⬡ {archetype ? ARCH[archetype].label.toUpperCase() : 'CHOOSE ARCHETYPE'}</button>
     <button class="resetb" on:click={() => { board = Array(20).fill(null); cursor = 0 }}>RESET DRAFT</button>
   </header>
+
+  {#if archetype}
+    <div class="archbanner glass" in:fly={{ y: -14, duration: 400 }}>
+      <b class="gold-text">{ARCH[archetype].label.toUpperCase()}</b>
+      <span>{ARCH[archetype].win} · spikes {ARCH[archetype].spike}</span>
+    </div>
+  {/if}
 
   <!-- ── Team builder + balance ─────────────────────────────────────── -->
   <div class="builder">
@@ -121,7 +155,8 @@
          on:dragover|preventDefault on:drop={() => dropTo('B')} role="list">
       <h3>BLUE SIDE</h3>
       {#each teams.B as n (n)}
-        <span class="chip" draggable="true" on:dragstart={() => drag = n}>
+        <span class="chip" draggable="true" role="button" tabindex="0"
+              on:dragstart={() => drag = n} on:click={() => clickAssign(n, 'B')}>
           {n.toUpperCase()}<i>{rolesBy[n] ?? ''} · {Math.round(scoreBy[n] ?? 0)}</i></span>
       {/each}
     </div>
@@ -141,7 +176,8 @@
          on:dragover|preventDefault on:drop={() => dropTo('R')} role="list">
       <h3>RED SIDE</h3>
       {#each teams.R as n (n)}
-        <span class="chip" draggable="true" on:dragstart={() => drag = n}>
+        <span class="chip" draggable="true" role="button" tabindex="0"
+              on:dragstart={() => drag = n} on:click={() => clickAssign(n, 'R')}>
           {n.toUpperCase()}<i>{rolesBy[n] ?? ''} · {Math.round(scoreBy[n] ?? 0)}</i></span>
       {/each}
     </div>
@@ -151,7 +187,8 @@
     <span class="kicker dim">ROSTER — drag five to each side</span>
     <div class="zone">
       {#each teams.pool as n (n)}
-        <span class="chip" draggable="true" on:dragstart={() => drag = n}>{n.toUpperCase()}</span>
+        <span class="chip" draggable="true" role="button" tabindex="0"
+              on:dragstart={() => drag = n} on:click={() => clickAssign(n, 'pool')}>{n.toUpperCase()}</span>
       {/each}
     </div>
   </div>
@@ -173,7 +210,7 @@
         <div class="pickline">
           {#each picks as p}
             <span class="mono" role="button" tabindex="0" on:click={() => assign(p.champ)}>
-              <b>{p.who.toUpperCase()}</b> → {p.champ} ({p.wr})</span>
+              <b>{p.who.toUpperCase()}</b> → {p.champ} ({p.wr}){#if p.fit}<em class="fitstar"> ⬡ fits comp</em>{/if}</span>
           {/each}
         </div>
       </section>
@@ -214,6 +251,33 @@
     </div>
     <div class="mono dim hint">click a slot to target it · search or click intel to assign · right-click clears</div>
   </section>
+
+  {#if showArch}
+    <div class="archveil" transition:fade={{ duration: 250 }}
+         on:click|self={() => showArch = false} role="dialog">
+      <div class="archhead">
+        <h2 class="gold-sweep">CHOOSE YOUR WIN CONDITION</h2>
+        <span class="mono dim">the comp you draft toward — picks re-weight to fit it</span>
+      </div>
+      <div class="archgrid">
+        {#each Object.entries(ARCH) as [key, a], i}
+          <button class="acard glass" class:sel={archetype === key}
+                  in:fly={{ y: 30, duration: 420, delay: 80 + i * 70 }}
+                  on:click={() => { archetype = key; showArch = false }}>
+            <span class="ahex">⬡</span>
+            <b class="gold-text">{key.toUpperCase()}</b>
+            <em>{a.win}</em>
+            <p>{a.plan}</p>
+            <i class="kicker">SPIKES {a.spike.toUpperCase()}</i>
+          </button>
+        {/each}
+        <button class="acard glass none" on:click={() => { archetype = null; showArch = false }}>
+          <span class="ahex">◇</span><b>NO ARCHETYPE</b>
+          <em>Draft on raw player comfort only</em>
+        </button>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -308,9 +372,48 @@
             transform: rotate(-40deg); box-shadow: 0 0 8px var(--loss); }
   .hint { font-size: 10px; margin-top: 10px; }
 
+  .archb { padding: 7px 18px; border-radius: 8px; cursor: pointer;
+    background: linear-gradient(180deg, rgba(200,170,110,.2), rgba(120,90,40,.12));
+    border: 1px solid rgba(200,170,110,.45); color: var(--gold-lt);
+    font-family: var(--font-ui); font-weight: 700; letter-spacing: 2px; font-size: 12px;
+    transition: all .2s; }
+  .archb:hover, .archb.set { border-color: var(--gold-hot);
+    box-shadow: 0 0 18px rgba(200,170,110,.3); }
+  .archbanner { display: flex; align-items: baseline; gap: 16px;
+    padding: 10px 16px; margin-bottom: 14px; }
+  .archbanner b { font-size: 15px; letter-spacing: 2px; }
+  .archbanner span { font-size: 12px; color: var(--txt-dim); }
+  .fitstar { font-style: normal; color: var(--gold-hot);
+    text-shadow: 0 0 8px rgba(200,170,110,.6); }
+
+  .archveil { position: fixed; inset: 0; z-index: 60;
+    background: rgba(4,8,18,.78); backdrop-filter: blur(10px);
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 22px; padding: 30px; overflow-y: auto; }
+  .archhead { text-align: center; }
+  .archhead h2 { font-family: var(--font-display); font-size: 28px; letter-spacing: 6px; }
+  .archgrid { display: grid; grid-template-columns: repeat(4, minmax(220px, 1fr));
+    gap: 14px; max-width: 1280px; }
+  .acard { display: flex; flex-direction: column; gap: 7px; text-align: left;
+    padding: 18px; cursor: pointer; color: var(--txt);
+    font-family: var(--font-ui); transition: all .22s; }
+  .acard:hover { transform: translateY(-5px);
+    border-color: var(--gold-hot);
+    box-shadow: 0 18px 44px rgba(0,0,0,.5), 0 0 30px rgba(200,170,110,.28); }
+  .acard.sel { border-color: var(--gold-hot);
+    box-shadow: 0 0 34px rgba(200,170,110,.4); }
+  .ahex { font-size: 22px; color: var(--gold); opacity: .65; }
+  .acard b { font-size: 16px; letter-spacing: 2px; }
+  .acard em { font-style: normal; font-size: 12px; color: var(--gold-lt); }
+  .acard p { font-size: 11px; line-height: 1.5; color: var(--txt-dim); }
+  .acard i { font-size: 9px; }
+  .acard.none { justify-content: center; align-items: center; text-align: center;
+    color: var(--txt-dim); }
+
   @media (max-width: 1100px) {
     .builder { grid-template-columns: 1fr; }
     .intel { grid-template-columns: 1fr; }
     .seq { grid-template-columns: repeat(10, 1fr); }
+    .archgrid { grid-template-columns: repeat(2, 1fr); }
   }
 </style>

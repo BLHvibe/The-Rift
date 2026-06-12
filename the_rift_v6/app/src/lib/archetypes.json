@@ -1,0 +1,87 @@
+{
+ "Teamfight": {
+  "label": "Teamfight  (AoE + Engage)",
+  "win": "Group at 4 items, force 5v5 around objectives",
+  "spike": "mid-game (3 items)",
+  "plan": "Group 5 around Dragon/Baron at 3 items. Frontline absorbs engage while your AoE casts a fight-winning ult. Avoid scattered fights before the frontline is online \u2014 your win condition is the 5v5.",
+  "target": {
+   "frontline": 1.5,
+   "engage": 1.5,
+   "aoe": 2.0,
+   "peel": 0.5,
+   "scaling": 0.5
+  }
+ },
+ "Pick": {
+  "label": "Pick  (Catch + Burst)",
+  "win": "Catch isolated targets, snowball mid-game off picks",
+  "spike": "mid-game (level 11)",
+  "plan": "Ward deep, then hunt isolated targets across the map. After every pick, contest the next neutral objective 5v4. Don't engage 5v5 \u2014 force the enemy to step alone.",
+  "target": {
+   "burst": 2.0,
+   "engage": 1.5,
+   "mobility": 1.5,
+   "frontline": 0.5
+  }
+ },
+ "Split Push": {
+  "label": "Split Push  (1-3-1)",
+  "win": "Apply side-lane pressure, force 4v4 \u00b1 duelist",
+  "spike": "mid-game with TP/teleport timings",
+  "plan": "Send your duelist top, group 4 mid. Force the enemy to choose: send 2 to stop your splitter (you win mid 4v3), or let them siege (your duelist takes a tower). Track enemy TPs religiously.",
+  "target": {
+   "scaling": 1.0,
+   "peel": 0.5,
+   "range": 1.0,
+   "mobility": 1.0
+  }
+ },
+ "Poke / Siege": {
+  "label": "Poke / Siege  (Range + Zone)",
+  "win": "Whittle HP at objectives, break tower before they engage",
+  "spike": "mid-game with poke items (Manamune/Liandry)",
+  "plan": "Stand at max range and poke before each objective takedown. Once 2+ enemies are sub-50%, force tower / dragon. Never let them flank you \u2014 vision deep, fall back if poke isn't connecting.",
+  "target": {
+   "range": 2.5,
+   "peel": 1.0,
+   "aoe": 1.0,
+   "scaling": 0.5
+  }
+ },
+ "Protect the Carry": {
+  "label": "Protect the Carry  (Shield/Peel)",
+  "win": "Survive to late, hypercarry wins 5v5 with peel",
+  "spike": "late-game (4 items on carry)",
+  "plan": "Farm safely until your carry hits 4 items. Every fight, the team stacks on the carry \u2014 shields, peel, frontline soak. Never split off; protect the win condition at all costs.",
+  "target": {
+   "scaling": 2.0,
+   "peel": 2.5,
+   "frontline": 1.0,
+   "engage": 0.5
+  }
+ },
+ "Dive": {
+  "label": "Dive  (Hard Engage + Collapse)",
+  "win": "Collapse on backline before they can position",
+  "spike": "early-to-mid game (level 6-11)",
+  "plan": "Press the early game hard \u2014 your spike is level 6-11. Force fights before enemy carries hit 2 items. Engage tank flanks behind enemy frontline, burst collapses on the squishies.",
+  "target": {
+   "engage": 2.5,
+   "burst": 1.5,
+   "frontline": 1.0,
+   "mobility": 1.5
+  }
+ },
+ "Scaling": {
+  "label": "Scaling  (Late-game win)",
+  "win": "Survive lane, scale to 4 items, win every 5v5 after 25min",
+  "spike": "late-game (35+ min)",
+  "plan": "Play safe in lane \u2014 losing 0/2/0 with CS is fine. Group only when forced, give up early objectives if the trade is unfair. After 25 minutes you out-stat every comp; force fights then.",
+  "target": {
+   "scaling": 2.5,
+   "peel": 1.5,
+   "aoe": 0.5,
+   "range": 0.5
+  }
+ }
+}
