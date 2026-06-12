@@ -74,7 +74,9 @@ export async function leagueData() {
                avgGold: Math.round(a.gold / Math.max(1, g)),
                avgCs: Math.round(a.cs / Math.max(1, g)) }
     })
-    .sort((x, y) => y.wins - x.wins || y.wr - x.wr)
+    .sort((x, y) =>
+      (y.wins / Math.max(1, y.games)) - (x.wins / Math.max(1, x.games))
+      || y.games - x.games)
 
   // H2H — vs (cross-team) and with (same-team) records per roster pair.
   const h2h = new Map()  // "A|B" -> {vsW, vsG, withW, withG}

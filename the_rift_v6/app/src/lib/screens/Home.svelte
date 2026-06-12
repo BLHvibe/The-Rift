@@ -28,12 +28,16 @@
       const d = await leagueData()
       matches = d.matches.slice(0, 5)
       byMatch = d.byMatch
-      players = d.leaderboard.slice(0, 10)
       sumToDisplay = d.sumToDisplay
       const winners = (byMatch.get(matches[0]?.id) ?? [])
         .filter(p => p.win).map(p => p.champion).filter(Boolean)
       if (winners.length) heroChamp = winners[new Date().getDate() % winners.length]
     } catch (e) { console.error('leagueData', e) }
+    try {
+      // Power rankings = the real ladder (same list as the Rankings tab).
+      const r = await api('/rankings')
+      players = (r?.rankings ?? []).slice(0, 10)
+    } catch (e) { console.error('rankings', e) }
     try {
       const r = await api('/records')
       records = Object.entries(r?.records ?? {}).slice(0, 5)
@@ -82,11 +86,11 @@
       <header><span class="kicker">◆ POWER RANKINGS</span><div class="rule-fade"></div></header>
       {#each players as p, i (p.name)}
         <div class="row" in:fly={{ x: -24, duration: 450, delay: 150 + i * 60 }}>
-          <span class="rank" class:medal={i < 3} data-m={i}>{i + 1}</span>
+          <span class="rank" class:medal={i < 3} data-m={i}>{p.rank ?? i + 1}</span>
           <span class="name">{p.name.toUpperCase()}</span>
-          <div class="bar"><div class="fill" style="width:{p.wr}%"></div></div>
-          <span class="stat" class:up={p.wr >= 52} class:down={p.wr < 48}>{p.wr}%</span>
-          <span class="gp">{p.wins}–{p.losses}</span>
+          <div class="bar"><div class="fill" style="width:{Math.min(100, +p.score)}%"></div></div>
+          <span class="stat gold-text">{Math.round(+p.score)}</span>
+          <span class="gp">{p.tier ?? ''}</span>
         </div>
       {:else}
         <div class="empty">awaiting league data…</div>
