@@ -1,6 +1,6 @@
 <div class="bar glass">
   <span class="mark gold-sweep">THE RIFT</span>
-  <span class="meta">CUSTOMS HQ · V6</span>
+  <span class="meta">CUSTOMS HQ · V6.0.0</span>
   <div class="flow-line edge"></div>
 </div>
 

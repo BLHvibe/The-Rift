@@ -1,7 +1,7 @@
 {
   "name": "the-rift-v6",
   "private": true,
-  "version": "6.0.0-alpha.1",
+  "version": "6.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",

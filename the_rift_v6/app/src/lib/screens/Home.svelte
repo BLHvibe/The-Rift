@@ -4,6 +4,7 @@
   import { cubicOut } from 'svelte/easing'
   import { fly, fade } from 'svelte/transition'
   import { api, splashUrl, iconUrl, leagueData } from '../api.js'
+  import { openScout } from '../stores.js'
 
   const FALLBACK = ['Ahri', 'Jinx', 'Yasuo', 'Ezreal', 'Akali', 'Jhin', 'Sett', 'Thresh']
   let heroChamp = FALLBACK[new Date().getDate() % FALLBACK.length]
@@ -48,6 +49,42 @@
 
   const faces = m => (byMatch.get(m.id) ?? []).slice(0, 10)
   const disp = s => sumToDisplay[s] ?? s
+
+  // ── Bottom widgets: form watch, league bonds, meta board ───────────────
+  let hot = [], cold = [], topDuo = null, topNem = null, meta = []
+  $: if (ready) computeWidgets()
+  let scout = []
+  async function computeWidgets() {
+    try { scout = (await api('/scout'))?.scout ?? [] } catch {}
+    hot = scout.filter(p => p.form === 'HOT').slice(0, 3)
+    cold = scout.filter(p => p.form === 'COLD').slice(0, 3)
+    try {
+      const d = await leagueData()
+      let bd = null, bn = null
+      for (const [k, c] of d.h2h) {
+        const [a, b] = k.split('|')
+        if (a > b) continue            // dedupe pair
+        if (c.withG >= 4) {
+          const r = c.withW / c.withG
+          if (!bd || r > bd.r) bd = { a, b, r, w: c.withW, g: c.withG }
+        }
+        if (c.vsG >= 4) {
+          const r = c.vsW / c.vsG
+          const lop = Math.abs(r - 0.5)
+          if (!bn || lop > bn.lop) bn = { a, b, r, lop, w: c.vsW, g: c.vsG }
+        }
+      }
+      topDuo = bd; topNem = bn
+      const counts = new Map()
+      for (const ps of d.byMatch.values())
+        for (const p of ps) {
+          const c = counts.get(p.champion) ?? { n: 0, w: 0 }
+          c.n++; if (p.win) c.w++
+          counts.set(p.champion, c)
+        }
+      meta = [...counts.entries()].sort((x, y) => y[1].n - x[1].n).slice(0, 8)
+    } catch {}
+  }
 </script>
 
 <div class="home">
@@ -85,7 +122,10 @@
     <section class="glass card" in:fly={{ y: 30, duration: 600, delay: 100 }}>
       <header><span class="kicker">◆ POWER RANKINGS</span><div class="rule-fade"></div></header>
       {#each players as p, i (p.name)}
-        <div class="row" in:fly={{ x: -24, duration: 450, delay: 150 + i * 60 }}>
+        <div class="row click" role="button" tabindex="0"
+             on:click={() => openScout(p.name)}
+             on:keydown={e => e.key === 'Enter' && openScout(p.name)}
+             in:fly={{ x: -24, duration: 450, delay: 150 + i * 60 }}>
           <span class="rank" class:medal={i < 3} data-m={i}>{p.rank ?? i + 1}</span>
           <span class="name">{p.name.toUpperCase()}</span>
           <div class="bar"><div class="fill" style="width:{Math.min(100, +p.score)}%"></div></div>
@@ -135,6 +175,44 @@
       </section>
     </div>
   </div>
+
+  <div class="widgets">
+    <section class="glass card" in:fly={{ y: 30, duration: 600, delay: 460 }}>
+      <header><span class="kicker">◆ FORM WATCH</span><div class="rule-fade"></div></header>
+      {#each hot as p}<div class="frow" role="button" tabindex="0" on:click={() => openScout(p.name)}>
+        <b class="hot">▲ {p.name.toUpperCase()}</b><span class="mono">{p.wr}% · {p.kda} KDA</span></div>{/each}
+      {#each cold as p}<div class="frow" role="button" tabindex="0" on:click={() => openScout(p.name)}>
+        <b class="cold">▼ {p.name.toUpperCase()}</b><span class="mono">{p.wr}% · {p.kda} KDA</span></div>{/each}
+      {#if !hot.length && !cold.length}<div class="empty">everyone is lukewarm</div>{/if}
+    </section>
+
+    <section class="glass card" in:fly={{ y: 30, duration: 600, delay: 560 }}>
+      <header><span class="kicker">◆ LEAGUE BONDS</span><div class="rule-fade"></div></header>
+      {#if topDuo}
+        <div class="bondw"><span class="kicker dim2">BEST DUO</span>
+          <b>{topDuo.a.toUpperCase()} + {topDuo.b.toUpperCase()}</b>
+          <span class="mono up">{topDuo.w}–{topDuo.g - topDuo.w} together</span></div>
+      {/if}
+      {#if topNem}
+        <div class="bondw"><span class="kicker dim2">FIERCEST RIVALRY</span>
+          <b>{topNem.a.toUpperCase()} vs {topNem.b.toUpperCase()}</b>
+          <span class="mono">{topNem.w}–{topNem.g - topNem.w} head-to-head</span></div>
+      {/if}
+      {#if !topDuo && !topNem}<div class="empty">play more customs…</div>{/if}
+    </section>
+
+    <section class="glass card" in:fly={{ y: 30, duration: 600, delay: 660 }}>
+      <header><span class="kicker">◆ META BOARD</span><div class="rule-fade"></div></header>
+      <div class="metagrid">
+        {#each meta as [champ, c]}
+          <div class="mcell" title="{champ} · {c.n} games · {Math.round(100 * c.w / c.n)}% WR">
+            <img src={iconUrl(champ)} alt={champ} loading="lazy" />
+            <span class="mono">{c.n}</span>
+          </div>
+        {/each}
+      </div>
+    </section>
+  </div>
   {/if}
 </div>
 
@@ -183,7 +261,9 @@
   }
   h1 {
     font-family: var(--font-display);
-    font-size: 58px; letter-spacing: 8px; line-height: 1;
+    font-size: clamp(30px, 5.2vw, 58px);
+    letter-spacing: clamp(3px, .7vw, 8px);
+    line-height: 1; white-space: nowrap;
     transition: transform .35s cubic-bezier(.2,.8,.2,1);
   }
   .sub {
@@ -221,6 +301,8 @@
     transition: background .2s, transform .2s;
   }
   .row:hover { background: rgba(200,170,110,.07); transform: translateX(4px); }
+  .row.click { cursor: pointer; }
+  .row.click:hover .name { color: var(--gold-lt); text-shadow: 0 0 12px rgba(200,170,110,.4); }
   .rank { font-family: var(--font-mono); color: var(--txt-faint); font-size: 14px; }
   .rank.medal[data-m="0"] { color: #ffd700; text-shadow: 0 0 12px #ffd700aa; }
   .rank.medal[data-m="1"] { color: #e8e8e8; text-shadow: 0 0 12px #e8e8e8aa; }
@@ -260,4 +342,30 @@
   .when { font-family: var(--font-mono); font-size: 11px; color: var(--txt-faint); }
 
   .empty { color: var(--txt-faint); font-size: 14px; padding: 12px 6px; }
+
+  .widgets { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+             gap: 18px; margin-top: 18px; }
+  .frow { display: flex; justify-content: space-between; align-items: baseline;
+          padding: 7px 8px; border-radius: 8px; cursor: pointer; transition: background .2s; }
+  .frow:hover { background: rgba(200,170,110,.07); }
+  .frow b { font-size: 14px; letter-spacing: 1px; }
+  .hot { color: var(--win); text-shadow: 0 0 10px rgba(110,190,140,.4); }
+  .cold { color: var(--loss); text-shadow: 0 0 10px rgba(224,108,95,.4); }
+  .frow .mono, .bondw .mono { font-family: var(--font-mono); font-size: 11px; color: var(--txt-dim); }
+  .up { color: var(--win); }
+  .dim2 { color: var(--txt-faint); }
+  .bondw { display: flex; flex-direction: column; gap: 2px; padding: 8px 6px; }
+  .bondw b { font-size: 15px; letter-spacing: 1px; color: var(--gold-lt); }
+  .metagrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .mcell { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+  .mcell img { width: 44px; height: 44px; border-radius: 10px;
+               border: 1px solid rgba(200,170,110,.35); transition: transform .18s; }
+  .mcell:hover img { transform: scale(1.15); box-shadow: 0 0 16px rgba(200,170,110,.35); }
+  .mcell span { font-family: var(--font-mono); font-size: 10px; color: var(--txt-faint); }
+
+  @media (max-width: 1080px) {
+    .grid { grid-template-columns: 1fr; }
+    .widgets { grid-template-columns: 1fr; }
+    .row { grid-template-columns: 30px 1fr 80px 48px 60px; }
+  }
 </style>

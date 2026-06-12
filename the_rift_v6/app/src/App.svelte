@@ -12,11 +12,13 @@
   import Feed from './lib/screens/Feed.svelte'
   import Tierlist from './lib/screens/Tierlist.svelte'
   import Draft from './lib/screens/Draft.svelte'
+  import Commands from './lib/screens/Commands.svelte'
   import Settings from './lib/screens/Settings.svelte'
 
   const SCREENS = {
     home: Home, rankings: Rankings, inhouse: Inhouse, scout: Scout,
-    feed: Feed, tierlist: Tierlist, draft: Draft, settings: Settings,
+    feed: Feed, tierlist: Tierlist, draft: Draft, commands: Commands,
+    settings: Settings,
   }
 </script>
 

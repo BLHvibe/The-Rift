@@ -3,6 +3,7 @@
   import { fly, fade, scale } from 'svelte/transition'
   import { backOut } from 'svelte/easing'
   import { api, splashUrl } from '../api.js'
+  import { openScout } from '../stores.js'
 
   const TIER_COLORS = {
     Challenger: '#f0c882', Grandmaster: '#dc6e5a', Master: '#af6edc',
@@ -60,7 +61,10 @@
     <section class="glass table">
       <header><span class="kicker">◆ FULL STANDINGS</span><div class="rule-fade"></div></header>
       {#each rest as p, i (p.name)}
-        <div class="row" in:fly={{ x: -30, duration: 420, delay: 900 + i * 55 }}>
+        <div class="row" role="button" tabindex="0"
+             on:click={() => openScout(p.name)}
+             on:keydown={e => e.key === 'Enter' && openScout(p.name)}
+             in:fly={{ x: -30, duration: 420, delay: 900 + i * 55 }}>
           <span class="rk">#{p.rank}</span>
           <span class="dot" style="background:{tc(p.tier)}; box-shadow:0 0 10px {tc(p.tier)}"></span>
           <span class="nm">{p.name.toUpperCase()}</span>
@@ -120,7 +124,15 @@
     padding: 9px 10px; border-radius: 8px;
     transition: background .2s, transform .2s;
   }
+  .row { cursor: pointer; }
   .row:hover { background: rgba(200,170,110,.07); transform: translateX(4px); }
+  .row:hover .nm { color: var(--gold-lt); text-shadow: 0 0 12px rgba(200,170,110,.4); }
+  @media (max-width: 980px) {
+    .podium { grid-template-columns: 1fr; align-items: stretch; }
+    .card, .card.champ { height: 200px; }
+    .row { grid-template-columns: 40px 12px 1fr 90px 56px 60px 48px; }
+    .row .bar { display: none; }
+  }
   .rk { font-family: var(--font-mono); color: var(--txt-faint); font-size: 13px; }
   .dot { width: 9px; height: 9px; border-radius: 50%; }
   .nm { font-weight: 700; font-size: 16px; letter-spacing: 1px; }

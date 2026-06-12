@@ -2,6 +2,7 @@
   import { onMount } from 'svelte'
   import { fly, fade } from 'svelte/transition'
   import { leagueData, iconUrl } from '../api.js'
+  import { openScout } from '../stores.js'
 
   let view = 'leader'
   let lb = [], matches = [], byMatch = new Map(), h2h = new Map(), roster = []
@@ -51,7 +52,9 @@
       {#each lb as p, i (p.name)}
         <div class="lrow" in:fly={{ x: -26, duration: 400, delay: i * 45 }}>
           <span class="rk" class:medal={i < 3} data-m={i}>{i + 1}</span>
-          <span class="nm">{p.name.toUpperCase()}</span>
+          <span class="nm click" role="button" tabindex="0"
+                on:click={() => openScout(p.name)}
+                on:keydown={e => e.key === 'Enter' && openScout(p.name)}>{p.name.toUpperCase()}</span>
           <span class="mono">{p.games}</span>
           <span class="mono">{p.wins}–{p.losses}</span>
           <span class="wrcell">
@@ -159,6 +162,10 @@
   .rk.medal[data-m="1"] { color: #e8e8e8; }
   .rk.medal[data-m="2"] { color: #cd7f32; }
   .nm { font-weight: 700; font-size: 16px; letter-spacing: 1px; }
+  .nm.click { cursor: pointer; }
+  .nm.click:hover { color: var(--gold-lt); text-shadow: 0 0 12px rgba(200,170,110,.4); }
+  .card { overflow-x: auto; }
+  @media (max-width: 1100px) { .lrow { min-width: 860px; } }
   .mono { font-family: var(--font-mono); font-size: 12px; color: var(--txt-dim); }
   .kda { color: #9eb4c8; }
   .wrcell b { display: block; font-size: 14px; }

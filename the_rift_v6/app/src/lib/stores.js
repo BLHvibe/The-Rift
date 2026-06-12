@@ -17,6 +17,13 @@ export function navigate(to) {
   setTimeout(() => screen.set(to), 140)
 }
 
+// Cross-screen player focus — set + navigate('scout') from any leaderboard.
+export const selectedPlayer = writable(null)
+export function openScout(name) {
+  selectedPlayer.set(name)
+  navigate('scout')
+}
+
 export const TABS = [
   { id: 'home',     label: 'HOME' },
   { id: 'rankings', label: 'RANKINGS' },
@@ -25,5 +32,6 @@ export const TABS = [
   { id: 'inhouse',  label: 'INHOUSE' },
   { id: 'tierlist', label: 'TIER LIST' },
   { id: 'feed',     label: 'FEED' },
+  { id: 'commands', label: 'COMMANDS' },
   { id: 'settings', label: 'SETTINGS' },
 ]

@@ -2,20 +2,77 @@
   import { onMount } from 'svelte'
   import { fly, fade } from 'svelte/transition'
   import { api, splashUrl, iconUrl, leagueData } from '../api.js'
+  import { selectedPlayer } from '../stores.js'
 
   let players = [], sel = null, lbByName = {}
+  let champsBy = {}, rolesBy = {}, histBy = {}, league = null
   let ready = false
 
   onMount(async () => {
     try {
-      const [s, d] = await Promise.all([api('/scout'), leagueData()])
+      const [s, d, ic, pr, rh] = await Promise.all([
+        api('/scout'), leagueData(),
+        api('/inhouse-champs'), api('/primary-roles'), api('/rank-history'),
+      ])
       players = s?.scout ?? []
+      league = d
       for (const p of d.leaderboard) lbByName[p.name] = p
-      sel = players[0] ?? null
+      champsBy = ic?.inhouse_champs ?? {}
+      rolesBy = pr?.primary_roles ?? {}
+      histBy = rh?.rank_history ?? {}
+      const want = $selectedPlayer
+      sel = (want && players.find(p => p.name === want)) || players[0] || null
+      selectedPlayer.set(null)
     } catch (e) { console.error(e) }
     ready = true
   })
   const formColor = f => f === 'HOT' ? 'var(--win)' : f === 'COLD' ? 'var(--loss)' : 'var(--txt-dim)'
+
+  // Last-10 customs form from export (matches sorted newest-first).
+  function lastForm(name) {
+    if (!league) return []
+    const out = []
+    for (const m of league.matches) {
+      const row = (league.byMatch.get(m.id) ?? [])
+        .find(p => league.sumToDisplay[p.player] === name)
+      if (row) out.push(!!row.win)
+      if (out.length >= 10) break
+    }
+    return out
+  }
+  // Best duo + nemesis from the h2h map (min 3 shared games).
+  function bonds(name) {
+    if (!league) return {}
+    let duo = null, nem = null
+    for (const [k, c] of league.h2h) {
+      const [a, b] = k.split('|')
+      if (a !== name) continue
+      if (c.withG >= 3) {
+        const r = c.withW / c.withG
+        if (!duo || r > duo.r) duo = { who: b, r, w: c.withW, g: c.withG }
+      }
+      if (c.vsG >= 3) {
+        const r = c.vsW / c.vsG
+        if (!nem || r < nem.r) nem = { who: b, r, w: c.vsW, g: c.vsG }
+      }
+    }
+    return { duo, nem }
+  }
+  // Rank-history sparkline points (SVG polyline, 220x44 box).
+  function spark(name) {
+    const h = histBy[name] ?? []
+    if (h.length < 2) return null
+    const vals = h.map(p => p.value)
+    const min = Math.min(...vals), max = Math.max(...vals)
+    const span = Math.max(1, max - min)
+    return vals.map((v, i) =>
+      `${(i / (vals.length - 1)) * 220},${40 - ((v - min) / span) * 36 + 2}`
+    ).join(' ')
+  }
+  $: champPool = sel ? (champsBy[sel.name] ?? []).slice(0, 6) : []
+  $: form = sel ? lastForm(sel.name) : []
+  $: bond = sel ? bonds(sel.name) : {}
+  $: sparkPts = sel ? spark(sel.name) : null
 </script>
 
 <div class="wrap">
@@ -44,7 +101,8 @@
         {/if}
         <div class="veil"></div>
         <div class="inner">
-          <div class="kick">SCOUTING REPORT · {sel.tier?.toUpperCase()}</div>
+          <div class="kick">SCOUTING REPORT · {sel.tier?.toUpperCase()}
+            {#if rolesBy[sel.name]} · {rolesBy[sel.name]} MAIN{/if}</div>
           <h1 class="gold-sweep">{sel.name.toUpperCase()}</h1>
           <div class="chips">
             <div class="chip"><b>{Math.round(sel.score)}</b><span>SCORE</span></div>
@@ -79,6 +137,49 @@
             <span><b class:up={ih.wr >= 52} class:down={ih.wr < 48}>{ih.wr}%</b> win rate</span>
             <span><b>{ih.kda}</b> KDA</span>
             <span><b>{ih.avgDmg.toLocaleString()}</b> avg dmg</span>
+          </div>
+          {#if form.length}
+            <div class="formrow">
+              <span class="kicker dim2">LAST {form.length}</span>
+              {#each form as w}<i class="fdot" class:w></i>{/each}
+            </div>
+          {/if}
+          {#if bond.duo || bond.nem}
+            <div class="bonds mono">
+              {#if bond.duo}<span>BEST DUO · <b>{bond.duo.who.toUpperCase()}</b> {bond.duo.w}–{bond.duo.g - bond.duo.w} together</span>{/if}
+              {#if bond.nem}<span>NEMESIS · <b>{bond.nem.who.toUpperCase()}</b> {bond.nem.w}–{bond.nem.g - bond.nem.w} against</span>{/if}
+            </div>
+          {/if}
+        </div>
+      {/if}
+
+      {#if champPool.length}
+        <div class="glass pool">
+          <header><span class="kicker">◆ CUSTOMS CHAMP POOL</span><div class="rule-fade"></div></header>
+          {#each champPool as c, i (c.champ)}
+            <div class="crow" in:fly={{ x: -18, duration: 350, delay: 80 + i * 60 }}>
+              <img src={iconUrl(c.champ)} alt={c.champ} />
+              <b>{c.champ}</b>
+              <span class="mono">{c.games} GP</span>
+              <span class="mono">{c.wins}–{c.losses}</span>
+              <div class="cbar"><em style="width:{parseFloat(c.wr)}%"></em></div>
+              <span class="cwr" class:up={parseFloat(c.wr) >= 52} class:down={parseFloat(c.wr) < 48}>{c.wr}</span>
+              <span class="mono">{c.kda} KDA</span>
+            </div>
+          {/each}
+        </div>
+      {/if}
+
+      {#if sparkPts}
+        <div class="glass pool">
+          <header><span class="kicker">◆ RANK JOURNEY</span><div class="rule-fade"></div></header>
+          <svg viewBox="0 0 220 44" class="sparksvg" preserveAspectRatio="none">
+            <polyline points={sparkPts} fill="none" stroke="var(--gold)"
+                      stroke-width="2" stroke-linejoin="round"
+                      style="filter: drop-shadow(0 0 4px rgba(200,170,110,.7))" />
+          </svg>
+          <div class="mono dim2" style="font-size:10px">
+            {(histBy[sel.name] ?? []).at(-1)?.tier ?? ''} {(histBy[sel.name] ?? []).at(-1)?.division ?? ''} — last {histBy[sel.name]?.length ?? 0} samples
           </div>
         </div>
       {/if}
@@ -149,6 +250,28 @@
                      box-shadow: 0 0 24px rgba(200,170,110,.35); }
   .champ span { font-size: 13px; font-weight: 600; }
   .champ em { font-style: normal; font-size: 8px; color: var(--loss); }
-  .statline { display: flex; gap: 26px; font-size: 12px; color: var(--txt-dim); }
+  .statline { display: flex; gap: 26px; font-size: 12px; color: var(--txt-dim); flex-wrap: wrap; }
   .statline b { color: var(--txt); font-size: 15px; }
+  .formrow { display: flex; align-items: center; gap: 5px; margin-top: 12px; }
+  .dim2 { color: var(--txt-faint); }
+  .fdot { width: 12px; height: 12px; border-radius: 50%;
+          background: rgba(224,108,95,.8); box-shadow: 0 0 8px rgba(224,108,95,.4); }
+  .fdot.w { background: var(--win); box-shadow: 0 0 8px rgba(110,190,140,.5); }
+  .bonds { display: flex; gap: 24px; margin-top: 12px; font-size: 11px;
+           color: var(--txt-dim); flex-wrap: wrap; }
+  .bonds b { color: var(--gold-lt); }
+  .crow { display: grid; grid-template-columns: 34px 1fr 50px 50px 90px 52px 70px;
+          align-items: center; gap: 10px; padding: 6px 4px; border-radius: 8px;
+          transition: background .2s; }
+  .crow:hover { background: rgba(200,170,110,.06); }
+  .crow img { width: 30px; height: 30px; border-radius: 7px;
+              border: 1px solid rgba(200,170,110,.3); }
+  .crow b { font-size: 14px; }
+  .cbar { height: 4px; border-radius: 2px; background: rgba(255,255,255,.06); }
+  .cbar em { display: block; height: 100%; border-radius: 2px;
+             background: linear-gradient(90deg, var(--gold-dk), var(--gold-hot));
+             box-shadow: 0 0 8px rgba(200,170,110,.5); }
+  .cwr { font-weight: 700; font-size: 12px; text-align: right; }
+  .sparksvg { width: 100%; height: 52px; margin-bottom: 6px; }
+  @media (max-width: 1100px) { .wrap { grid-template-columns: 1fr; } }
 </style>
