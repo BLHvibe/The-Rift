@@ -17,7 +17,7 @@
   <section class="glass card">
     <h3 class="gold-text">DATA</h3>
     <p class="mono">source · the-rift-draft-sync.fly.dev (live)</p>
-    <p class="mono dim">v6.2.0 · war room + archetypes live</p>
+    <p class="mono dim">v6.3.0 · live engine · multiplayer draft · gated tier list</p>
   </section>
 </div>
 

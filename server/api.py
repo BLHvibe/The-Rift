@@ -742,9 +742,14 @@ async def api_engine_archetype_pivot_check(payload: Dict[str, Any]) -> JSONRespo
 async def api_engine_predict_enemy_next(payload: Dict[str, Any]) -> JSONResponse:
     _require_engine()
     p = payload or {}
+    # predict_enemy_next_pick derives the enemy from state.our_side — the
+    # function has no our_side kwarg (passing one 500'd this endpoint since
+    # Phase 2). Honor the caller's our_side by writing it onto the state.
+    state = _state_from(p)
+    if p.get("our_side"):
+        state.our_side = str(p["our_side"])
     out = _board.predict_enemy_next_pick(
-        _state_from(p),
-        our_side=str(p.get("our_side") or "BLUE"),
+        state,
         inhouse_champs=p.get("inhouse_champs") or {},
         primary_roles=p.get("primary_roles") or {},
         scout_champs=p.get("scout_champs"),

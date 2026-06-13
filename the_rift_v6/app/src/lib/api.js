@@ -11,6 +11,16 @@ export async function api(path, { ttl = 60_000 } = {}) {
   return v
 }
 
+export async function post(path, body = {}) {
+  const r = await fetch(`/api${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!r.ok) throw new Error(`${path} → ${r.status}`)
+  return r.json()
+}
+
 // ── ddragon helpers ─────────────────────────────────────────────────────
 const SPECIAL = {
   "wukong": "MonkeyKing", "kai'sa": "Kaisa", "kha'zix": "Khazix",

@@ -1,14 +1,19 @@
 <script>
   import { onMount } from 'svelte'
   import { fly, fade } from 'svelte/transition'
-  import { leagueData, iconUrl } from '../api.js'
+  import { leagueData, iconUrl, api } from '../api.js'
   import { openScout } from '../stores.js'
+  import MatchDetail from '../components/MatchDetail.svelte'
 
   let view = 'leader'
   let lb = [], matches = [], byMatch = new Map(), h2h = new Map(), roster = []
   let sumToDisplay = {}
   let selPair = null
   let ready = false
+  let openMatch = null      // match id for the detail overlay
+
+  // Records + predictions leaderboard — lazy-loaded on first RECORDS view.
+  let records = null, predLb = null
 
   onMount(async () => {
     try {
@@ -19,6 +24,42 @@
     } catch (e) { console.error(e) }
     ready = true
   })
+
+  async function loadRecords() {
+    view = 'records'; selPair = null
+    if (records) return
+    try {
+      const [r, pl] = await Promise.all([
+        api('/records', { ttl: 120_000 }),
+        api('/predictions/leaderboard?limit=20', { ttl: 60_000 }),
+      ])
+      records = r?.records ?? {}
+      predLb = pl?.leaderboard ?? []
+    } catch (e) { console.error(e) }
+  }
+
+  // Friendly labels + which records carry a champion/match link.
+  const REC_LABELS = {
+    most_kills: 'Most Kills', most_assists: 'Most Assists',
+    most_damage: 'Most Damage', most_gold: 'Most Gold',
+    most_cs: 'Most CS', most_vision: 'Most Vision',
+    best_kda_game: 'Best KDA (game)', longest_match: 'Longest Match',
+    shortest_match: 'Shortest Match', biggest_blowout: 'Biggest Blowout',
+    longest_win_streak: 'Longest Win Streak',
+    longest_loss_streak: 'Longest Loss Streak', most_games: 'Most Games',
+  }
+  const recValue = (k, r) => {
+    const v = r?.value
+    if (k === 'longest_match' || k === 'shortest_match')
+      return `${Math.floor((v ?? 0) / 60)}m`
+    if (k === 'most_damage' || k === 'most_gold')
+      return (v ?? 0).toLocaleString()
+    if (k === 'best_kda_game') return (v ?? 0).toFixed?.(2) ?? v
+    return v
+  }
+  $: recordList = records
+    ? Object.entries(records).filter(([, r]) => r).map(([k, r]) => ({ k, ...r }))
+    : []
 
   const disp = s => sumToDisplay[s] ?? s
   const team = (m, side) => (byMatch.get(m.id) ?? []).filter(p => p.team === side)
@@ -40,6 +81,7 @@
       {#each [['leader','LEADERBOARD'],['history','HISTORY'],['rivals','RIVALS']] as [id, lbl]}
         <button class:active={view === id} on:click={() => { view = id; selPair = null }}>{lbl}</button>
       {/each}
+      <button class:active={view === 'records'} on:click={loadRecords}>RECORDS</button>
     </div>
   </header>
 
@@ -72,7 +114,10 @@
   {:else if ready && view === 'history'}
     <div class="feedcol">
       {#each matches as m, i (m.id)}
-        <section class="glass match" in:fly={{ y: 26, duration: 450, delay: Math.min(i, 8) * 70 }}>
+        <section class="glass match click" role="button" tabindex="0"
+                 on:click={() => openMatch = m.id}
+                 on:keydown={e => e.key === 'Enter' && (openMatch = m.id)}
+                 in:fly={{ y: 26, duration: 450, delay: Math.min(i, 8) * 70 }}>
           <div class="mhead">
             <span class="mono dim">{(m.started_at ?? '').slice(0, 10)} · {dur(m.duration)}</span>
             <span class="winner" class:blue={m.winner === 'blue'} class:red={m.winner === 'red'}>
@@ -125,8 +170,48 @@
         <div class="drill dim">Row beats column — click any cell to drill in.</div>
       {/if}
     </section>
+
+  {:else if view === 'records'}
+    {#if !records}
+      <p class="dim mono load">loading the record book…</p>
+    {:else}
+      <div class="recgrid">
+        {#each recordList as r, i (r.k)}
+          <button class="rec glass" class:click={r.match_id}
+                  on:click={() => r.match_id && (openMatch = r.match_id)}
+                  in:fly={{ y: 20, duration: 380, delay: Math.min(i, 12) * 45 }}>
+            <span class="rlabel kicker">{REC_LABELS[r.k] ?? r.k}</span>
+            <b class="rval gold-text">{recValue(r.k, r)}</b>
+            <span class="rwho">{(r.player ?? '').toUpperCase()}
+              {#if r.champion}<i>· {r.champion}</i>{/if}</span>
+            {#if r.started_at}<span class="rdate mono dim2">{r.started_at.slice(0, 10)}</span>{/if}
+          </button>
+        {/each}
+      </div>
+
+      {#if predLb?.length}
+        <section class="glass predlb" in:fade={{ duration: 300 }}>
+          <header><span class="kicker">◆ PREDICTION ACCURACY</span><div class="rule-fade"></div></header>
+          {#each predLb as p, i (p.voter)}
+            <div class="prow">
+              <span class="mono dim2">{i + 1}</span>
+              <b class="click" role="button" tabindex="0"
+                 on:click={() => openScout(p.voter)}
+                 on:keydown={e => e.key === 'Enter' && openScout(p.voter)}>{(p.voter ?? '').toUpperCase()}</b>
+              <span class="mono">{p.correct ?? 0}/{p.total ?? 0}</span>
+              <span class="acc"><em style="width:{((p.correct ?? 0) / Math.max(1, p.total ?? 1)) * 100}%"></em></span>
+              <span class="mono gold-text">{Math.round(((p.correct ?? 0) / Math.max(1, p.total ?? 1)) * 100)}%</span>
+            </div>
+          {/each}
+        </section>
+      {/if}
+    {/if}
   {/if}
 </div>
+
+{#if openMatch}
+  <MatchDetail matchId={openMatch} {sumToDisplay} on:close={() => openMatch = null} />
+{/if}
 
 <style>
   .wrap { height: 100%; overflow-y: auto; padding: 26px; }
@@ -178,6 +263,39 @@
 
   .feedcol { display: flex; flex-direction: column; gap: 14px; }
   .match { padding: 14px 18px; }
+  .match.click { cursor: pointer; transition: transform .18s, box-shadow .18s; }
+  .match.click:hover { transform: translateY(-2px);
+    box-shadow: 0 10px 30px rgba(0,0,0,.4), 0 0 20px rgba(200,170,110,.12); }
+
+  .load { padding: 40px; text-align: center; }
+  .recgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 14px; }
+  .rec { display: flex; flex-direction: column; gap: 5px; padding: 16px 18px;
+    text-align: left; border: 1px solid rgba(200,170,110,.18);
+    background: rgba(255,255,255,.02); color: var(--txt); font-family: var(--font-ui); }
+  .rec.click { cursor: pointer; transition: all .2s; }
+  .rec.click:hover { transform: translateY(-3px); border-color: var(--gold-hot);
+    box-shadow: 0 12px 30px rgba(0,0,0,.4), 0 0 22px rgba(200,170,110,.2); }
+  .rlabel { font-size: 10px; }
+  .rval { font-size: 28px; font-family: var(--font-display); letter-spacing: 1px; }
+  .rwho { font-size: 13px; font-weight: 700; letter-spacing: 1px; }
+  .rwho i { font-style: normal; color: var(--txt-faint); font-weight: 400; font-size: 11px; }
+  .rdate { font-size: 10px; }
+  .dim2 { color: var(--txt-faint); }
+
+  .predlb { margin-top: 18px; padding: 16px 20px; }
+  .predlb header { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+  .prow { display: grid; grid-template-columns: 28px 1.4fr 64px 1fr 56px;
+    align-items: center; gap: 12px; padding: 6px 8px; border-radius: 8px; }
+  .prow:hover { background: rgba(200,170,110,.06); }
+  .prow b { font-size: 14px; letter-spacing: 1px; }
+  .prow .click { cursor: pointer; }
+  .prow .click:hover { color: var(--gold-lt); }
+  .acc { display: block; height: 5px; border-radius: 3px;
+    background: rgba(255,255,255,.06); overflow: hidden; }
+  .acc em { display: block; height: 100%; border-radius: 3px;
+    background: linear-gradient(90deg, var(--gold-dk), var(--gold-hot));
+    box-shadow: 0 0 8px rgba(200,170,110,.5); }
   .mhead { display: flex; justify-content: space-between; margin-bottom: 10px; }
   .dim { color: var(--txt-faint); font-size: 11px; }
   .winner { font-family: var(--font-mono); font-size: 11px; letter-spacing: 2px; }
