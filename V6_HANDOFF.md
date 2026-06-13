@@ -30,9 +30,12 @@ package:  cd ../desktop; rm -r web; cp -r ../app/dist web
 smoke:    Start-Process dist\TheRiftV6.exe -ArgumentList "--headless" -PassThru -Wait
           → ExitCode 0 = server+bundle+live proxy OK
 release:  GitHub API w/ PAT in memory `reference_github_token` (expires
-          ~2026-08-05). Repo BLHvibe/The-Rift. Keep v6 releases
-          prerelease=$true — /releases/latest must stay v5.0.0 because the
-          v5 auto-updater reads it; flip only when the user says so.
+          ~2026-08-05). Repo BLHvibe/The-Rift. As of v6.3.0 (2026-06-13)
+          /releases/latest = v6.3.0 — v6 IS the standard now. The v5
+          updater (reader.check_for_update) is only a soft toast that opens
+          the download URL; TheRiftV6.exe installs ALONGSIDE v5, never
+          overwrites it. New v6 releases: bump version, tag at the code
+          commit, make_latest=true (unless explicitly shipping a test build).
 ```
 
 Versions live in THREE places: `app/package.json`, `Titlebar.svelte`
@@ -40,14 +43,19 @@ Versions live in THREE places: `app/package.json`, `Titlebar.svelte`
 
 ## Released state
 
-- **v5.0.0** — latest (auto-update target). DPG app, full draft engine.
-- v6.0.0 / v6.1.0 / v6.2.0 — pre-releases, asset `TheRiftV6.exe`.
-- **v6.3.0** — BUILT LOCALLY, NOT RELEASED (awaiting a real draft-night
-  verification). Full v5 parity: war room on the real engine + multiplayer
-  WS sync + gated tier list + desktop sidecar (LCU/Riot) + inhouse match
-  detail/predictions/records + hotkeys + update pill. See the
-  `project-v6-parity-audit` memory and `the_rift_v6/PROTOCOLS.md`.
+- **v6.3.0 — LATEST / the standard** (released 2026-06-13, commit a5432fa).
+  Full v5 parity: war room on the real engine + multiplayer WS sync + gated
+  tier list + desktop sidecar (LCU/Riot) + inhouse match detail/predictions/
+  records + hotkeys + update pill. See `project-v6-parity-audit` memory and
+  `the_rift_v6/PROTOCOLS.md`. Asset: `TheRiftV6.exe` (25.4 MB).
+- v5.0.0 — superseded as latest, but still installed on every machine
+  (separate exe) as the instant fallback. DPG app, full draft engine.
+- v6.0.0 / v6.1.0 / v6.2.0 — older pre-releases.
 - Tags must point at the commit containing the code (see gotchas).
+- **Not yet shaken down in a real two-machine draft night** — and one path
+  unverified inside the frozen exe: Commands → FETCH RANKS / RUN SCOUT (lazy
+  import of the bundled v5 `data` pkg; mounts fine, an actual run wasn't
+  exercised frozen). LOG GAME + the engine/tier/draft paths ARE verified.
 
 ## App structure (`the_rift_v6/app/src`)
 
@@ -144,9 +152,9 @@ kills/deaths/assists, cs, gold, damage, vision.
 5. **Wrapped** as a v6 set piece — still unported (v5 `ui/wrapped.py`).
    Share cards (v5 `data/share_cards.py`) also unported — both good next.
 6. **Tauri shell** (optional; needs rustup + MSVC — not installed).
-7. **Flip v6 to latest** when the user says it survived a draft night;
-   v5 stays downloadable. Run a real session FIRST (LCU gate, live WS
-   between two machines) before releasing.
+7. ~~Flip v6 to latest~~ — DONE 2026-06-13. v6.3.0 is the standard. Still
+   worth a real two-machine draft-night shakedown + a frozen-exe FETCH
+   RANKS / RUN SCOUT run to close the last unverified path.
 
 Remaining v5-only nicety not yet in v6: profile-icon upload (Settings),
 audio cues (user said NO audio — skip), Wrapped, share cards.
